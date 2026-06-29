@@ -426,7 +426,19 @@ int splash_run(const splash_options_t *opt)
 
             ai_tick(frame, inp);
             physics_set_current_frame(frame);
+            bool was_dying = physics_is_dying();
             physics_tick(inp);
+            /* Karnov только что вошёл в death-state (контакт с водой):
+             * запускаем death-music (track 5, не зацикленную). По окончании
+             * анимации physics возвращает is_dying=false, и мы возобновляем
+             * in-game music (track 0). */
+            if (audio_running) {
+                if (physics_just_died()) {
+                    audio_play_music(5, /*loop=*/false);
+                } else if (was_dying && !physics_is_dying()) {
+                    audio_play_music(0, /*loop=*/true);
+                }
+            }
             ai_try_pickup(physics_get_x(), physics_get_y());
 
             /* Boss death → scroll picked → переход на LEVEL2 (или loop). */

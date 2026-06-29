@@ -122,6 +122,20 @@ static u16  s_fire_cooldown       = 0;
  * чтобы post-OPT-handling корректно выбирать ветку физики. */
 static bool s_flying              = false;
 
+/* Spawn-точка уровня — кэшируется physics_reset, используется для respawn
+ * после death-анимации (контакт с водой). */
+static int  s_spawn_x             = 137;
+static int  s_spawn_y             = 108;
+
+/* Death state. Triggered by water-contact. Karnov играет 4-кадровую
+ * анимацию (K_DIE_1..4) DEATH_LEN тиков (~2.2 sec @ 27.5 FPS),
+ * после чего respawn'ится в s_spawn_x/y. game.c (через physics_just_died)
+ * проигрывает death-music (track 5) на старте анимации. */
+static bool s_dying               = false;
+static u16  s_dying_frame         = 0;
+static bool s_just_died_pulse     = false;
+#define DEATH_LEN  60   /* ≈ 2.2 sec @ 27.5 FPS */
+
 /* Sprite-slot mapping для Karnov (пользователь-verified из оригинала
  * KARNOV.EXE, 2026-05-27). Спрайты содержатся как РАЗДЕЛЬНЫЕ left/right
  * пары — не нужно flip'ать при рендере: pick_sprite_id возвращает уже
@@ -162,6 +176,8 @@ enum {
     K_CROUCH_L = 111,
     K_JUMP_L = 112,
     K_FIRE_L = 113,
+    /* DEATH — 4-кадровая анимация утопления/гибели. */
+    K_DIE_1 = 114, K_DIE_2 = 115, K_DIE_3 = 116, K_DIE_4 = 117,
     /* FALL — отличаются от JUMP'ов: используются при vy_q4 >= 0 (descending) */
     K_FALL_R = 118,
     K_FALL_L = 119,
@@ -289,6 +305,7 @@ void physics_set_level1_dragon_platform(bool enable) {
 void physics_reset(int x, int y)
 {
     s_x = x; s_y = y; s_vy_q4 = 0; s_facing = 1; s_on_ground = (y >= s_ground_y);
+    s_spawn_x = x;  s_spawn_y = y;          /* для respawn после death */
     s_ladder_placed = false;
     s_ladder_x = 0;
     s_ladder_placed_frame = 0;
@@ -301,6 +318,9 @@ void physics_reset(int x, int y)
     s_flying = false;
     s_prev_u = false;
     s_in_jump = false;
+    s_dying = false;
+    s_dying_frame = 0;
+    s_just_died_pulse = false;
     inv_reset();                 /* пустой инвентарь — pickup обязателен */
     /* для отладки можно зафиксировать позицию через env: */
     const char *e = getenv("KARNOV_FIX_POS");
@@ -320,6 +340,21 @@ static bool in_ladder_column(void)
 
 void physics_tick(u8 input)
 {
+    /* Сбрасываем «just_died»-импульс предыдущего кадра. game.c прочитает
+     * его в той же тике, в которой был установлен. */
+    s_just_died_pulse = false;
+
+    /* Death animation тикает без обработки input. По окончании DEATH_LEN
+     * Karnov respawn'ится в s_spawn_x/y. */
+    if (s_dying) {
+        ++s_dying_frame;
+        if (s_dying_frame >= DEATH_LEN) {
+            int sx = s_spawn_x, sy = s_spawn_y;
+            physics_reset(sx, sy);
+        }
+        return;
+    }
+
     bool wants_r    = (input & INP_R)    != 0;
     bool wants_l    = (input & INP_L)    != 0;
     bool wants_u    = (input & INP_U)    != 0;
@@ -468,13 +503,17 @@ void physics_tick(u8 input)
                 /* Sample body at 3 heights — bottom, middle, top.
                  * Top probe at s_y-20 (bbox ≈ 20 px), а не -28: визуальный
                  * sprite Karnov-а ~29 px, но collision-bbox в KARNOV.EXE
-                 * короче — иначе голова застревает в overhang'ах (dragon-
-                 * platform row 26 при ходьбе на песке y=290 → row 27 (-20)
-                 * вместо row 26 (-28) → small-attr 0 tiles в row 26 не
-                 * блокируют). */
-                bool blocked = level_solid_at(lead_x, s_y - 4) ||
-                               level_solid_at(lead_x, s_y - 12) ||
-                               level_solid_at(lead_x, s_y - 20);
+                 * короче — иначе голова застревает в overhang'ах.
+                 *
+                 * Используем level_blocks_walk_h_at — горизонтальную маску
+                 * 0x001F (passes attrs 0..4 включая walls=attr3). Карnov
+                 * проходит сквозь каменные столбы боком, но всё ещё стоит
+                 * на их вершинах через find_floor_y (KARNOV_WALK_MASK 0x0006).
+                 * One-way platform behaviour. Блокируют только специальные
+                 * obstacles с attr 5..9 (бочки, шипы и т.п.). */
+                bool blocked = level_blocks_walk_h_at(lead_x, s_y - 4) ||
+                               level_blocks_walk_h_at(lead_x, s_y - 12) ||
+                               level_blocks_walk_h_at(lead_x, s_y - 20);
                 if (blocked) break;
                 s_x = probe_x;
             }
@@ -547,7 +586,24 @@ void physics_tick(u8 input)
     if (s_x < s_world_min_x) s_x = s_world_min_x;
     if (s_x > s_world_max_x) s_x = s_world_max_x;
     s_prev_u = wants_u;
+
+    /* Water contact = death. Проверяем тайл прямо под ногами Karnov-а
+     * (s_y — base/feet); если это вода (attr=08), стартуем dying-state.
+     * В полёте контакт с водой тоже убивает — это совпадает с поведением
+     * оригинала. */
+    if (!s_dying && level_is_water_at(s_x, s_y)) {
+        s_dying = true;
+        s_dying_frame = 0;
+        s_just_died_pulse = true;
+        s_on_ladder = false;
+        s_flying = false;
+        s_vy_q4 = 0;
+        s_in_jump = false;
+    }
 }
+
+bool physics_just_died(void) { return s_just_died_pulse; }
+bool physics_is_dying(void)  { return s_dying; }
 
 int  physics_get_x(void)       { return s_x; }
 int  physics_get_y(void)       { return s_y; }
@@ -592,6 +648,13 @@ static void render_placeholder(int cx, int cy, u8 input, u16 frame, bool walking
  * Возвращает ужё facing-correct sprite id — render не флипает. */
 static u16 pick_sprite_id(u8 input, u16 frame)
 {
+    /* Death-animation: 4-кадровый цикл K_DIE_1..4, stride 8 ticks/frame
+     * — занимает ровно DEATH_LEN тиков (60/8 ≈ 7 переключений между
+     * кадрами, остановится на K_DIE_4 к концу). */
+    if (s_dying) {
+        static const u16 die_cycle[4] = { K_DIE_1, K_DIE_2, K_DIE_3, K_DIE_4 };
+        return die_cycle[(s_dying_frame >> 3) & 3];
+    }
     bool wants_u   = (input & INP_U) != 0;
     bool wants_d   = (input & INP_D) != 0;
     bool walking   = (input & (INP_R | INP_L)) != 0;

@@ -46,6 +46,16 @@ bool physics_on_ladder(void);
  * передавать «текущий кадр» (используется для placed_frame). */
 void physics_set_current_frame(u16 frame);
 
+/* Death state. Karnov входит в death-animation при контакте с водой
+ * (level_is_water_at у ног). По окончании анимации respawn'ится в точке
+ * physics_reset.
+ *
+ * physics_just_died() — однократный edge на кадре старта анимации;
+ *   используется game.c чтобы запустить death-music (track 5).
+ * physics_is_dying() — true пока проигрывается анимация. */
+bool physics_just_died(void);
+bool physics_is_dying(void);
+
 /* Рендер Karnov-спрайта в текущей позе. M3+: использует sprite cache,
  * иначе fallback плейсхолдер. scroll_x/y — offset мирового пространства. */
 void physics_render(u8 input_state, u16 frame, bool mode_cga, int scroll_x, int scroll_y);

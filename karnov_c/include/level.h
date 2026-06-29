@@ -60,6 +60,18 @@ int level_load(u16 level_num);
  * Возвращает false при out-of-bounds. */
 bool level_solid_at(int wx, int wy);
 
+/* Тот же тест, но для горизонтального движения Karnov-а. Использует более
+ * широкую маску (passes attrs 0..4 → floor/wall/ladder/sky/decoration),
+ * блокирует только attr 5..9 — особо обозначенные obstacles. Это обеспечивает
+ * one-way-platform поведение каменных столбов: Karnov стоит на верху
+ * (через level_solid_at), но проходит сквозь них боком. */
+bool level_blocks_walk_h_at(int wx, int wy);
+
+/* Возвращает true если тайл в пикселе (wx, wy) — вода (attr=08). Karnov
+ * погибает от контакта с водой (анимация утопления). LEVEL1 имеет
+ * водные тайлы 0x84/0x8f/0x90/0x91/0x96. */
+bool level_is_water_at(int wx, int wy);
+
 /* Скан карты на «основной grounded-уровень»: row с наибольшим числом
  * solid-тайлов. Возвращает top_y этой строки в мировых пикселях.
  * Используется как fallback ground_y в physics — Karnov должен падать

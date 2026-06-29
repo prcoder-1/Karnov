@@ -59,132 +59,6 @@ static int read_enemies(FILE *fp)
     return 0;
 }
 
-/* Группировка «кластеров» из LEVEL%d.BIN — серии последовательных записей
- * с одинаковым type, близкими cur_x (≤32 px) и cur_y (Δ≤16 px). В оригинале
- * это WAVE-SPAWN slots: первый враг активен, при гибели спавнится следующий
- * (state_list 0x1880 для type 17). У нас head активен, member'ы помечаются
- * flags|=0x100 и не спавнятся отдельно.
- *
- * `trigger` НЕ требуется одинаковым: данные LEVEL1 иногда имеют trg=2560/2570
- * у соседних entries того же типа (например type 10 enemy[4,5]) — это всё
- * равно один визуальный объект.
- *
- * cur_x ПЕРВОЙ записи переписывается на MAX кластера (правый край) —
- * это совпадает с визуальной серединой decoration'а (cluster 488..520 →
- * cur_x=520, sprite #88 body_cx=20 → визуальный центр sprite-а ~524
- * = центр каменной колонны @ 544..572 LEVEL1).
- *
- * O(N²) на N≤256 — приемлемо. */
-/* Возвращает tile id в позиции (wx, wy). 0 если out of bounds. */
-static u8 tile_at(int wx, int wy)
-{
-    int col = wx / TILE_W;
-    int row = wy / TILE_H;
-    if (col < 0 || col >= (int)level_num_map_cols) return 0;
-    if (row < 0 || row >= (int)level_num_map_rows) return 0;
-    return level_map[row][col];
-}
-
-/* Решает, является ли тайл «декорацией» — видимым тайлом NON-BG,
- * NON-SAND, NON-SOLID. В LEVEL1 декорации над solid платформой (cyan
- * stone top) имеют attr=0x04. */
-static bool is_decoration_tile(u8 t)
-{
-    u8 a = level_tile_attr[t];
-    if (a & 1) return false;             /* solid — нет */
-    if (t == 23 || t == 1 || t == 0) return false; /* sky/sand/empty */
-    return (a & 4) != 0;
-}
-
-/* Находит solid платформу с TOP=ry рядом с rx (exact-y match), затем
- * сдвигает out_y вверх на каждый ряд декорации над solid'ом (visual top
- * каменной колонны включает cyan decoration tile).
- *
- * Для LEVEL1 enemy[20] (rx=520, ry=270, radius=64):
- *   RIGHT solid 544..575 top=270 — matches → x_center=559.
- *   Row above (y=260..269) col 34-35: tile 130/131 attr=0x04 — decoration
- *   → out_y = 270 - 10 = 260 (visual top of cyan column).
- *   LEFT (top=280) НЕ matches т.к. exact ry=270. */
-static bool find_platform_center(int rx, int ry, int search_radius,
-                                  int *out_x, int *out_y)
-{
-    int best_dx = 1<<30;
-    int best_x = -1;
-    for (int dx = -search_radius; dx <= search_radius; ++dx) {
-        int wx = rx + dx;
-        if (wx < 0) continue;
-        if (level_solid_at(wx, ry + 1) && !level_solid_at(wx, ry - 1)) {
-            int ad = dx < 0 ? -dx : dx;
-            if (ad < best_dx) { best_dx = ad; best_x = wx; }
-        }
-    }
-    if (best_x < 0) return false;
-
-    /* Расширяем сегмент на y=ry. */
-    int seg_start = best_x, seg_end = best_x;
-    while (seg_start > 0 &&
-           level_solid_at(seg_start - 1, ry + 1) &&
-           !level_solid_at(seg_start - 1, ry - 1)) --seg_start;
-    while (level_solid_at(seg_end + 1, ry + 1) &&
-           !level_solid_at(seg_end + 1, ry - 1)) ++seg_end;
-
-    int center = (seg_start + seg_end) / 2;
-    int top = ry;
-
-    /* Подъём по декорации: проверяем каждый row выше solid_top, если
-     * tile в КОЛОНКЕ center декорация (attr&4 и не sky/sand), сдвигаем
-     * top на 10 px вверх. Останавливаемся при первом не-decoration row. */
-    while (top >= TILE_H) {
-        u8 t_above = tile_at(center, top - TILE_H);
-        if (!is_decoration_tile(t_above)) break;
-        top -= TILE_H;
-    }
-
-    *out_x = center;
-    *out_y = top;
-    return true;
-}
-
-static void group_enemy_clusters(void)
-{
-    for (u16 i = 0; i < level_num_enemies; ++i) {
-        enemy_spawn_t *e = &level_enemies[i];
-        if (e->type == 0) continue;
-        if (e->flags & 0x0100) continue;   /* уже member — пропускаем */
-
-        int max_x = e->cur_x;
-        for (u16 j = i + 1; j < level_num_enemies; ++j) {
-            enemy_spawn_t *m = &level_enemies[j];
-            if (m->type != e->type)         break;
-            int dy = (int)m->cur_y - (int)e->cur_y;
-            if (dy < 0) dy = -dy;
-            if (dy > 16) break;
-            int dx = (int)m->cur_x - (int)e->cur_x;
-            if (dx < 0) dx = -dx;
-            if (dx > 32) break;
-            m->flags |= 0x0100;
-            if ((int)m->cur_x > max_x) max_x = m->cur_x;
-        }
-        e->cur_x = (u16)max_x;
-
-        /* Snap к solid платформе с EXACT top=cur_y, затем подъём cur_y на
-         * декорацию (cyan stone top tile) если есть. cur_y из данных (270
-         * для LEVEL1 enemy[20]) совпадает с RIGHT solid top, после
-         * decoration-walkup → cur_y=260 (visual top цианового верха колонны).
-         *
-         * Если solid'а нет — type 17 entry подавляем (cluster overflow). */
-        if (e->type == 17 && (int)e->cur_y < 290) {
-            int sx = 0, sy = 0;
-            if (find_platform_center((int)e->cur_x, (int)e->cur_y, 64, &sx, &sy)) {
-                e->cur_x = (u16)sx;
-                e->cur_y = (u16)sy;
-            } else {
-                e->type = 0;
-            }
-        }
-    }
-}
-
 int level_load(u16 level_num)
 {
     char filename[32];
@@ -245,9 +119,6 @@ int level_load(u16 level_num)
      * проходил сквозь пустые тайлы и не «стоял» на чёрных дверных проёмах. */
     level_tile_attr[0] = 2;
 
-    /* После загрузки tile-данных доступен level_solid_at — теперь можно
-     * группировать кластеры и snap'ить type 17 head'ов к solid платформам. */
-    group_enemy_clusters();
     return 0;
 }
 
@@ -299,6 +170,41 @@ bool level_solid_at(int wx, int wy)
     u16 props = LEVEL_ATTR_TO_PROPS[attr];
     /* probe_tile-эквивалент: коллизия, если props НЕ подмножество mask. */
     return (props & KARNOV_WALK_MASK) != props;
+}
+
+/* Горизонтальная маска: passes bits 0..4 (= attrs 0..4: floor, ladder, sky,
+ * wall, floor+wall), блокирует bits 5..9 (special obstacles). Это
+ * one-way-platform поведение: каменные столбы (attr 3/4) являются
+ * landable-полом для find_floor_y, но прозрачны для бокового движения.
+ *
+ * 0x001F = bits 0+1+2+3+4 = 0x01|0x02|0x04|0x08|0x10. (attr 4 props=0x0009
+ * полностью покрыт 0x000F, не требует bit 4; bit 4 включён за-доп.) */
+#define KARNOV_WALK_H_MASK  0x001F
+
+bool level_blocks_walk_h_at(int wx, int wy)
+{
+    if (wx < 0 || wy < 0) return false;
+    int col = wx / TILE_W;
+    int row = wy / TILE_H;
+    if (col >= (int)level_num_map_cols) return false;
+    if (row >= (int)level_num_map_rows) return false;
+    u8 tile_id = level_map[row][col];
+    u8 attr    = level_tile_attr[tile_id];
+    if (attr >= 10) return true;
+    u16 props = LEVEL_ATTR_TO_PROPS[attr];
+    return (props & KARNOV_WALK_H_MASK) != props;
+}
+
+bool level_is_water_at(int wx, int wy)
+{
+    if (wx < 0 || wy < 0) return false;
+    int col = wx / TILE_W;
+    int row = wy / TILE_H;
+    if (col >= (int)level_num_map_cols) return false;
+    if (row >= (int)level_num_map_rows) return false;
+    /* attr=08 = вода (категория из LUT props=0x0100). LEVEL1 tile_ids
+     * 0x84/0x8f/0x90/0x91/0x96 — всё это синяя вода. */
+    return level_tile_attr[level_map[row][col]] == 0x08;
 }
 
 int level_compute_ground_y(void)

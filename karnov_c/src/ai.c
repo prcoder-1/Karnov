@@ -708,29 +708,33 @@ void ai_init_from_level(u16 level_num)
      * «уже пройденными» (Karnov визуально видит их при старте, но эти
      * враги в LEVEL%d.BIN — будут спавниться только если scroll вернулся
      * назад и снова пошёл вправо, что обычно не случается). */
-    g_max_right_edge = VIEW_W;
+    /* Стартовое значение = −SPAWN_MARGIN, чтобы инициальный вызов
+     * ai_spawn_pending(0, VIEW_W, 0) активировал ВСЕХ врагов с
+     * spawn_x в [0, VIEW_W] (видимых на старте уровня). Раньше было
+     * VIEW_W → инициальные враги никогда не спавнились. */
+    g_max_right_edge = -SPAWN_MARGIN;
 
     if (level_num == 0) {
         /* LEVEL0 splash: всё спаунится upfront — узкий 320×120 экран без
-         * прокрутки. Cluster-member флаг 0x100 здесь обычно отсутствует
-         * (LEVEL0 не имеет групп), но check всё равно. */
+         * прокрутки. Позиция врага — из spawn_x/spawn_y (декомпиляция
+         * spawn_active_object cs:0x4F30: obj.x_world = spawn[0xC],
+         * obj.y_world = spawn[0xE]). */
         for (u16 i = 0; i < level_num_enemies && g_num < MAX_AI; ++i) {
             const enemy_spawn_t *e = &level_enemies[i];
             g_one_shot[i] = true;             /* LEVEL0 → spawn один раз */
             if (e->type == 0) continue;
             if (e->type == 2) continue;
             if (e->type == 13) continue;      /* mosquito не виден на splash */
-            if (e->flags & 0x0100) continue;  /* cluster member — не спавним */
-            if (e->cur_x >= 320 || e->cur_y >= 120) continue;
+            if (e->spawn_x >= 320 || e->spawn_y >= 120) continue;
             g_obj[g_num] = (ai_obj_t){
                 .alive     = true,
                 .invisible = (e->type == 6),
                 .type      = e->type,
-                .x         = (int)e->cur_x,
-                .y         = (int)e->cur_y,
+                .x         = (int)e->spawn_x,
+                .y         = (int)e->spawn_y,
                 .facing    = -1,
-                .spawn_x   = e->cur_x,
-                .spawn_y   = e->cur_y,
+                .spawn_x   = e->spawn_x,
+                .spawn_y   = e->spawn_y,
                 .level_idx = i,
             };
             g_alive_idx[i] = (s16)g_num;
@@ -741,10 +745,10 @@ void ai_init_from_level(u16 level_num)
         if (getenv("KARNOV_DBG_L1_ENEMIES")) {
             for (u16 i = 0; i < level_num_enemies; ++i) {
                 const enemy_spawn_t *e = &level_enemies[i];
-                fprintf(stderr, "L%u en[%u]: type=%u sub=%u cur=(%u,%u) rng=(%u,%u) spawn=(%u,%u) trg=%u flg=%04x\n",
+                fprintf(stderr, "L%u en[%u]: type=%u sub=%u cur=(%u,%u) rng=(%u,%u) spawn=(%u,%u) trg=%u (hp=%u init=%u) flg=%04x\n",
                         level_num, i, e->type, e->subtype, e->cur_x, e->cur_y,
                         e->range_x, e->range_y, e->spawn_x, e->spawn_y,
-                        e->trigger, e->flags);
+                        e->trigger, (e->trigger >> 8), (e->trigger & 0xFF), e->flags);
             }
         }
 
@@ -1127,27 +1131,30 @@ void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame)
     for (u16 i = 0; i < level_num_enemies; ++i) {
         const enemy_spawn_t *e = &level_enemies[i];
 
-        if (e->type == 0) continue;             /* пустой / cluster-член, спавнится через head */
-        if (e->type == 2) continue;             /* sentinel */
-        if (e->type == 8) continue;             /* level marker */
-        if (e->flags & 0x0100) continue;        /* cluster member — wave-spawn через head'а */
+        if (e->type == 0) continue;             /* пустой */
+        if (e->type == 2) continue;             /* sentinel / Karnov spawn marker */
+        if (e->type == 8) continue;             /* sky-spawn template (динамический) */
         if (g_killed[i]) continue;              /* уже убит */
         if (g_alive_idx[i] >= 0) continue;      /* уже активен в g_obj */
         if (g_one_shot[i]) continue;            /* пикапы — однократно */
 
-        int rx = (int)e->cur_x;
-        int ry = (int)e->cur_y;
+        /* Декомпиляция spawn_active_object (cs:0x4F30):
+         *   obj.x_world = spawn[0xC]   = spawn_x
+         *   obj.y_world = spawn[0xE]   = spawn_y
+         * Поля cur_x/cur_y в спавне НЕ используются (видимо, runtime-
+         * scratch для AI-handler'ов). */
+        int rx = (int)e->spawn_x;
+        int ry = (int)e->spawn_y;
 
-        /* First-time activation: spawn_x ПЕРЕСЕК правый край viewport'а
-         * (prev_right_edge < spawn_x ≤ cur_right_edge). Spawn_x ≤ view_w
-         * на старте автоматически отфильтровывается (prev = view_w). */
+        /* First-time activation: spawn_x впервые попал в viewport
+         * (с margin). Инициальный g_max_right_edge=−SPAWN_MARGIN, поэтому
+         * враги с spawn_x ≤ VIEW_W материализуются на первом тике. */
         if (!g_spawn_triggered[i]) {
-            if ((int)e->spawn_x <= prev_right_edge) continue;
-            if ((int)e->spawn_x > cur_right_edge)   continue;
+            if (rx <= prev_right_edge - SPAWN_MARGIN) continue;
+            if (rx > cur_right_edge + SPAWN_MARGIN)   continue;
             g_spawn_triggered[i] = true;
         }
-        /* После активации re-spawn разрешён когда cur_x попадает в обзор
-         * (left-scroll возврат / right-scroll прогресс). */
+        /* После активации re-spawn разрешён когда spawn_x попадает в обзор. */
         if (rx < respawn_left || rx > respawn_right) continue;
 
         int slot = alloc_obj_slot();
@@ -1156,15 +1163,17 @@ void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame)
             break;
         }
         if (dbg) {
-            fprintf(stderr, "spawn[%u]: type=%u cur=(%d,%d) slot=%d\n",
+            fprintf(stderr, "spawn[%u]: type=%u spawn=(%d,%d) slot=%d\n",
                     i, e->type, rx, ry, slot);
         }
 
-        /* Boss detection: type 14 с очень большим trigger (≥25000) — это
-         * Селёдка-босс в конце LEVEL1. Получает HP=4 (4 фаирболла Karnov-а)
-         * вместо обычного 1-hit kill. */
-        bool boss = (e->type == 14 && e->trigger >= 25000);
-        int  hp   = boss ? 4 : 1;
+        /* HP из старшего байта поля trigger (декомпиляция spawn_active_object:
+         * obj.hit_points = spawn[0x11] — high byte of WORD at offset 0x10).
+         * Младший байт — init_arg/sub_timer. Если 0 — fallback hp=1.
+         * Boss = HP ≥ 50 (только Селёдка в конце LEVEL1: hp=100). */
+        int hp = (int)(e->trigger >> 8);
+        if (hp == 0) hp = 1;
+        bool boss = (hp >= 50);
         /* Type 6 (OPTIONS) и type 5 (падающий бонус) — однократные. */
         if (e->type == 5 || e->type == 6) g_one_shot[i] = true;
 
