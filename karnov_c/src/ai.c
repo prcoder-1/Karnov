@@ -26,6 +26,9 @@
 #define TYPE_STONE_THROWER     1001  /* зелёный качок справа splash, кидает глыбы */
 #define TYPE_ROCK_PROJECTILE   1002  /* катящаяся красная глыба */
 #define TYPE_PLAYER_FIREBALL   1003  /* снаряд Karnov-а (FIRE press) */
+#define TYPE_FLYING_BIRD       1004  /* LEVEL1-start «два орла» (sky-spawn, sprites
+                                      * #147-148). Отдельный псевдо-тип, чтобы не
+                                      * путать с реальным type 14 = Селёдка. */
 
 /* Sprite IDs для player-fireball — 2-кадровый цикл из user-verified
  * mapping (2026-05-27): #19, #20 — анимация выстрелов Karnov.
@@ -326,6 +329,16 @@ static void ai_rock_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
  * значение пока НЕ байт-верифицировано из KARNOV.EXE (handler Karnov-fire
  * не декомпилирован). */
 #define PLAYER_FIREBALL_SPEED  6
+
+/* Урон снаряда Karnov-а по врагу. В оригинале (level.cpp pair-loop,
+ * cs:0xFC2C) урон = hit_points САМОГО снаряда: `b->hit_points -= a->hit_points`,
+ * где a — атакующий объект игрока. HP врага (spawn.trigger>>8) — это ПУЛ:
+ * все значения в LEVEL%d.BIN кратны/сравнимы с 10 (обычные враги=10 → 1 удар,
+ * type18=20 → 2, type13/15=30 → 3, боссы 95..250 → 10..25). Отсюда damage=10.
+ * НЕ байт-верифицировано (handler Karnov-fire не декомпилирован), но это
+ * единственное значение, при котором обычные враги гибнут с одного попадания
+ * И все HP-пулы дают целое число попаданий. */
+#define PLAYER_FIREBALL_DAMAGE 10
 
 static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
@@ -651,11 +664,12 @@ static ai_handler_fn pick_handler(u16 type)
         case   9: return ai_walking_minion;  /* 2-bbox boss — упрощённо как walker */
         case  10: return ai_pendulum;        /* маятник */
         case  11: return ai_ground_walker;   /* наземный патрульный */
-        case  13: return ai_y_tracker;       /* Y-tracker */
-        case  14: return ai_flying_bird;     /* летающая птица */
+        case  13: return ai_stone_thrower;   /* зелёный каменный метатель (из вспышки) */
+        case  14: return ai_flying_bird;     /* Селёдка (boss) — движение как у летуна */
+        case TYPE_FLYING_BIRD: return ai_flying_bird; /* LEVEL1-start орлы */
         case  15: return ai_stone_golem;     /* каменный голем (anchor) */
         case  16: return ai_horizontal_projectile; /* horiz projectile */
-        case  17: return ai_stone_thrower;   /* Зелёный каменный человек — метатель */
+        case  17: return ai_ground_walker;   /* скелет на страусе — бегает, НЕ кидает камни */
         case  18: return ai_walking_minion;  /* walking minion (Y-snap) */
         case  19: return ai_slow_helper;     /* slow helper */
         case 512: return ai_stone_man;       /* каменный человек (декор) */
@@ -764,7 +778,7 @@ void ai_init_from_level(u16 level_num)
         if (level_num == 1 && g_num + 2 <= MAX_AI) {
             g_obj[g_num] = (ai_obj_t){
                 .alive       = true,
-                .type        = 14,             /* flying bird, sprites #147-148 */
+                .type        = TYPE_FLYING_BIRD, /* орёл, sprites #147-148 */
                 .x           = 300,            /* world x — справа от Karnov-а */
                 .y           = 250,            /* shared home_y, начинает вверху */
                 .facing      = -1,
@@ -778,7 +792,7 @@ void ai_init_from_level(u16 level_num)
             ++g_num;
             g_obj[g_num] = (ai_obj_t){
                 .alive       = true,
-                .type        = 14,
+                .type        = TYPE_FLYING_BIRD,
                 .x           = 300,
                 .y           = 250,            /* same home_y */
                 .facing      = -1,
@@ -899,8 +913,10 @@ void ai_tick(u16 frame, u8 karnov_input)
  *   #76..85   — Зелёный стражник с мечом (10 фаз)
  *   #86..90   — Зелёный каменный человек (5 фаз) → splash stone-thrower
  *   #91..94   — Комарик (4 фазы) → Y-tracker (тип 13)
- *   #147..148 — Летящая зелёная птица (2 фазы) → flying bird (тип 14)
- *   #149..152 — Селёдка (4 фазы) → horiz projectile (тип 16)
+ *   #147..148 — Летящая зелёная птица (2 фазы) → TYPE_FLYING_BIRD (LEVEL1 орлы)
+ *                и type 16 (горизонтальный летун)
+ *   #149..152 — Селёдка (4 фазы) → тип 14 (boss в конце LEVEL1; decomp
+ *                ai_type14 spawn sprite 0x95=149)
  *   #153..160 — Чёртик (8 фаз) → walking minion (тип 18)
  *   #161..163 — Скелет на страусе (3 фазы) → ostrich (тип 17)
  *   #164..171 — Демон на облаке (8 фаз) → pendulum (тип 10)
@@ -925,22 +941,37 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
         case  11: {                                /* Зелёный стражник с мечом — 10 фаз */
             return 76 + (anim_phase % 10);
         }
-        case  13: {                                /* Комарик (Y-tracker) — 4 фазы */
-            return 91 + (anim_phase & 3);
+        case  13: {                                /* Зелёный каменный МЕТАТЕЛЬ — 5 фаз (#86-90).
+                                                    * type13 INIT = "Y-snap + spawn FX" (вспышка),
+                                                    * т.е. метатель, появляющийся из вспышки
+                                                    * (user 2026-07-04, images 4/6/9). Раньше
+                                                    * ошибочно рисовался комариком #91-94. */
+            return 86 + (anim_phase % 5);
         }
-        case  14: {                                /* Летящая зелёная птица — 2 фазы */
+        case  14: {                                /* Селёдка (boss / flying minion) — 4 фазы.
+                                                    * Декомпиляция ai_type14 (file_io.h:184):
+                                                    * spawn(obj, sprite=0x95=149). */
+            return 149 + (anim_phase & 3);
+        }
+        case TYPE_FLYING_BIRD: {                    /* Летящая зелёная птица — 2 фазы (#147-148).
+                                                    * type8 sky-spawn AnimSeg 0x93/0x94. */
             return 147 + (anim_phase & 1);
         }
         case  15: {                                /* каменный голем (anchor) — оставляем 178/179 пока неуточнено */
             static const u16 golem[2] = { 178, 179 };
             return golem[anim_phase & 1];
         }
-        case  16: {                                /* Селёдка (horiz projectile) — 4 фазы */
-            return 149 + (anim_phase & 3);
+        case  16: {                                /* Горизонтальный летящий враг (type16,
+                                                    * vx≈-1.5) — рендерим как птицу #147-148.
+                                                    * (Раньше ошибочно = Селёдка #149-152,
+                                                    * из-за чего было несколько «селёдок».) */
+            return 147 + (anim_phase & 1);
         }
-        case  17: {                                /* Зелёный каменный человек (метатель) — 5 фаз */
-            static const u16 frames[5] = { 86, 87, 88, 89, 90 };
-            return frames[anim_phase < 5 ? anim_phase : 0];
+        case  17: {                                /* Скелет на страусе — 3 фазы (#161-163).
+                                                    * Декомпиляция ai_type17 (file_io.h:198):
+                                                    * spawn(sprite=0xA1=161). Раньше ошибочно
+                                                    * = зелёный каменный человек #86-90. */
+            return 161 + (anim_phase % 3);
         }
         case  18: {                                /* Чёртик (walking minion) — 8 фаз */
             return 153 + (anim_phase & 7);
@@ -972,15 +1003,40 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
     }
 }
 
+/* Мелкие летуны рисуются в фоновом проходе, чтобы не закрывать наземных
+ * врагов. В LEVEL1 комарик (type13, Y-tracker) местами стоит в одной точке
+ * с зелёным каменным человеком (type17) — записи в LEVEL1.BIN совпадают по
+ * координатам (напр. idx65/idx66 — одинаковые cur И spawn). Без разделения
+ * слоёв мошка рисовалась поверх и выглядела «вместо» человека. */
+static bool ai_is_background_flyer(u16 type)
+{
+    return type == 16 || type == TYPE_FLYING_BIRD;
+}
+
 void ai_render(bool mode_cga, int scroll_x, int scroll_y)
 {
+  for (int pass = 0; pass < 2; ++pass) {
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
         if (g_obj[i].invisible) continue;  /* OPTIONS items на splash */
+        /* Пасс 0 — только фоновые летуны; пасс 1 — все остальные поверх. */
+        if (ai_is_background_flyer(g_obj[i].type) != (pass == 0)) continue;
         u16 sid;
         if (g_obj[i].type == 6 && g_obj[i].custom > 0) {
             /* LEVEL0 splash OPTIONS showcase: custom = sprite_id для item icon. */
             sid = (u16)g_obj[i].custom;
+        } else if (g_obj[i].type == 13) {
+            /* type13: наземные (home_y≥250, на тумбах) — зелёные каменные
+             * МЕТАТЕЛИ #86-90; поднятые над деревьями (home_y≤240, idx47/48) —
+             * ЧЁРТИКИ #153-160 (user 2026-07-05). */
+            sid = (g_obj[i].home_y <= 240) ? (153 + (g_obj[i].anim_phase & 7))
+                                           : (86  + (g_obj[i].anim_phase % 5));
+        } else if (g_obj[i].type == 18) {
+            /* type18 разделяется по range_y: большой вертикальный ход (rng_y=100,
+             * half=50) — ЧЁРТИК на дереве (#153-160); малый (rng_y=20, half=10) —
+             * ДЕМОН НА ОБЛАКЕ в замке (#164-171). См. скриншоты 2026-07-05. */
+            u16 base = (g_obj[i].half_range_y >= 30) ? 153 : 164;
+            sid = base + (g_obj[i].anim_phase & 7);
         } else {
             sid = sprite_for_type(g_obj[i].type, g_obj[i].anim_phase);
         }
@@ -1040,7 +1096,8 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         render_fill_rect(g_obj[i].x - pw/2 - scroll_x,
                          g_obj[i].y - ph - scroll_y, pw, ph, col);
     }
-    (void)mode_cga;
+  }
+  (void)mode_cga;
 }
 
 /* ─── Pickup detection ─────────────────────────────────────────────────
@@ -1114,19 +1171,13 @@ static int alloc_obj_slot(void)
 
 /* User-spec (2026-05-29 — Image #8 reference): при старте уровня видны
  * ТОЛЬКО декорации (дракон, платформа, Karnov) — НИ ОДНОГО врага. Только
- * при дальнейшем scroll'е, когда `spawn_x` ПЕРЕСЕКАЕТ правый край viewport'а
- * из-вне-кадра-вправо в кадр, враг материализуется. */
-#define RESPAWN_MARGIN    48
-
+ * при дальнейшем scroll'е, когда триггер cur_x ПЕРЕСЕКАЕТ правый край
+ * viewport'а из-вне-кадра-вправо в кадр, враг материализуется. */
 void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame)
 {
     bool dbg = getenv("KARNOV_DBG_SPAWN") != NULL;
     int cur_right_edge = scroll_x + view_w;
-    int prev_right_edge = g_max_right_edge;
     if (cur_right_edge > g_max_right_edge) g_max_right_edge = cur_right_edge;
-
-    int respawn_left  = scroll_x - RESPAWN_MARGIN;
-    int respawn_right = scroll_x + view_w + RESPAWN_MARGIN;
 
     for (u16 i = 0; i < level_num_enemies; ++i) {
         const enemy_spawn_t *e = &level_enemies[i];
@@ -1137,25 +1188,60 @@ void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame)
         if (g_killed[i]) continue;              /* уже убит */
         if (g_alive_idx[i] >= 0) continue;      /* уже активен в g_obj */
         if (g_one_shot[i]) continue;            /* пикапы — однократно */
+        if (g_spawn_triggered[i]) continue;     /* одноразовая активация:
+                                                 * despawn'нутый враг НЕ
+                                                 * ре-спаунится (как в оригинале
+                                                 * — возврат камеры назад не
+                                                 * воскрешает пройденных). */
 
-        /* Декомпиляция spawn_active_object (cs:0x4F30):
-         *   obj.x_world = spawn[0xC]   = spawn_x
-         *   obj.y_world = spawn[0xE]   = spawn_y
-         * Поля cur_x/cur_y в спавне НЕ используются (видимо, runtime-
-         * scratch для AI-handler'ов). */
-        int rx = (int)e->spawn_x;
-        int ry = (int)e->spawn_y;
+        /* Разделение полей записи (верифицировано на LEVEL1/2/3, декомпиляция
+         * spawn_active_object cs:0x4F30 + damage pair-loop level.cpp):
+         *
+         *   cur_x/cur_y  (offset 0x04/0x06) — ТРИГГЕР спавна: враг рождается,
+         *                когда правый край viewport'а доходит до cur_x. НЕ
+         *                позиция!
+         *   spawn_x/spawn_y (0x0C/0x0E) — ПОЗИЦИЯ размещения (obj.x_world,
+         *                obj.y_world).
+         *
+         * Раньше эти роли путались: spawn_x использовался и как позиция, и как
+         * триггер, из-за чего координаты смотрелись сдвинутыми. */
 
-        /* First-time activation: spawn_x впервые попал в viewport
-         * (с margin). Инициальный g_max_right_edge=−SPAWN_MARGIN, поэтому
-         * враги с spawn_x ≤ VIEW_W материализуются на первом тике. */
-        if (!g_spawn_triggered[i]) {
-            if (rx <= prev_right_edge - SPAWN_MARGIN) continue;
-            if (rx > cur_right_edge + SPAWN_MARGIN)   continue;
-            g_spawn_triggered[i] = true;
+        /* Wave-queue: подряд идущие записи ОДНОГО типа, размещённые вплотную
+         * (|Δcur_x|≤32, |Δcur_y|≤16), — это ОЧЕРЕДЬ, а не одновременная группа.
+         * Появляются по одному: следующий член — только когда предыдущий УЖЕ
+         * появлялся И его сейчас нет на экране (убит или ушёл за край). Без
+         * этого 5 «зелёных каменных» (LEVEL1 idx20-24, spawn_x с шагом 8) вылезли
+         * бы кучей в 32 px и слились в зелёное пятно.
+         *
+         * Прогресс по «предыдущий вышел из игры» (а не только «убит»), чтобы
+         * очередь не застревала, если игрок пробежал мимо не убив. Одноразовый
+         * латч g_spawn_triggered гарантирует, что каждый член появится ровно раз
+         * (без ре-спауна при возврате камеры). */
+        /* Пикапы (type 5 — падающий бонус, 6 — OPTIONS) — это размещённые
+         * предметы, а не очередь врагов: их не ставим в wave-queue. */
+        if (i > 0 && e->type != 5 && e->type != 6) {
+            const enemy_spawn_t *p = &level_enemies[i - 1];
+            int dcx = (int)e->cur_x - (int)p->cur_x; if (dcx < 0) dcx = -dcx;
+            int dcy = (int)e->cur_y - (int)p->cur_y; if (dcy < 0) dcy = -dcy;
+            if (p->type == e->type && dcx <= 32 && dcy <= 16) {
+                if (!g_spawn_triggered[i - 1]) continue; /* предыдущий ещё не появлялся */
+                if (g_alive_idx[i - 1] >= 0)  continue;  /* предыдущий ещё на экране */
+            }
         }
-        /* После активации re-spawn разрешён когда spawn_x попадает в обзор. */
-        if (rx < respawn_left || rx > respawn_right) continue;
+
+        /* Координаты врагов по X — ×2 (world = 2 × file). Так враги
+         * распределяются по всей ширине уровня (3600), а босс (spawn_x=1730)
+         * оказывается в конце (~3460). Без ×2 они ужаты в левую половину и
+         * босса в конце нет (user 2026-07-05: «верни как было»). Y — 1:1. */
+        int tx = (int)e->cur_x  * 2;            /* триггер по X (world) */
+        int rx = (int)e->spawn_x * 2;           /* позиция X (world) */
+        int ry = (int)e->spawn_y;               /* позиция Y */
+
+        /* First-time activation: cur_x впервые попал в правый край viewport'а
+         * (с margin). Инициальный g_max_right_edge=−SPAWN_MARGIN, поэтому
+         * враги с cur_x ≤ VIEW_W материализуются на первых тиках. */
+        if (tx > cur_right_edge + SPAWN_MARGIN) continue;   /* триггер ещё впереди */
+        g_spawn_triggered[i] = true;
 
         int slot = alloc_obj_slot();
         if (slot < 0) {
@@ -1189,7 +1275,7 @@ void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame)
             .level_idx    = (int)i,
             .home_x       = rx,
             .home_y       = ry,
-            .half_range_x = (int)e->range_x / 2,
+            .half_range_x = (int)e->range_x,        /* range_x×2 (world) / 2 */
             .half_range_y = (int)e->range_y / 2,
             .spawn_x      = (u16)rx,
             .spawn_y      = (u16)ry,
@@ -1208,8 +1294,12 @@ void ai_despawn_offscreen(int scroll_x)
      * Despawn освобождает g_obj-слот и СБРАСЫВАЕТ g_alive_idx — при возврате
      * scroll'а enemy re-spawn'нется через ai_spawn_pending.
      * Killed-флаг (g_killed) этим НЕ затрагивается — убитые остаются мёртвыми. */
+    /* despawn_right с запасом 256: враг размещается в spawn_x, который может
+     * быть на ~112 px правее своего триггера cur_x. При узком правом margin
+     * такой враг был бы срезан в тот же тик, когда родился, и (из-за
+     * одноразовой активации) больше не появился бы. 256 > 112+SPAWN_MARGIN. */
     int despawn_left  = scroll_x - 128;
-    int despawn_right = scroll_x + VIEW_W + 128;
+    int despawn_right = scroll_x + VIEW_W + 256;
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
         /* Не дезактивируем projectiles (player fireball) и items — они
@@ -1234,7 +1324,10 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     if (slot < 0 || slot >= g_num) return;
     ai_obj_t *o = &g_obj[slot];
     if (!o->alive) return;
-    if (--o->hp > 0) return;
+    /* Урон = PLAYER_FIREBALL_DAMAGE (пул HP врага уменьшается на урон
+     * снаряда, как `b->hit_points -= a->hit_points` в оригинале). */
+    o->hp -= PLAYER_FIREBALL_DAMAGE;
+    if (o->hp > 0) return;
     o->alive = false;
     int li = o->level_idx;
     if (li >= 0 && li < LEVEL_MAX_ENEMIES) {

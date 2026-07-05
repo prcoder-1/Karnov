@@ -248,10 +248,17 @@ static int prepare_level(u16 level_num, bool load_demo)
     physics_set_world_bounds(ph.min_x, ph.max_x, ph.ground_y, ph.ceiling_y);
     physics_set_level0_splash(level_num == 0);
     physics_set_level1_dragon_platform(level_num == 1);
-    physics_reset(ph.spawn_x, ph.spawn_y);
+    /* DEBUG: KARNOV_START_X env var override (для headless screenshot-теста). */
+    const char *dbg_start_x = getenv("KARNOV_START_X");
+    int sx = dbg_start_x ? atoi(dbg_start_x) : ph.spawn_x;
+    physics_reset(sx, ph.spawn_y);
 
     ai_init_from_level(level_num);
-    ai_spawn_pending(0, VIEW_W, 0);
+    /* Если стартовый X сдвинут — установим g_max_right_edge так, чтобы
+     * враги в области стартового viewport-а активировались. */
+    int init_view_left = sx - VIEW_W/2;
+    if (init_view_left < 0) init_view_left = 0;
+    ai_spawn_pending(init_view_left, VIEW_W, 0);
 
     if (load_demo) {
         int dr = demo_load(level_num);
