@@ -348,7 +348,7 @@ int splash_run(const splash_options_t *opt)
     bool quit = false;
     if (audio_running) {
         const char *line1 = "Karnov (C) 1987 Data East USA Inc.";
-        const char *line2 = "Adartation by Quicksilver Software Inc";
+        const char *line2 = "Adaptation by Quicksilver Software Inc";
         int x1 = (WIN_W - (int)strlen(line1) * 6) / 2;
         int x2 = (WIN_W - (int)strlen(line2) * 6) / 2;
         render_clear(0xFF000000u);
@@ -357,7 +357,8 @@ int splash_run(const splash_options_t *opt)
         render_present();
 
         u32 deadline = SDL_GetTicks() + 30000;  /* safety cap 30s */
-        while (!quit && audio_cycle_count() < 1 && SDL_GetTicks() < deadline) {
+        bool skip = false;
+        while (!quit && !skip && audio_cycle_count() < 1 && SDL_GetTicks() < deadline) {
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
                 if (ev.type == SDL_QUIT ||
@@ -365,12 +366,18 @@ int splash_run(const splash_options_t *opt)
                     quit = true;
                     break;
                 }
+                /* Любая другая клавиша — прервать музыку загрузки и начать игру. */
+                if (ev.type == SDL_KEYDOWN) {
+                    skip = true;
+                    break;
+                }
             }
             SDL_Delay(20);
         }
         if (!quit) {
             audio_play_music(0, true);
-            printf("audio: in-game music (track 0) запущена\n");
+            printf("audio: in-game music (track 0) запущена%s\n",
+                   skip ? " (загрузка прервана клавишей)" : "");
         }
     }
 

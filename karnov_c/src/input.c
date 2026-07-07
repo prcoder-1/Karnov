@@ -13,8 +13,8 @@ void input_poll(u8 *state)
     if (ks[SDL_SCANCODE_LEFT])  add |= INP_L;
     if (ks[SDL_SCANCODE_DOWN])  add |= INP_D;
     if (ks[SDL_SCANCODE_UP])    add |= INP_U;
-    if (ks[SDL_SCANCODE_Z] || ks[SDL_SCANCODE_SPACE]) add |= INP_FIRE;
-    if (ks[SDL_SCANCODE_X])     add |= INP_OPT;
+    if (ks[SDL_SCANCODE_X] || ks[SDL_SCANCODE_SPACE]) add |= INP_FIRE;
+    if (ks[SDL_SCANCODE_Z])     add |= INP_OPT;
     if (ks[SDL_SCANCODE_RETURN] || ks[SDL_SCANCODE_KP_ENTER]) add |= INP_START;
     if (add) *state = add;   /* keyboard overrides demo */
 }
