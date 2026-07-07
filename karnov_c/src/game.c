@@ -100,6 +100,19 @@ static void draw_level1_dragon(int scroll_x, int scroll_y)
 static int g_scroll_x = 0;
 static int g_scroll_y = 0;
 
+/* ─── Level-end (взятие свитка) ────────────────────────────────────────
+ * KARNOV.EXE type56 (ТРИГГЕР ЗАВЕРШЕНИЯ УРОВНЯ, cs:0x17EC:0x03B2): при
+ * подборе свитка-сокровища вызывает play_sound(9) + level-completion jingle
+ * (music track 2 = DS:0x06FC), проигрывает анимацию (Karnov садится) на
+ * ~50+ тиков (внутренний счётчик +0xC7 до 0x32), затем переходит на
+ * следующий уровень. Здесь: запускаем jingle, кормим Karnov'у INP_D (он
+ * садится в crouch-позу #103/#111) и держим сцену пока не доиграет jingle,
+ * но не короче LEVEL_END_MIN_TICKS (чтобы посадка была видна). */
+static bool s_level_end       = false;
+static u16  s_level_end_start = 0;
+#define LEVEL_END_MIN_TICKS 55    /* ~2 сек @ 27.5fps — минимум на «посадку» */
+#define LEVEL_END_MAX_TICKS 165   /* ~6 сек — потолок, чтобы не зависнуть если jingle не сигналит конец */
+
 static void update_scroll(int karnov_x, int karnov_y)
 {
     int level_w_px = level_num_map_cols * TILE_W;
@@ -406,6 +419,10 @@ int splash_run(const splash_options_t *opt)
             input_poll(&kbd_only);
             u8 inp = (kbd_only != 0) ? kbd_only : demo_inp;
 
+            /* Во время финальной секвенции (взят свиток) игрок не управляет:
+             * Karnov сидит (INP_D → crouch-поза), пока играет level-end jingle. */
+            if (s_level_end) { inp = INP_D; kbd_only = 0; }
+
             bool in_attract = demo_record_count() > 0;
             bool demo_done = in_attract &&
                              demo_current_index() >= demo_record_count();
@@ -455,16 +472,31 @@ int splash_run(const splash_options_t *opt)
             }
             ai_try_pickup(physics_get_x(), physics_get_y());
 
-            /* Boss death → scroll picked → переход на LEVEL2 (или loop). */
-            if (ai_scroll_picked() && current_level >= 1) {
-                u16 next = (current_level < 9) ? (u16)(current_level + 1) : 0;
-                printf("LEVEL%u: scroll подобран → LEVEL%u\n", current_level, next);
-                if (prepare_level(next, /*load_demo=*/false) == 0) {
-                    current_level = next;
-                    g_scroll_x = g_scroll_y = 0;
-                    frame = 0;
-                    s_demo_done_frame = 0;
-                    continue;
+            /* Boss death → взят свиток → level-end секвенция (KARNOV.EXE
+             * type56): jingle + Karnov садится, затем переход на след. уровень. */
+            if (ai_scroll_picked() && current_level >= 1 && !s_level_end) {
+                s_level_end = true;
+                s_level_end_start = frame;
+                if (audio_running) audio_play_music(2, /*loop=*/false);  /* level-completion jingle */
+                printf("LEVEL%u: свиток подобран → level-end секвенция\n", current_level);
+            }
+            if (s_level_end) {
+                u16  elapsed    = (u16)(frame - s_level_end_start);
+                bool min_done   = elapsed >= LEVEL_END_MIN_TICKS;
+                bool max_done   = elapsed >= LEVEL_END_MAX_TICKS;   /* защита от зависания */
+                bool jingle_end = !audio_running || audio_music_finished();
+                if ((min_done && jingle_end) || max_done) {
+                    u16 next = (current_level < 9) ? (u16)(current_level + 1) : 0;
+                    printf("LEVEL%u: секвенция завершена → LEVEL%u\n", current_level, next);
+                    if (prepare_level(next, /*load_demo=*/false) == 0) {
+                        current_level = next;
+                        g_scroll_x = g_scroll_y = 0;
+                        frame = 0;
+                        s_demo_done_frame = 0;
+                        s_level_end = false;
+                        if (audio_running) audio_play_music(0, /*loop=*/true);  /* снова in-game музыка */
+                        continue;
+                    }
                 }
             }
 

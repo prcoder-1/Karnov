@@ -436,13 +436,11 @@ static void ai_ground_walker(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (abs_dx > 10) {
         o->x += 2 * o->facing;
     }
-    /* Movement bounds: home ± half_range_x. */
-    if (o->half_range_x > 0) {
-        int xmin = o->home_x - o->half_range_x;
-        int xmax = o->home_x + o->half_range_x;
-        if (o->x < xmin) o->x = xmin;
-        if (o->x > xmax) o->x = xmax;
-    }
+    /* НЕТ позиционного clamp'а home±range_x: в оригинале ai_type11 гонится за
+     * игроком без границы, останавливается по ДИСТАНЦИИ (phase toggle на
+     * abs_dx≈10 выше). range_x в файле = маленькая подсказка патруля (5-15px),
+     * а НЕ граница преследования — раньше клампился сюда и враг застревал
+     * в ~10px от точки спавна, не доходя до Karnov (user 2026-07-07). */
 }
 
 /* Type 17 в LEVEL1 — это «Зелёный каменный человек» (метатель), а не
@@ -463,30 +461,23 @@ static void ai_walking_minion(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
     int kx = physics_get_x(), ky = physics_get_y();
-    o->facing = (kx > o->x) ? 1 : -1;
+    int dx = kx - o->x;
+    int abs_dx = dx < 0 ? -dx : dx;
+    o->facing = (dx >= 0) ? 1 : -1;
     /* 8-кадровый walk-cycle (sub_timer_max=3 × stride ≈ 3 = 9 ticks/кадр). */
     o->anim_phase = (frame >> 2) & 7;
 
-    /* Движение по X — 2 px/frame в сторону игрока (было 0.5, слишком медленно
-     * в ×2-мире; user 2026-07-06). */
-    o->x += 2 * o->facing;
-    /* Y-snap — медленное подтягивание (1 px каждые 8 кадров). */
+    /* Идёт к игроку по X — 2 px/frame. Останавливается вплотную (abs_dx≤8),
+     * чтобы не дёргаться поверх Karnov'а. НЕТ позиционного clamp'а home±range:
+     * оригинал ai_type18 преследует игрока, range_x/y в файле — маленькие
+     * подсказки (10px), а не границы. Раньше клампилось и демон застревал
+     * у точки спавна (user 2026-07-07). */
+    if (abs_dx > 8) o->x += 2 * o->facing;
+    /* Y-snap — медленное подтягивание к Y игрока (1 px каждые 8 кадров), без
+     * clamp'а, чтобы демон-на-облаке снижался к Karnov'у. */
     if ((frame & 7) == 0) {
         if (ky < o->y - 1)      o->y -= 1;
         else if (ky > o->y + 1) o->y += 1;
-    }
-    /* Movement bounds от EnemySpawn.range_x/y. */
-    if (o->half_range_x > 0) {
-        int xmin = o->home_x - o->half_range_x;
-        int xmax = o->home_x + o->half_range_x;
-        if (o->x < xmin) o->x = xmin;
-        if (o->x > xmax) o->x = xmax;
-    }
-    if (o->half_range_y > 0) {
-        int ymin = o->home_y - o->half_range_y;
-        int ymax = o->home_y + o->half_range_y;
-        if (o->y < ymin) o->y = ymin;
-        if (o->y > ymax) o->y = ymax;
     }
 }
 

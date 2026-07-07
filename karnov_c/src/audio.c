@@ -241,6 +241,15 @@ u32 audio_cycle_count(void)
     return g_cycle_count;
 }
 
+bool audio_music_finished(void)
+{
+    /* Не-зацикленный трек ставит g_st.active=false в parse_until_note при
+     * достижении терминатора 0x00. Чтение bool из audio-потока — атомарно
+     * достаточно для тайминга. Если плеер не инициализирован — «завершён». */
+    if (!g_initialized) return true;
+    return !g_st.active;
+}
+
 void audio_close(void)
 {
     if (!g_initialized) return;
