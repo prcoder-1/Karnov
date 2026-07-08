@@ -12,6 +12,7 @@
 #include "palette.h"
 #include "render.h"
 #include "inventory.h"
+#include "audio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -313,6 +314,9 @@ static void ai_rock_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->pos_y_q16 = (int)((unsigned)floor_y_snap << 16);
         o->vy_q16 = -(o->vy_q16 >> 1);  /* отскок с потерей половины амплитуды */
         o->grav_q16 = ROCK_GRAV_AFTER;
+        /* Звук отскока камня — первые 3 удара (как +0xE9<3 в ai_type12,
+         * KARNOV.EXE @ file 0x13F89, play_sound(8)). */
+        if (o->bounces < 3) audio_play_sfx(8);
         ++o->bounces;
         /* После 4 отскоков камень «стихает» — despawn. */
         if (o->bounces >= 4) { o->alive = false; return; }
@@ -1163,6 +1167,7 @@ void ai_try_pickup(int kx, int ky)
             if (kx1 < ix0 || kx0 > ix1) continue;
             if (ky1 < iy0 || ky0 > iy1) continue;
             give_item_by_sprite(o->item_sprite);
+            audio_play_sfx(5);   /* подбор предмета — play_sound(5) */
             o->alive = false;
             int li = o->level_idx;
             if (li >= 0 && li < LEVEL_MAX_ENEMIES) g_alive_idx[li] = -1;
@@ -1388,6 +1393,7 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     o->hp -= PLAYER_FIREBALL_DAMAGE;
     if (o->hp > 0) return;
     o->alive = false;
+    audio_play_sfx(1);   /* враг убит — play_sound(1), KARNOV.EXE @ 0xFC5A */
     int li = o->level_idx;
     if (li >= 0 && li < LEVEL_MAX_ENEMIES) {
         g_killed[li]    = true;
@@ -1421,4 +1427,5 @@ void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
         .facing      = (facing < 0) ? -1 : +1,
         .spawn_frame = frame,
     };
+    audio_play_sfx(7);   /* выстрел — play_sound(7), KARNOV.EXE @ 0x10515 (fireball spawn) */
 }
