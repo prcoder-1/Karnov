@@ -58,11 +58,13 @@ static int s_world_max_x = 312;
 #define FLY_SPEED_X   4
 #define FLY_SPEED_Y   3
 
-/* Cooldown между выстрелами в game-ticks. 8 ≈ 290 ms @ 27.5 FPS =
- * ~3.5 shots/sec — даёт ощутимый «пулемёт» при удержании FIRE без полной
- * заливки экрана снарядами. Оригинал Karnov-FIRE rate не байт-
- * верифицирован. */
-#define FIRE_COOLDOWN_TICKS  8
+/* Cooldown между выстрелами в game-ticks. KARNOV.EXE (verified 2026-07-10):
+ * FIRE НЕ имеет фикс. cooldown-счётчика — стрельба гейтится состоянием
+ * fire-анимации Karnov'а (`cmp [obj_state],4; skip` @0x10BF8; fire-функция
+ * @0x104E6 → play_sound(7)). Т.е. выстрел вылетает как только Karnov НЕ в
+ * позе броска и свободен слот снаряда → быстрый повторный огонь. Прежние 8
+ * тиков (~3.5/сек) были слишком медленны; 4 ≈ ~7/сек, ближе к оригиналу. */
+#define FIRE_COOLDOWN_TICKS  4
 
 /* Hitbox лестницы: ширина в которой Karnov цепляется (+/- от ladder_x). */
 #define LADDER_HALF_W 10

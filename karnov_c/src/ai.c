@@ -33,11 +33,12 @@
 #define TYPE_BOMB_BLAST        1005  /* анимированная вспышка Bomb-предмета
                                       * (#25→#26→#27→#28, ~50 кадров). */
 
-/* Sprite IDs для player-fireball — 2-кадровый цикл из user-verified
- * mapping (2026-05-27): #19, #20 — анимация выстрелов Karnov.
- * Конкретный кадр выбирается по o->anim_phase (см. sprite_for_type). */
-#define SPRITE_PLAYER_FIREBALL_A  19
-#define SPRITE_PLAYER_FIREBALL_B  20
+/* Sprite IDs для player-fireball — мелкие круглые «шарики» (7x7).
+ * #0x0A/#0x0B — маленькие round energy-ball'ы (4-кадровый набор 0x0A-0x0D).
+ * Прежние варианты: #19/#20 (кресты), #0xB9/#0xBA (16px fireball — слишком
+ * большой). Конкретный кадр выбирается по o->anim_phase. */
+#define SPRITE_PLAYER_FIREBALL_A  0x0A
+#define SPRITE_PLAYER_FIREBALL_B  0x0B
 
 /* 1-hit kill: список AI-типов, которых fireball уничтожает.
  * Декорации (type 512 stone-man) и собственно players/items (type 6) не
@@ -1076,6 +1077,20 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         if (g_obj[i].type == TYPE_BOMB_BLAST) continue;  /* вспышка — поверх Karnov'а (ai_render_overlay) */
         /* Пасс 0 — только фоновые летуны; пасс 1 — все остальные поверх. */
         if (ai_is_background_flyer(g_obj[i].type) != (pass == 0)) continue;
+        /* Karnov-выстрел — маленький белый шарик, рисуем процедурно (~4px):
+         * подходящего мелкого белого спрайта в кэше нет (мелкие спрайты
+         * серые, белые — крупнее). Круглые синие шарики #0x0A-0x0D — это
+         * снаряд босса «селёдка», не выстрел Karnov'а. */
+        if (g_obj[i].type == TYPE_PLAYER_FIREBALL) {
+            int bx = g_obj[i].x - scroll_x;
+            int by = g_obj[i].y - 2 - scroll_y;   /* центр (placeholder: y - ph/2) */
+            const u32 W = 0xFFFFFFFFu;
+            /* Крошечный белый шарик 3x3 (ромбик). */
+            render_fill_rect(bx,     by - 1, 1, 1, W);  /* верх */
+            render_fill_rect(bx - 1, by,     3, 1, W);  /* середина 3px */
+            render_fill_rect(bx,     by + 1, 1, 1, W);  /* низ */
+            continue;
+        }
         u16 sid;
         if (g_obj[i].type == 6 && g_obj[i].custom > 0) {
             /* LEVEL0 splash OPTIONS showcase: custom = sprite_id для item icon. */
