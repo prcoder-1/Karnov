@@ -36,6 +36,7 @@ void ai_tick(u16 frame, u8 karnov_input);
 
 /* Рендерит всех живых врагов (поверх тайл-карты). scroll_x/y — offset мира. */
 void ai_render(bool mode_cga, int scroll_x, int scroll_y);
+void ai_render_overlay(bool mode_cga, int scroll_x, int scroll_y);
 
 /* Проверяет пересечение Karnov-bbox (cx, cy — center x, feet y) с
  * наземными OPTIONS-предметами (type 6 с custom>0 — это showcase-иконки,
@@ -62,6 +63,18 @@ void ai_spawn_player_fireball(int x, int y, int facing, u16 frame);
 bool ai_boss_dead(void);
 bool ai_scroll_picked(void);
 u16  ai_boss_dead_frame(void);
+int  ai_scroll_target_x(void);   /* фикс. X (позиция boss'а) для авто-ходьбы к свитку */
+bool ai_scroll_spawned(void);    /* свиток уже заспавнен и падает */
+bool ai_scroll_onscreen(int cam_x, int cam_y, int view_w, int view_h); /* свиток виден на экране */
 void ai_notify_enemy_hit(int slot, u16 frame);
+
+/* Уничтожить всех живых damageable-врагов на экране (Clapper).
+ * exclude_boss=true пропускает boss'а (Clapper); false убивает всех. */
+void ai_clear_enemies(bool exclude_boss);
+
+/* Bomb-предмет: спавн анимированной вспышки (#25..#28) в позиции Karnov'а +
+ * ai_clear_enemies(false) (убивает всех, включая boss'а). Вызывается из
+ * inv_use() (inventory.c). */
+void ai_bomb_explode(void);
 
 #endif

@@ -110,6 +110,13 @@ static int g_scroll_y = 0;
  * но не короче LEVEL_END_MIN_TICKS (чтобы посадка была видна). */
 static bool s_level_end       = false;
 static u16  s_level_end_start = 0;
+/* Жизни Karnov'а (KARNOV.EXE: 3 в начале — «begins each game with three
+ * lives»; var DS:0xCF4E, game-over при <=0). Death: -1; K-Mark / завершение
+ * уровня («символ жизни выпадает»): +1. */
+#define KARNOV_START_LIVES 4    /* 4 запасных жизни (кроме текущей), user-verified */
+#define KARNOV_MAX_LIVES   9
+#define LIFE_ICON_SPRITE   0x32 /* белый череп-иконка жизни */
+static int  s_lives = KARNOV_START_LIVES;
 #define LEVEL_END_MIN_TICKS 55    /* ~2 сек @ 27.5fps — минимум на «посадку» */
 #define LEVEL_END_MAX_TICKS 165   /* ~6 сек — потолок, чтобы не зависнуть если jingle не сигналит конец */
 
@@ -183,28 +190,98 @@ static void draw_ladder(u16 frame, int scroll_x, int scroll_y)
 
 /* ─── HUD bar ──────────────────────────────────────────────────────── */
 
+/* Блит одного спрайта в абсолютных координатах (без scroll), colorkey 1/0xFF —
+ * тот же паттерн, что в ai_render/draw_level1_dragon. (x0,y0) — верхний левый. */
+static void blit_sprite_abs(const sprite_t *s, int x0, int y0)
+{
+    if (!s) return;
+    const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
+    u8 ck = sprite_is_cga() ? 0xFF : 1;
+    for (int r = 0; r < s->h; ++r) {
+        int yy = y0 + r;
+        if (yy < 0 || yy >= WIN_H) continue;
+        for (int c = 0; c < s->w; ++c) {
+            u8 v = s->pixels[r * s->w + c];
+            if (v == 0xFF) continue;
+            if (v == ck) continue;
+            int xx = x0 + c;
+            if (xx < 0 || xx >= WIN_W) continue;
+            render_framebuffer()[yy * WIN_W + xx] =
+                sprite_is_cga() ? pal[v & 3] : pal[v & 15];
+        }
+    }
+}
+
+/* ─── HUD OPTIONS item bar ────────────────────────────────────────────── */
+/* Рисует собранные предметы как ряд иконок (спрайты #39+id) в нижней части
+ * HUD. Текущий выбор (inv_current) МИГАЕТ (рисуется только на кадрах, где
+ * (frame>>2)&1) плюс подсвечивается рамкой. Иконки — приоритет; count>1
+ * показывается маленькой цифрой рядом. */
+#define HUD_ITEM_X0    4     /* левый край первой иконки */
+#define HUD_ITEM_STEP  18    /* шаг между иконками */
+
+static void draw_item_bar(u16 frame)
+{
+    int slot = 0;
+    int cur = inv_current();
+    for (int id = 0; id < ITEM_NUM; ++id) {
+        if (inv_count(id) == 0) continue;
+        const sprite_t *s = sprite_find((u16)(39 + id));
+        int ih = s ? s->h : 12;
+        int x0 = HUD_ITEM_X0 + slot * HUD_ITEM_STEP;
+        int y0 = VIEW_H + HUD_H - ih - 1;   /* прижато к низу HUD */
+        bool is_cur = (id == cur);
+        /* Текущий предмет мигает: скрывается на «off»-кадрах. */
+        bool blink_on = ((frame >> 2) & 1) != 0;
+        if (!(is_cur && !blink_on)) {
+            blit_sprite_abs(s, x0, y0);
+        }
+        if (is_cur) {
+            /* Рамка вокруг выбранного (жёлтая). */
+            int bw = (s ? s->w : 16) + 2, bh = (s ? s->h : 12) + 2;
+            render_fill_rect(x0 - 1,       y0 - 1,      bw, 1,  0xFFFFFF00u);
+            render_fill_rect(x0 - 1,       y0 - 1 + bh, bw, 1,  0xFFFFFF00u);
+            render_fill_rect(x0 - 1,       y0 - 1,      1,  bh, 0xFFFFFF00u);
+            render_fill_rect(x0 - 1 + bw,  y0 - 1,      1,  bh, 0xFFFFFF00u);
+        }
+        if (inv_count(id) > 1) {
+            char cnt[8];
+            snprintf(cnt, sizeof(cnt), "%d", inv_count(id));
+            render_draw_text(x0 + (s ? s->w : 16) - 4, y0 + (s ? s->h : 12) - 6,
+                             cnt, 0xFFFFFFFFu);
+        }
+        ++slot;
+    }
+}
+
+/* Символы жизней — белый череп-спрайт #0x32, ряд справа-налево в нижнем
+ * ряду HUD. Показывает s_lives запасных жизней. */
+static void draw_lives(void)
+{
+    const sprite_t *icon = sprite_find(LIFE_ICON_SPRITE);
+    if (!icon) return;
+    int step = icon->w + 1;
+    int y = VIEW_H + HUD_H - icon->h - 1;
+    int n = (s_lives > KARNOV_MAX_LIVES) ? KARNOV_MAX_LIVES : s_lives;
+    for (int i = 0; i < n; ++i) {
+        blit_sprite_abs(icon, WIN_W - 4 - (i + 1) * step, y);
+    }
+}
+
 static void draw_hud(u16 frame, int karnov_x, u8 input_state)
 {
     /* Yellow text on black background bar. */
     render_fill_rect(0, VIEW_H, WIN_W, HUD_H, 0xFF000000u);
     char line[80];
     snprintf(line, sizeof(line),
-             "FRAME:%-4u  REC:%u/%u    X:%-3d Y:%-3d    INV %c %c",
+             "FRAME:%-4u  REC:%u/%u    X:%-3d Y:%-3d",
              frame, demo_current_index(), demo_record_count(),
-             karnov_x, physics_get_y(),
-             inv_has_ladder() ? 'L' : '-',
-             inv_has_wings()  ? 'W' : '-');
-    render_draw_text(4, VIEW_H + 4, line, 0xFFFFFF55u);
-    snprintf(line, sizeof(line),
-             "INPUT:%02X  %c%c%c%c%c%c",
-             input_state,
-             (input_state & INP_R)    ? 'R' : '-',
-             (input_state & INP_L)    ? 'L' : '-',
-             (input_state & INP_U)    ? 'U' : '-',
-             (input_state & INP_D)    ? 'D' : '-',
-             (input_state & INP_FIRE) ? 'F' : '-',
-             (input_state & INP_OPT)  ? 'O' : '-');
-    render_draw_text(4, VIEW_H + 14, line, 0xFFCCCCCCu);
+             karnov_x, physics_get_y());
+    render_draw_text(4, VIEW_H + 2, line, 0xFFFFFF55u);
+    /* OPTIONS item bar — иконки собранных предметов с подсветкой выбора. */
+    draw_item_bar(frame);
+    draw_lives();   /* символы жизней справа в HUD */
+    (void)input_state;
 }
 
 /* ─── Level physics setup ──────────────────────────────────────────── */
@@ -346,6 +423,7 @@ int splash_run(const splash_options_t *opt)
         draw_ladder((u16)opt->ppm_frame, g_scroll_x, g_scroll_y);
         ai_render(mode_cga, g_scroll_x, g_scroll_y);
         physics_render(inp, (u16)opt->ppm_frame, mode_cga, g_scroll_x, g_scroll_y);
+        ai_render_overlay(mode_cga, g_scroll_x, g_scroll_y);
         draw_hud((u16)opt->ppm_frame, physics_get_x(), inp);
         render_present();
         render_save_ppm(opt->ppm_path);
@@ -421,7 +499,24 @@ int splash_run(const splash_options_t *opt)
 
             /* Во время финальной секвенции (взят свиток) игрок не управляет:
              * Karnov сидит (INP_D → crouch-поза), пока играет level-end jingle. */
-            if (s_level_end) { inp = INP_D; kbd_only = 0; }
+            if (s_level_end) {
+                inp = INP_D; kbd_only = 0;              /* INP_D блокирует движение (сидит на месте) */
+                physics_set_sit_scroll(true);           /* поза «сидит со свитком» #0x60-0x62 */
+            } else if (current_level >= 1 && ai_boss_dead() && !ai_scroll_picked()) {
+                /* Босс убит: Karnov неуязвим. СНАЧАЛА свиток должен начать
+                 * выпадать, и ТОЛЬКО ПОТОМ Karnov авто-идёт к нему. Пока свиток
+                 * не заспавнился — Karnov стоит на месте (inp=0). */
+                physics_set_invuln(true);
+                kbd_only = 0;
+                /* Идём к свитку ТОЛЬКО когда он упал в видимую область экрана. */
+                if (ai_scroll_onscreen(g_scroll_x, g_scroll_y, VIEW_W, VIEW_H)) {
+                    int tx = ai_scroll_target_x();
+                    int kx2 = physics_get_x();
+                    inp = (kx2 < tx - 4) ? INP_R : (kx2 > tx + 4) ? INP_L : 0;  /* ходьба к свитку */
+                } else {
+                    inp = 0;  /* ждём пока свиток появится/упадёт в кадр */
+                }
+            }
 
             bool in_attract = demo_record_count() > 0;
             bool demo_done = in_attract &&
@@ -463,6 +558,9 @@ int splash_run(const splash_options_t *opt)
              * запускаем death-music (track 5, не зацикленную). По окончании
              * анимации physics возвращает is_dying=false, и мы возобновляем
              * in-game music (track 0). */
+            if (physics_just_died() && s_lives > 0) {
+                --s_lives;   /* KARNOV.EXE: hit once → минус жизнь (dec [0xCF4E]) */
+            }
             if (audio_running) {
                 if (physics_just_died()) {
                     audio_play_music(5, /*loop=*/false);
@@ -477,6 +575,7 @@ int splash_run(const splash_options_t *opt)
             if (ai_scroll_picked() && current_level >= 1 && !s_level_end) {
                 s_level_end = true;
                 s_level_end_start = frame;
+                if (s_lives < KARNOV_MAX_LIVES) ++s_lives;  /* level-end: выпадает символ жизни (+1) */
                 if (audio_running) audio_play_music(2, /*loop=*/false);  /* level-completion jingle */
                 printf("LEVEL%u: свиток подобран → level-end секвенция\n", current_level);
             }
@@ -494,6 +593,8 @@ int splash_run(const splash_options_t *opt)
                         frame = 0;
                         s_demo_done_frame = 0;
                         s_level_end = false;
+                        physics_set_invuln(false);   /* invuln не течёт в след. уровень */
+                        physics_set_sit_scroll(false); /* сбросить позу свитка */
                         if (audio_running) audio_play_music(0, /*loop=*/true);  /* снова in-game музыка */
                         continue;
                     }
@@ -509,6 +610,7 @@ int splash_run(const splash_options_t *opt)
             draw_ladder(frame, g_scroll_x, g_scroll_y);
             ai_render(mode_cga, g_scroll_x, g_scroll_y);
             physics_render(inp, frame, mode_cga, g_scroll_x, g_scroll_y);
+            ai_render_overlay(mode_cga, g_scroll_x, g_scroll_y);
             draw_hud(frame, physics_get_x(), inp);
             render_present();
 

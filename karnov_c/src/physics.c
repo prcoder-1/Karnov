@@ -134,6 +134,12 @@ static int  s_spawn_y             = 108;
 static bool s_dying               = false;
 static u16  s_dying_frame         = 0;
 static bool s_just_died_pulse     = false;
+/* Неуязвимость: включается на время victory-секвенции (boss убит, Karnov
+ * авто-идёт к свитку), чтобы вода/опасности не убили его во время прохода. */
+static bool s_invuln              = false;
+/* Level-end: Karnov сидит со свитком (front-facing поза #0x60-0x62), а не
+ * обычный crouch. Включается на время s_level_end. */
+static bool s_sit_scroll          = false;
 #define DEATH_LEN  60   /* ≈ 2.2 sec @ 27.5 FPS */
 
 /* Sprite-slot mapping для Karnov (пользователь-verified из оригинала
@@ -321,6 +327,7 @@ void physics_reset(int x, int y)
     s_dying = false;
     s_dying_frame = 0;
     s_just_died_pulse = false;
+    s_invuln = false;
     inv_reset();                 /* пустой инвентарь — pickup обязателен */
     /* для отладки можно зафиксировать позицию через env: */
     const char *e = getenv("KARNOV_FIX_POS");
@@ -371,29 +378,37 @@ void physics_tick(u8 input)
     inv_tick();
     s_flying = inv_flying();
 
-    /* 1. Edge-handling OPT: распаковываем через inv_consume_for_opt.
-     *    Wings приоритет, потом ladder. Эффект применяется ниже. */
-    item_kind_t used = ITEM_NONE;
+    /* 1. Edge-handling OPT (single «use option» button, INP_OPT = Z).
+     *    Оригинал KARNOV.EXE: OPT + LEFT/RIGHT = CYCLE выбора предмета;
+     *    OPT без направления = USE выбранного. Эффекты не-физических
+     *    предметов применяются внутри inv_use(); LADDER/WINGS возвращают
+     *    id, а размещение/полёт делаем здесь. */
     if (opt_edge) {
-        /* Лестница ставится только стоя на земле и без уже поставленной;
-         * wings можно активировать в любой момент (даже в прыжке).
-         * Поэтому сначала смотрим что в инвентаре есть, а потом проверяем
-         * условия для конкретного действия. */
-        if (inv_has_wings() && !s_flying) {
-            used = inv_consume_for_opt();     /* активирует полёт */
-            s_flying = true;
-            /* На случай, если Karnov был на лестнице — отлепляем. */
-            s_on_ladder = false;
-            s_vy_q4 = 0;
-            s_in_jump = false;                /* полёт прерывает прыжок */
-        } else if (inv_has_ladder() && s_on_ground && !s_ladder_placed
-                                    && !s_on_ladder) {
-            used = inv_consume_for_opt();     /* кладёт лестницу */
-            s_ladder_placed       = true;
-            s_ladder_x            = s_x;
-            s_ladder_placed_frame = s_cur_frame;
+        if (wants_l || wants_r) {
+            /* Переключить выбор предмета, НЕ используя его. */
+            inv_cycle(wants_r ? +1 : -1);
+        } else {
+            int used = inv_use();
+            if (used == ITEM_WINGS) {
+                /* Активирует полёт (fly_timer уже выставлен в inv_use).
+                 * Здесь мирроим прежнее поведение: отлепляем лестницу,
+                 * гасим vy, выходим из jump-state. */
+                s_flying    = true;
+                s_on_ladder = false;
+                s_vy_q4     = 0;
+                s_in_jump   = false;          /* полёт прерывает прыжок */
+            } else if (used == ITEM_LADDER) {
+                /* Лестница ставится только стоя на земле и без уже
+                 * поставленной. Если условие не выполнено — предмет уже
+                 * списан в inv_use(); визуально лестница не появляется
+                 * (как «потеря» при неудачной постановке). */
+                if (s_on_ground && !s_ladder_placed && !s_on_ladder) {
+                    s_ladder_placed       = true;
+                    s_ladder_x            = s_x;
+                    s_ladder_placed_frame = s_cur_frame;
+                }
+            }
         }
-        (void)used;
     }
 
     /* 2. Решаем, на лестнице ли Karnov. На лестницу можно «прицепиться»:
@@ -525,7 +540,10 @@ void physics_tick(u8 input)
          * «это прыжок» — pick_sprite_id будет показывать K_JUMP даже на
          * descent'е, в отличие от падения-без-прыжка (K_FALL). */
         if (wants_u && !s_prev_u && s_on_ground) {
-            s_vy_q4 = JUMP_VY_Q4;
+            /* Дизассемблирование KARNOV.EXE: базовый jump vy = -5.0 px/frame
+             * (JUMP_VY_Q4 = -80 в Q4). BOOTS удваивают силу прыжка → -10.0
+             * (JUMP_VY_Q4 * 2), пока boots-эффект активен (таймер). */
+            s_vy_q4 = inv_boots_active() ? (JUMP_VY_Q4 * 2) : JUMP_VY_Q4;
             s_on_ground = false;
             s_in_jump = true;
         }
@@ -591,7 +609,7 @@ void physics_tick(u8 input)
      * (s_y — base/feet); если это вода (attr=08), стартуем dying-state.
      * В полёте контакт с водой тоже убивает — это совпадает с поведением
      * оригинала. */
-    if (!s_dying && level_is_water_at(s_x, s_y)) {
+    if (!s_invuln && !s_dying && level_is_water_at(s_x, s_y)) {
         s_dying = true;
         s_dying_frame = 0;
         s_just_died_pulse = true;
@@ -604,6 +622,8 @@ void physics_tick(u8 input)
 
 bool physics_just_died(void) { return s_just_died_pulse; }
 bool physics_is_dying(void)  { return s_dying; }
+void physics_set_invuln(bool on) { s_invuln = on; }
+void physics_set_sit_scroll(bool on) { s_sit_scroll = on; }
 
 int  physics_get_x(void)       { return s_x; }
 int  physics_get_y(void)       { return s_y; }
@@ -654,6 +674,13 @@ static u16 pick_sprite_id(u8 input, u16 frame)
     if (s_dying) {
         static const u16 die_cycle[4] = { K_DIE_1, K_DIE_2, K_DIE_3, K_DIE_4 };
         return die_cycle[(s_dying_frame >> 3) & 3];
+    }
+    /* Level-end: Karnov сидит со свитком — front-facing CROUCH-поза
+     * #0x67(R)/#0x6F(L) (руки скрещены на груди). Это правильная «сидячая»
+     * поза (0x60-0x62 были dissolve, 0x7B — спина на лестнице). Сам свиток
+     * #0x90 рисуется поверх рук отдельно в physics_render. */
+    if (s_sit_scroll) {
+        return (s_facing < 0) ? K_CROUCH_L : K_CROUCH_R;
     }
     bool wants_u   = (input & INP_U) != 0;
     bool wants_d   = (input & INP_D) != 0;
@@ -749,6 +776,27 @@ void physics_render(u8 input, u16 frame, bool mode_cga, int scroll_x, int scroll
                 if (xx < 0 || xx >= WIN_W) continue;
                 u32 col = sprite_is_cga() ? pal[v & 3] : pal[v & 15];
                 render_framebuffer()[yy * WIN_W + xx] = col;
+            }
+        }
+        /* Level-end: свиток #0x90 в руках сидящего Karnov'а (поверх тела,
+         * по центру, на уровне груди/рук). Смещение можно подстроить. */
+        if (s_sit_scroll) {
+            const sprite_t *sc = sprite_find(0x90);
+            if (sc) {
+                int sxo = s_x - scroll_x - sc->w / 2;
+                int syo = s_y - scroll_y - (int)(s->h * 3 / 5);
+                for (int r = 0; r < sc->h; ++r) {
+                    int yy = syo + r;
+                    if (yy < 0 || yy >= WIN_H) continue;
+                    for (int c = 0; c < sc->w; ++c) {
+                        u8 v = sc->pixels[r * sc->w + c];
+                        if (v == 0xFF || v == ck) continue;
+                        int xx = sxo + c;
+                        if (xx < 0 || xx >= WIN_W) continue;
+                        render_framebuffer()[yy * WIN_W + xx] =
+                            sprite_is_cga() ? pal[v & 3] : pal[v & 15];
+                    }
+                }
             }
         }
         return;

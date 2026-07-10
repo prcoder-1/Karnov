@@ -30,6 +30,8 @@
 #define TYPE_FLYING_BIRD       1004  /* LEVEL1-start «два орла» (sky-spawn, sprites
                                       * #147-148). Отдельный псевдо-тип, чтобы не
                                       * путать с реальным type 14 = Селёдка. */
+#define TYPE_BOMB_BLAST        1005  /* анимированная вспышка Bomb-предмета
+                                      * (#25→#26→#27→#28, ~50 кадров). */
 
 /* Sprite IDs для player-fireball — 2-кадровый цикл из user-verified
  * mapping (2026-05-27): #19, #20 — анимация выстрелов Karnov.
@@ -101,6 +103,10 @@ typedef struct ai_obj {
 static ai_obj_t g_obj[MAX_AI];
 static int      g_num = 0;
 
+/* Текущий кадр — записывается в начале ai_tick, читается функциями вне
+ * тик-цикла (ai_bomb_explode) для spawn_frame анимации вспышки. */
+static u16      g_ai_frame = 0;
+
 /* Per-entry state машинка для bidirectional scroll spawn:
  *   g_alive_idx[i]  — индекс активного g_obj-слота для level_enemies[i],
  *                     или -1 если не активен сейчас (despawned, но может
@@ -124,6 +130,7 @@ static int g_max_right_edge = 0;
 static bool g_boss_dead = false;
 static u16  g_boss_dead_frame = 0;
 static bool g_scroll_picked = false;
+static int  g_boss_x = 0;   /* X boss'а на момент смерти — фикс. точка падения свитка */
 
 /* Запас в пикселях справа от viewport, на котором мы заранее активируем
  * врага (чтобы он успел появиться до того, как игрок увидит). 32 px
@@ -386,6 +393,17 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->alive = false;
         return;
     }
+}
+
+/* TYPE_BOMB_BLAST — анимированная вспышка Bomb-предмета. Растёт через
+ * спрайты #25→#26→#27→#28 (16×6, 32×9, 32×15, 32×19 — уже в кэше) за ~50
+ * кадров, затем исчезает. Врагов уже убил ai_bomb_explode() при спавне. */
+static void ai_bomb_blast(ai_obj_t *o, u16 frame, u8 input)
+{
+    (void)input;
+    u16 age = (u16)(frame - o->spawn_frame);
+    o->anim_phase = age / 13;
+    if (age >= 50) o->alive = false;
 }
 
 /* ─── LEVEL1 enemies (упрощённые реализации) ──────────────────────────
@@ -681,6 +699,7 @@ static ai_handler_fn pick_handler(u16 type)
         case TYPE_STONE_THROWER:   return ai_stone_thrower;
         case TYPE_ROCK_PROJECTILE: return ai_rock_projectile;
         case TYPE_PLAYER_FIREBALL: return ai_player_fireball;
+        case TYPE_BOMB_BLAST:      return ai_bomb_blast;
         /* Type 7 invisible trigger, type 12, 20+: stub. */
         default:  return ai_stub;
     }
@@ -864,6 +883,7 @@ void ai_init_from_level(u16 level_num)
 
 void ai_tick(u16 frame, u8 karnov_input)
 {
+    g_ai_frame = frame;
     /* Прежде здесь был static-auto-init, вызывавший
      * ai_init_from_level(0). При запуске напрямую с --level 1 он сбрасывал
      * g_pending_idx уже после prepare_level → каждый тик re-spawn'ил тех
@@ -882,8 +902,12 @@ void ai_tick(u16 frame, u8 karnov_input)
     }
 
     /* После убийства boss'а через ~30 ticks спавним свиток (scroll item).
-     * custom=999 — sentinel marker (НЕ реальный sprite ID #47 = акваланг).
-     * Реальный sprite свитка не верифицирован, рендер пока fallback. */
+     * custom=999 — sentinel маркер подбора (level-end). item_sprite=0x90 —
+     * настоящий спрайт выпадающего свитка (user-verified 2026-07-10, скриншот:
+     * белый объект на земле). Karnov автоматически подходит к нему (неуязвим),
+     * берёт и садится со свитком. Прежняя заглушка #0x32 (Treasure) была
+     * неверной — #329-333 из ai_type56 вообще не рисуются как обычные спрайты
+     * (это extended-data, не блиттятся), а реальный свиток = обычный #0x90. */
     if (g_boss_dead && !g_scroll_picked) {
         bool scroll_exists = false;
         for (int i = 0; i < g_num; ++i) {
@@ -894,15 +918,15 @@ void ai_tick(u16 frame, u8 karnov_input)
         if (!scroll_exists && (frame - g_boss_dead_frame) >= 30) {
             int slot = alloc_obj_slot();
             if (slot >= 0) {
-                int kx = physics_get_x();
                 g_obj[slot] = (ai_obj_t){
                     .alive       = true,
                     .type        = 5,             /* падающий бонус */
-                    .x           = kx,            /* над Karnov-ом */
+                    .x           = g_boss_x,      /* фикс. X boss'а (не над Karnov-ом) */
                     .y           = 50,            /* высоко над землёй */
                     .vy          = 1,
                     .facing      = 1,
                     .custom      = 999,           /* sentinel: boss-reward scroll */
+                    .item_sprite = 0x90,          /* настоящий спрайт свитка (#0x90) */
                     .level_idx   = -1,
                     .spawn_frame = frame,
                 };
@@ -1017,6 +1041,10 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
         }
         case TYPE_PLAYER_FIREBALL:
             return (anim_phase & 1) ? SPRITE_PLAYER_FIREBALL_B : SPRITE_PLAYER_FIREBALL_A;
+        case TYPE_BOMB_BLAST: {                     /* растущая вспышка #25..#28 */
+            u16 p = anim_phase > 3 ? 3 : anim_phase;
+            return 25 + p;
+        }
         case TYPE_ROCK_PROJECTILE: {
             /* Rolling rock — байт-точный цикл AnimSeg DS:0x18EC: #21 → #22 → #23
              * (3 фазы; см. ai_rock_projectile). */
@@ -1045,6 +1073,7 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         if (g_obj[i].invisible) continue;  /* OPTIONS items на splash */
         if (g_obj[i].type == 7) continue;  /* невидимый триггер-«призрак» (num_bboxes=0) */
         if (g_obj[i].type == 9) continue;  /* стартовый дракон — рисуется draw_level1_dragon() */
+        if (g_obj[i].type == TYPE_BOMB_BLAST) continue;  /* вспышка — поверх Karnov'а (ai_render_overlay) */
         /* Пасс 0 — только фоновые летуны; пасс 1 — все остальные поверх. */
         if (ai_is_background_flyer(g_obj[i].type) != (pass == 0)) continue;
         u16 sid;
@@ -1121,21 +1150,45 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
   (void)mode_cga;
 }
 
+/* Оверлей поверх Karnov'а: анимированная вспышка Bomb-предмета (#25→#28).
+ * Вызывается из game.c ПОСЛЕ physics_render, чтобы взрыв был на переднем плане. */
+void ai_render_overlay(bool mode_cga, int scroll_x, int scroll_y)
+{
+    (void)mode_cga;
+    for (int i = 0; i < g_num; ++i) {
+        if (!g_obj[i].alive || g_obj[i].type != TYPE_BOMB_BLAST) continue;
+        u16 sid = sprite_for_type(TYPE_BOMB_BLAST, g_obj[i].anim_phase);
+        const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
+        if (!s) continue;
+        int x0 = g_obj[i].x - s->body_cx - scroll_x;
+        int y0 = g_obj[i].y - s->h - scroll_y;
+        u8 ck = sprite_is_cga() ? 0xFF : 1;
+        const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
+        for (int r = 0; r < s->h; ++r) {
+            int yy = y0 + r;
+            if (yy < 0 || yy >= WIN_H) continue;
+            for (int c = 0; c < s->w; ++c) {
+                u8 v = s->pixels[r * s->w + c];
+                if (v == 0xFF || v == ck) continue;
+                int xx = x0 + c;
+                if (xx < 0 || xx >= WIN_W) continue;
+                render_framebuffer()[yy * WIN_W + xx] =
+                    sprite_is_cga() ? pal[v & 3] : pal[v & 15];
+            }
+        }
+    }
+}
+
 /* ─── Pickup detection ─────────────────────────────────────────────────
  * Karnov bbox ≈ 16×24 от (kx, ky) = центр-ног. Items (type 6, custom>0) —
  * это showcase-иконки 16×12 с anchor (cx=body_cx=8, y=bottom). Простое
  * AABB-пересечение. */
-/* Положить в инвентарь предмет по его sprite_id (#39..49 = OPTIONS-иконки).
+/* Положить в инвентарь предмет по его sprite_id (#39..48 = OPTIONS-иконки).
  * В оригинале pickup вызывает cs:0x41d:0x9be(item_id) — «добавить в очередь
- * OPTIONS». Здесь реализованы Ladder(#39) и Wings(#45); остальные предметы
- * подбираются (исчезают из мира), но эффект пока не смоделирован. */
+ * OPTIONS». Полная 10-предметная модель: item_id = sprite - 39. */
 static void give_item_by_sprite(u16 sprite)
 {
-    switch (sprite) {
-        case 39: inv_give_ladder(); break;   /* лестница */
-        case 45: inv_give_wings();  break;   /* крылья */
-        default:                    break;   /* boots/bomb/boomerang/… TODO */
-    }
+    inv_give_by_sprite(sprite);
 }
 
 void ai_try_pickup(int kx, int ky)
@@ -1369,6 +1422,7 @@ void ai_despawn_offscreen(int scroll_x)
          * сами завершаются. Только обычных врагов LEVEL1+. */
         u16 t = g_obj[i].type;
         if (t == TYPE_PLAYER_FIREBALL) continue;
+        if (t == TYPE_BOMB_BLAST) continue;  /* короткоживущая вспышка у Karnov'а */
         if (t == 5) continue;             /* падающий предмет — лежит до подбора */
         if (t == 6) continue;             /* OPTIONS items — не трогаем */
         if (g_obj[i].is_boss) continue;   /* boss остаётся пока не убит */
@@ -1402,12 +1456,83 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     if (o->is_boss) {
         g_boss_dead       = true;
         g_boss_dead_frame = frame;
+        g_boss_x          = o->x;
     }
+}
+
+/* Уничтожить всех живых damageable-врагов на экране (Bomb / Clapper).
+ * exclude_boss=true (Clapper) пропускает boss'а; false (Bomb) убивает всех.
+ * Логика зеркалит ai_notify_enemy_hit: снимаем alive, метим g_killed,
+ * очищаем g_alive_idx, отмечаем boss_dead. */
+void ai_clear_enemies(bool exclude_boss)
+{
+    for (int i = 0; i < g_num; ++i) {
+        ai_obj_t *o = &g_obj[i];
+        if (!o->alive) continue;
+        if (!is_damageable_enemy(o->type) && !o->is_boss) continue;
+        if (exclude_boss && o->is_boss) continue;
+        o->alive = false;
+        int li = o->level_idx;
+        if (li >= 0 && li < LEVEL_MAX_ENEMIES) {
+            g_killed[li]    = true;
+            g_alive_idx[li] = -1;
+        }
+        if (o->is_boss) {
+            g_boss_dead       = true;
+            g_boss_dead_frame = 0;
+            g_boss_x          = o->x;
+        }
+    }
+    audio_play_sfx(1);   /* enemy-kill sfx */
+}
+
+/* Bomb-предмет: спавнит анимированную вспышку в позиции Karnov'а и убивает
+ * всех врагов (включая boss'а) через ai_clear_enemies(false). */
+void ai_bomb_explode(void)
+{
+    int slot = alloc_obj_slot();
+    if (slot >= 0) {
+        g_obj[slot] = (ai_obj_t){
+            .alive       = true,
+            .type        = TYPE_BOMB_BLAST,
+            .x           = physics_get_x(),
+            .y           = physics_get_y() - 6,   /* по центру тела Karnov'а, а не у ног */
+            .spawn_frame = g_ai_frame,
+        };
+    }
+    ai_clear_enemies(false);
 }
 
 bool ai_boss_dead(void)        { return g_boss_dead;    }
 bool ai_scroll_picked(void)    { return g_scroll_picked; }
 u16  ai_boss_dead_frame(void)  { return g_boss_dead_frame; }
+int  ai_scroll_target_x(void)  { return g_boss_x;        }
+
+/* Свиток (type5 custom=999) уже заспавнен и падает? Karnov должен начать
+ * авто-подход к свитку ТОЛЬКО после того как свиток начал выпадать. */
+bool ai_scroll_spawned(void)
+{
+    for (int i = 0; i < g_num; ++i)
+        if (g_obj[i].alive && g_obj[i].type == 5 && g_obj[i].custom == 999)
+            return true;
+    return false;
+}
+
+/* Свиток уже попал в видимую область экрана? Свиток спавнится высоко
+ * (y=50) и падает; Karnov должен начать подход ТОЛЬКО когда свиток виден на
+ * экране (упал в viewport), а не раньше. cam_x/cam_y — scroll камеры,
+ * view_w/view_h — размеры игрового окна. */
+bool ai_scroll_onscreen(int cam_x, int cam_y, int view_w, int view_h)
+{
+    for (int i = 0; i < g_num; ++i) {
+        if (g_obj[i].alive && g_obj[i].type == 5 && g_obj[i].custom == 999) {
+            int sx = g_obj[i].x - cam_x;
+            int sy = g_obj[i].y - cam_y;
+            return sx >= 0 && sx <= view_w && sy >= 0 && sy <= view_h;
+        }
+    }
+    return false;
+}
 
 /* ─── Player fireball spawn ──────────────────────────────────────────── */
 void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)

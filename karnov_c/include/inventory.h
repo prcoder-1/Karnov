@@ -1,53 +1,76 @@
-/* inventory.h — Karnov OPTIONS-инвентарь (упрощённый).
+/* inventory.h — Karnov OPTIONS-инвентарь (полная 10-предметная модель).
  *
- * Оригинал KARNOV.EXE: 10 предметов (Boots, Bomb, Ladder, Boomerang, Clapper,
- * Glasses, Swimming Mask, Wings, Shield, K-Mark), хранящихся в очереди
- * options-slots. Здесь реализованы только Ladder и Wings — остальное вне
- * скопа. Каждый предмет одно-слотовый: повторный pickup просто перезаписывает
- * флаг (как в оригинале при заполненной очереди отдельных слотов).
+ * Оригинал KARNOV.EXE: 10 предметов (OPTIONS), item_id = icon_sprite - 39
+ * (disassembly-verified):
+ *   0=Ladder, 1=Boots, 2=Bomb, 3=Fire(passive), 4=Boomerang,
+ *   5=Clapper, 6=Glasses, 7=Mask, 8=Wings, 9=Shield.
+ * Каждый предмет STOCKABLE — хранится счётчик count[id]. Иконка предмета —
+ * sprite #(39 + item_id) (спрайты #39..48).
  *
- * Активация: один общий OPT-key. Приоритет wings → ladder (если wings есть и
- * полёт не активен, OPT включает полёт; иначе кладёт лестницу). Это упрощение
- * настоящего «cycle-select», но даёт детерминированное поведение под наш
- * single-button input.
+ * Управление (оригинал): один общий OPT-key (INP_OPT = Z). При OPT+LEFT/RIGHT
+ * — CYCLE выбранного предмета; при OPT без направления — USE выбранного.
+ *
+ * Wrapper-функции inv_has_ladder/inv_has_wings/inv_flying/... сохранены для
+ * совместимости со старыми вызовами в physics.c / ai.c / game.c.
  */
 #ifndef KARNOV_INVENTORY_H
 #define KARNOV_INVENTORY_H
 
 #include "karnov.h"
 
+/* DOS item order (disassembly-verified): item_id = icon_sprite - 39.
+ *   0=LADDER(#39) 1=BOOTS(#40) 2=BOMB(#41) 3=FIRE(#42, passive)
+ *   4=BOOMERANG(#43) 5=CLAPPER(#44) 6=GLASSES(#45) 7=MASK(#46)
+ *   8=WINGS(#47) 9=SHIELD(#48). */
 typedef enum {
-    ITEM_NONE = 0,
-    ITEM_LADDER,
+    ITEM_LADDER = 0,
+    ITEM_BOOTS,
+    ITEM_BOMB,
+    ITEM_FIRE,
+    ITEM_BOOMERANG,
+    ITEM_CLAPPER,
+    ITEM_GLASSES,
+    ITEM_MASK,
     ITEM_WINGS,
-} item_kind_t;
+    ITEM_SHIELD,
+    ITEM_NUM = 10
+} item_id_t;
 
 /* Сброс инвентаря и состояния полёта. Вызывается из physics_reset. */
 void inv_reset(void);
 
-/* Положить предмет в инвентарь (вызывается из ai_try_pickup). */
-void inv_give_ladder(void);
-void inv_give_wings(void);
+/* Добавить предмет в инвентарь. K-Mark считается отдельно (kmarks). */
+void inv_give(int id);
 
-/* Вернуть лестницу в инвентарь (Karnov слез с неё к низу — лестница
- * сложилась обратно). */
-void inv_take_back_ladder(void);
+/* Подобрать предмет по sprite_id: #39..48 → inv_give(sprite-39). */
+void inv_give_by_sprite(u16 sprite);
 
-bool inv_has_ladder(void);
-bool inv_has_wings(void);
-bool inv_flying(void);             /* wings активны и таймер > 0 */
-u16  inv_flying_remaining(void);   /* frames до окончания полёта */
+int  inv_count(int id);      /* count[id] */
+int  inv_current(void);      /* индекс выбранного предмета, -1 если пусто */
+int  inv_distinct(void);     /* число типов предметов с count>0 */
 
-/* Попытка использовать инвентарь по нажатию OPT.
- * Приоритет: wings (если есть и не летит) → ladder.
- * Возвращает что именно использовано, чтобы physics_tick применил эффект. */
-item_kind_t inv_consume_for_opt(void);
+/* Переключить выбор на следующий (dir>0) / предыдущий (dir<0) предмет
+ * с count>0, wrapping mod 10. Если ничего нет — current=-1. */
+void inv_cycle(int dir);
 
-/* Тик каждого кадра — декрементирует fly-timer. */
+/* Использовать выбранный предмет. Возвращает item_id, либо -1 если нечего.
+ * Применяет НЕ-физические эффекты внутри; для LADDER/WINGS только возвращает
+ * id — физику (постановку/полёт) выполняет physics.c. */
+int  inv_use(void);
+
+bool inv_boots_active(void); /* boots_timer > 0 */
+
+/* Тик каждого кадра — декрементирует boots_timer и fly_timer. */
 void inv_tick(void);
 
-/* Принудительно прервать полёт (например, если Karnov ушёл за край).
- * Wings всё равно расходованы — это не возврат. */
-void inv_cancel_flying(void);
+/* ─── Compat-обёртки для существующих вызовов ─────────────────────────── */
+void inv_give_ladder(void);      /* → inv_give(ITEM_LADDER) */
+void inv_give_wings(void);       /* → inv_give(ITEM_WINGS)  */
+void inv_take_back_ladder(void); /* → inv_give(ITEM_LADDER) */
+bool inv_has_ladder(void);       /* count[ITEM_LADDER] > 0  */
+bool inv_has_wings(void);        /* count[ITEM_WINGS]  > 0  */
+bool inv_flying(void);           /* fly_timer > 0 */
+u16  inv_flying_remaining(void); /* fly_timer */
+void inv_cancel_flying(void);    /* fly_timer = 0 */
 
 #endif

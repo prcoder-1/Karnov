@@ -55,6 +55,8 @@ void physics_set_current_frame(u16 frame);
  * physics_is_dying() — true пока проигрывается анимация. */
 bool physics_just_died(void);
 bool physics_is_dying(void);
+void physics_set_invuln(bool on);   /* victory-секвенция: Karnov неуязвим */
+void physics_set_sit_scroll(bool on); /* level-end: поза «сидит со свитком» #0x60-0x62 */
 
 /* Рендер Karnov-спрайта в текущей позе. M3+: использует sprite cache,
  * иначе fallback плейсхолдер. scroll_x/y — offset мирового пространства. */
