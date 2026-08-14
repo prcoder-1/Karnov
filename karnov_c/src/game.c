@@ -412,6 +412,10 @@ int splash_run(const splash_options_t *opt)
         while (frame < opt->ppm_frame) {
             demo_tick(frame);
             u8 inp = demo_input_state();
+            /* KARNOV_DBG_INPUT=<hex> — подмешать биты ввода в headless-прогоне
+             * (для тестов анимаций/физики без клавиатуры). */
+            { const char *di = getenv("KARNOV_DBG_INPUT");
+              if (di) inp |= (u8)strtol(di, NULL, 16); }
             ai_tick(frame, inp);
             physics_set_current_frame(frame);
             bool was_dying = physics_is_dying();

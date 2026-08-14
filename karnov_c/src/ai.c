@@ -330,7 +330,14 @@ static int obj_feet(const ai_obj_t *o)
  *
  * Без этого враги перечисленных типов рисовались НИЖЕ, чем нужно: в их
  * записях spawn_y — линия земли, а не верх спрайта. */
-typedef enum { PLACE_NONE = 0, PLACE_SNAP_LEFT, PLACE_SNAP_CENTER, PLACE_LIFT16 } place_mode_t;
+typedef enum {
+    PLACE_NONE = 0,
+    PLACE_SNAP_LEFT,     /* хелпер 0x19F: колонка по левому краю, маска 0x0001 */
+    PLACE_SNAP_CENTER,   /* хелпер 0x1DE: колонка по центру, маска 0x0089 */
+    PLACE_LIFT,          /* y -= const (константа из DS, см. type_place_lift) */
+    PLACE_ALIGN10,       /* y -= y % 10 — выравнивание по строке тайлов */
+    PLACE_PLAYER_Y       /* y = player_y − 22 (тип 18 игнорирует spawn_y) */
+} place_mode_t;
 
 static place_mode_t type_place_mode(u16 type)
 {
@@ -340,10 +347,26 @@ static place_mode_t type_place_mode(u16 type)
             return PLACE_SNAP_LEFT;
         case 15: case 35: case 36: case 37: case 38: case 40:
             return PLACE_SNAP_CENTER;
-        case 47:
-            return PLACE_LIFT16;
+        case 12: case 13: case 47:
+            return PLACE_LIFT;
+        case 51: case 52:
+            return PLACE_ALIGN10;
+        case 18:
+            return PLACE_PLAYER_Y;
         default:
             return PLACE_NONE;
+    }
+}
+
+/* Константа подъёма в state 0 (значения байтов из DS-образа):
+ *   тип 12 → DS:0x0FC1 = 16, тип 13 → DS:0x1002 = 26, тип 47 → DS:0x10D4 = 16. */
+static int type_place_lift(u16 type)
+{
+    switch (type) {
+        case 12: return 16;
+        case 13: return 26;
+        case 47: return 16;
+        default: return 0;
     }
 }
 
@@ -1877,8 +1900,10 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
      * рисовались бы закопанными по макушку. Тип 8 из списка исключён:
      * это sky-спаунер, в порту он не материализуется. */
     place_mode_t pm = type_place_mode(e->type);
-    if (pm == PLACE_LIFT16) {
-        g_obj[slot].y -= 16;
+    if (pm == PLACE_LIFT || pm == PLACE_ALIGN10 || pm == PLACE_PLAYER_Y) {
+        if (pm == PLACE_LIFT)            g_obj[slot].y -= type_place_lift(e->type);
+        else if (pm == PLACE_ALIGN10)    g_obj[slot].y -= g_obj[slot].y % TILE_H;
+        else                             g_obj[slot].y = physics_get_y() - 22;
         g_obj[slot].home_y = g_obj[slot].y;
         g_obj[slot].spawn_y = (u16)g_obj[slot].y;
     } else if (pm != PLACE_NONE) {

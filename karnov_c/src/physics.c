@@ -406,6 +406,12 @@ void physics_tick(u8 input)
      * gravity, мягко уронив Karnov на землю. */
     inv_tick();
     s_flying = inv_flying();
+    /* KARNOV_DBG_LADDER=1 — поставить лестницу без предмета (тестовый
+     * хук: иначе анимацию лазанья не проверить в headless-прогоне). */
+    { const char *dl = getenv("KARNOV_DBG_LADDER");
+      if (dl && !s_ladder_placed && s_on_ground) {
+          s_ladder_placed = true; s_ladder_x = s_x;
+          s_ladder_bot_y = find_floor_y(s_x, s_y); s_ladder_placed_frame = s_cur_frame; } }
 
     /* 1. Edge-handling OPT (single «use option» button, INP_OPT = Z).
      *    Оригинал KARNOV.EXE: OPT + LEFT/RIGHT = CYCLE выбора предмета;
@@ -749,11 +755,14 @@ static u16 pick_sprite_id(u8 input, u16 frame)
         if (s_y <= LADDER_TOP_Y && !wants_u && !wants_d) {
             return K_CLIMB_TOP;
         }
-        /* AnimSeg DS:0x1524 = [stride=4, #121, #122, #121, #120].
-         * 4-кадровый цикл, продвигается только при U/D-press
-         * (s_climb_ticks gate в physics_tick). */
+        /* Аним-таблица оригинала DS:0x153E → DS:0x1524: 4 кадра
+         * #121, #122, #121, #120. Кадр продвигается раз в tick_period
+         * игровых тиков (у Карнова = 2) и только когда он реально
+         * перебирает руками (s_climb_ticks тикает лишь при U/D). Раньше
+         * стояло >> 2 — кадр менялся вдвое реже, и подъём выглядел
+         * «скольжением» без анимации. */
         static const u16 cycle[4] = { K_CLIMB_B, K_CLIMB_C, K_CLIMB_B, K_CLIMB_A };
-        return cycle[(s_climb_ticks >> 2) & 3];
+        return cycle[(s_climb_ticks >> 1) & 3];
     }
 
     /* 3. В воздухе: jump-sprite если это «свой прыжок» (включая descent),
@@ -770,14 +779,16 @@ static u16 pick_sprite_id(u8 input, u16 frame)
      * не на лестнице — все они уже отфильтрованы выше). */
     if (firing) return face_left ? K_FIRE_L : K_FIRE_R;
 
-    /* 6. Walk — 4-кадровый цикл per facing.
-     * Stride (game-ticks per frame) — байт-verified: sub_timer_max=4 ×
-     * *state_ptr=2 = 8 ticks/frame ≈ 290 ms at 27.5 FPS. */
+    /* 6. Walk — ПЯТИкадровый цикл, как в аним-таблице оригинала
+     * (DS:0x1500: state 0 = 98,99,100,101,102; state 1 = 106..110), т.е.
+     * стоячий кадр входит в цикл шага. Темп: кадр раз в tick_period
+     * игровых тиков; у обработчиков Карнова tick_period = 2 (значения
+     * +0xC9 в cs:0xE62: 2/4/8), поэтому frame >> 1. */
     if (walking) {
-        static const u16 cycle_r[4] = { K_WALKR_1, K_WALKR_2, K_WALKR_3, K_WALKR_4 };
-        static const u16 cycle_l[4] = { K_WALKL_1, K_WALKL_2, K_WALKL_3, K_WALKL_4 };
+        static const u16 cycle_r[5] = { K_STAND_R, K_WALKR_1, K_WALKR_2, K_WALKR_3, K_WALKR_4 };
+        static const u16 cycle_l[5] = { K_STAND_L, K_WALKL_1, K_WALKL_2, K_WALKL_3, K_WALKL_4 };
         const u16 *cyc = face_left ? cycle_l : cycle_r;
-        return cyc[(frame >> 3) & 3];
+        return cyc[(frame >> 1) % 5];
     }
 
     /* 7. Idle (stand). */
@@ -789,6 +800,11 @@ void physics_render(u8 input, u16 frame, bool mode_cga, int scroll_x, int scroll
     bool walking = (input & (INP_R | INP_L)) != 0;
 
     u16 sid = pick_sprite_id(input, frame);
+    /* KARNOV_DBG_POSE=1 — печатать выбранный кадр Карнова (диагностика
+     * анимаций: какой sid, состояние лестницы, счётчик лазанья). */
+    if (getenv("KARNOV_DBG_POSE"))
+        fprintf(stderr, "f=%u sid=%u y=%d on_ladder=%d climb=%u\n",
+                frame, sid, s_y, (int)s_on_ladder, s_climb_ticks);
     const sprite_t *s = sprite_find(sid);
     if (s) {
         /* pick_sprite_id уже вернул спрайт нужного разворота (в архиве
