@@ -109,12 +109,12 @@ static int  s_ladder_bot_y        = 0;   /* поверхность, на кот�
 static u16  s_ladder_placed_frame = 0;
 static bool s_on_ladder           = false;
 static bool s_prev_opt            = false;   /* для edge-detection B-нажатия */
-/* Накопитель пройденного по X пути для переключения OPTIONS движением:
- * как в оригинале, маркер выбора едет по панели предметов, пока Karnov
- * идёт — каждые ITEM_CYCLE_STEP_PX вправо = следующий предмет, влево =
- * предыдущий. */
-static int  s_item_walk_accum     = 0;
-#define ITEM_CYCLE_STEP_PX 16
+/* Переключение выбранного предмета OPTIONS движением — по ФРОНТУ нажатия
+ * вправо/влево (одно нажатие = один шаг по панели). Удержание клавиши
+ * предметы больше не листает: прежний вариант «каждые 16 px пути» при
+ * ходьбе прокручивал инвентарь без остановки. */
+static bool s_prev_r              = false;
+static bool s_prev_l              = false;
 static u16  s_cur_frame           = 0;
 /* Счётчик кадров лазанья — инкрементируется ТОЛЬКО когда Karnov реально
  * движется по лестнице (нажат U или D). Гарантирует, что в idle-pose Karnov
@@ -345,7 +345,7 @@ void physics_reset(int x, int y)
     s_ladder_placed_frame = 0;
     s_on_ladder = false;
     s_prev_opt = false;
-    s_item_walk_accum = 0;
+    s_prev_r = s_prev_l = false;
     s_cur_frame = 0;
     s_climb_ticks = 0;
     s_climbing_down_prev = false;
@@ -390,8 +390,6 @@ void physics_tick(u8 input)
         }
         return;
     }
-
-    int item_walk_prev_x = s_x;   /* для переключения OPTIONS движением */
 
     bool wants_r    = (input & INP_R)    != 0;
     bool wants_l    = (input & INP_L)    != 0;
@@ -639,25 +637,11 @@ void physics_tick(u8 input)
     if (s_x > s_world_max_x) s_x = s_world_max_x;
     s_prev_u = wants_u;
 
-    /* Переключение OPTIONS движением: фактическое смещение по X (после
-     * коллизий и клампов) накапливается; каждые ITEM_CYCLE_STEP_PX хода
-     * вправо — следующий предмет, влево — предыдущий. Смена направления
-     * сбрасывает накопленное, чтобы «шаг туда-обратно» не дребезжал. */
-    {
-        int dx = s_x - item_walk_prev_x;
-        if (dx != 0) {
-            if ((dx > 0) != (s_item_walk_accum > 0)) s_item_walk_accum = 0;
-            s_item_walk_accum += dx;
-            while (s_item_walk_accum >= ITEM_CYCLE_STEP_PX) {
-                inv_cycle(+1);
-                s_item_walk_accum -= ITEM_CYCLE_STEP_PX;
-            }
-            while (s_item_walk_accum <= -ITEM_CYCLE_STEP_PX) {
-                inv_cycle(-1);
-                s_item_walk_accum += ITEM_CYCLE_STEP_PX;
-            }
-        }
-    }
+    /* Переключение OPTIONS: по фронту нажатия R/L (не по удержанию). */
+    if (wants_r && !s_prev_r) inv_cycle(+1);
+    if (wants_l && !s_prev_l) inv_cycle(-1);
+    s_prev_r = wants_r;
+    s_prev_l = wants_l;
 
     /* Water contact = death. Проверяем тайл прямо под ногами Karnov-а
      * (s_y — base/feet); если это вода (attr=08), стартуем dying-state.

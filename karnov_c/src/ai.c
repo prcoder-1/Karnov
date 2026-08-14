@@ -81,6 +81,17 @@ typedef struct ai_obj {
     ai_part_t parts[MAX_PARTS];
     int    x, y;          /* x — левый край / y — ВЕРХ спрайта (KARNOV.md §3.3) */
     int    cur_h;         /* высота текущего спрайта: «ноги» = y + cur_h */
+    /* Подложка движения оригинала (UPDATELOCS, file 0x25B3): позиция,
+     * скорость и ускорение — 32-битные Q16.16. Движок каждый кадр делает
+     *     x += vx;  y += vy;  vx += ax;  vy += ay
+     * и обработчики почти не двигают объект сами — они задают скорости.
+     * X здесь в ЕДИНИЦАХ движка (1 ед. = 2 px), Y — в строках; поля
+     * x/y выше пересчитываются из них после интегрирования.
+     * Включается для типов, чья TICK-логика портирована (флаг phys). */
+    bool   phys;
+    s32    xq, yq;
+    s32    vxq, vyq;
+    s32    axq, ayq;
     int    vx, vy;        /* пикс/кадр для простых types */
     int    facing;        /* +1 / -1 */
     int    hp;            /* health (для boss'а >1) */
@@ -226,25 +237,61 @@ static int obj_height(const ai_obj_t *o)
     return s ? (int)s->h : 16;
 }
 
+/* ─── UPDATELOCS: центральный интегратор (file 0x25B3) ─────────────────
+ * Точный порт: x += vx; y += vy; vx += ax; vy += ay (всё Q16.16).
+ * Вызывается ДО обработчиков, как фаза 1 кадрового цикла до THINKCYCLE. */
+static void obj_integrate(ai_obj_t *o)
+{
+    o->xq  += o->vxq;
+    o->yq  += o->vyq;
+    o->vxq += o->axq;
+    o->vyq += o->ayq;
+    o->x = (int)(o->xq >> 16) * 2;   /* единицы движка → пиксели порта */
+    o->y = (int)(o->yq >> 16);
+}
+
+/* Перевести объект на Q16.16-подложку, взяв текущие x/y как старт. */
+static void obj_phys_begin(ai_obj_t *o)
+{
+    o->xq = (s32)(o->x / 2) << 16;
+    o->yq = (s32)o->y << 16;
+    o->phys = true;
+}
+
 /* Мировая Y «ног» объекта. */
 static int obj_feet(const ai_obj_t *o)
 {
     return o->y + (o->cur_h > 0 ? o->cur_h : obj_height(o));
 }
 
-/* Типы, чей INIT ставит объект НОГАМИ на землю (хелпер cs:0xD4B:0x19F,
- * file 0xEE4F). Список получен сканом far-call'ов `9A 9F 01 4B 0D` по
- * KARNOV.EXE с привязкой адреса к таблице обработчиков DS:0x10FE:
- *   8, 11, 14, 17, 24, 28, 29, 31, 32, 46, 48, 53, 54, 55.
- * (8 — sky-спаунер, в порту не материализуется, поэтому опущен.) */
-static bool type_snaps_to_ground(u16 type)
+/* Как INIT типа размещает объект по вертикали. Установлено сканом
+ * far-call'ов по KARNOV.EXE с привязкой адресов к таблице DS:0x10FE:
+ *
+ *   PLACE_SNAP_LEFT   — хелпер cs:0xD4B:0x19F (file 0xEE4F): колонка по
+ *     ЛЕВОМУ краю объекта, маска props[attr 0] = 0x0001. Типы 8, 11, 14,
+ *     17, 24, 28, 29, 31, 32, 46, 48, 53, 54, 55 (8 — sky-спаунер, в
+ *     порту не материализуется) + тип 26, который зовёт ядро 0x14C сам.
+ *   PLACE_SNAP_CENTER — хелпер cs:0xD4B:0x1DE (file 0xEE8E): колонка по
+ *     ЦЕНТРУ спрайта (x + sprite_w/2), маска 0x0089 (пол | стена |
+ *     категория 7). Типы 15, 35, 36, 37, 38, 40.
+ *   PLACE_LIFT16      — тип 47: INIT делает y_world -= [DS:0x10D4] = 16.
+ *
+ * Без этого враги перечисленных типов рисовались НИЖЕ, чем нужно: в их
+ * записях spawn_y — линия земли, а не верх спрайта. */
+typedef enum { PLACE_NONE = 0, PLACE_SNAP_LEFT, PLACE_SNAP_CENTER, PLACE_LIFT16 } place_mode_t;
+
+static place_mode_t type_place_mode(u16 type)
 {
     switch (type) {
-        case 11: case 14: case 17: case 24: case 28: case 29:
+        case 11: case 14: case 17: case 24: case 26: case 28: case 29:
         case 31: case 32: case 46: case 48: case 53: case 54: case 55:
-            return true;
+            return PLACE_SNAP_LEFT;
+        case 15: case 35: case 36: case 37: case 38: case 40:
+            return PLACE_SNAP_CENTER;
+        case 47:
+            return PLACE_LIFT16;
         default:
-            return false;
+            return PLACE_NONE;
     }
 }
 
@@ -1550,9 +1597,17 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
      * spawn_y = 290 = поверхность песка), а не верх спрайта. Без снапа они
      * рисовались бы закопанными по макушку. Тип 8 из списка исключён:
      * это sky-спаунер, в порту он не материализуется. */
-    if (type_snaps_to_ground(e->type)) {
+    place_mode_t pm = type_place_mode(e->type);
+    if (pm == PLACE_LIFT16) {
+        g_obj[slot].y -= 16;
+        g_obj[slot].home_y = g_obj[slot].y;
+        g_obj[slot].spawn_y = (u16)g_obj[slot].y;
+    } else if (pm != PLACE_NONE) {
+        const sprite_t *bs = sprite_find(sprite_for_type(type, 0));
+        int probe_x = (pm == PLACE_SNAP_CENTER && bs) ? sx + bs->art_w / 2 : sx;
+        u16 mask = (pm == PLACE_SNAP_CENTER) ? 0x0089 : 0x0001;
         int row0 = sy / TILE_H - 1;
-        int r = level_ground_row_below(sx, row0 < 0 ? 0 : row0);
+        int r = level_ground_row_below(probe_x, row0 < 0 ? 0 : row0, mask);
         if (r >= 0) {
             int ny = r * TILE_H - g_obj[slot].cur_h;
             g_obj[slot].y = ny;
@@ -1707,6 +1762,7 @@ void ai_tick(u16 frame, u8 karnov_input)
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
         g_obj[i].cur_h = obj_height(&g_obj[i]);
+        if (g_obj[i].phys) obj_integrate(&g_obj[i]);   /* фаза 1 до THINKCYCLE */
         pick_handler(g_obj[i].type)(&g_obj[i], frame, karnov_input);
     }
 

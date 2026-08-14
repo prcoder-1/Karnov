@@ -240,7 +240,7 @@ bool level_blocks_walk_h_at(int wx, int wy)
  *   y_world = row*10 − sprite_h[sprite_id]
  * (т.е. НОГИ объекта на верхнюю кромку этой строки).
  * Возвращает −1, если пола в колонке нет. */
-int level_ground_row_below(int wx, int start_row)
+int level_ground_row_below(int wx, int start_row, u16 mask)
 {
     if (wx < 0) return -1;
     int col = wx / TILE_W;
@@ -249,7 +249,7 @@ int level_ground_row_below(int wx, int start_row)
     for (int r = start_row; r < (int)level_num_map_rows; ++r) {
         u8 attr = level_tile_attr[level_map[r][col]];
         if (attr >= 10) return r;                  /* незнакомая категория — считаем полом */
-        if (LEVEL_ATTR_TO_PROPS[attr] & 0x0001) return r;
+        if (LEVEL_ATTR_TO_PROPS[attr] & mask) return r;
     }
     return -1;
 }
