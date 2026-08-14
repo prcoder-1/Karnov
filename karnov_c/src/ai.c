@@ -14,6 +14,7 @@
 #include "level.h"
 #include "physics.h"
 #include "sprite.h"
+#include "anim_data.h"
 #include "palette.h"
 #include "render.h"
 #include "inventory.h"
@@ -35,8 +36,10 @@
 #define TYPE_FLYING_BIRD       1004  /* LEVEL1-start «два орла» (sky-spawn, sprites
                                       * #147-148). Отдельный псевдо-тип, чтобы не
                                       * путать с реальным type 14 = Селёдка. */
-#define TYPE_BOMB_BLAST        1005  /* анимированная вспышка Bomb-предмета
-                                      * (#25→#26→#27→#28, ~50 кадров). */
+#define TYPE_BOMB_BLAST        1005
+                                      /* анимированная вспышка Bomb-предмета
+                                       * (#25→#26→#27→#28, ~50 кадров). */
+#define TYPE_ENEMY_SHOT        1006  /* снаряд врага (порт cs:0x11D6:0x2A3) */
 
 /* Sprite IDs для player-fireball — мелкие круглые «шарики» (7x7).
  * #0x0A/#0x0B — маленькие round energy-ball'ы (4-кадровый набор 0x0A-0x0D).
@@ -89,6 +92,21 @@ typedef struct ai_obj {
      * x/y выше пересчитываются из них после интегрирования.
      * Включается для типов, чья TICK-логика портирована (флаг phys). */
     bool   phys;
+    /* Аним-машина оригинала (ai_dispatch, file 0x0F885): кадр берётся из
+     * таблиц ANIM_LISTS (данные из KARNOV.EXE), а не из ручных циклов.
+     * tick_period (+0xC9) — раз в столько кадров вызывается обработчик и
+     * продвигается кадр; anim_state (+0xD9) — текущее состояние;
+     * pending_state — что обработчик просит на этот тик (−1 = ничего). */
+    bool   use_anim;
+    /* Приватные поля обработчиков — те же, что у ActiveObject оригинала:
+     * st_misc (+0xE9), st_aux (+0xEB), st_phase (+0xED), st_ctr (+0xC7 —
+     * счётчик КАДРОВ, тикает каждый кадр, а не раз в AI-тик). */
+    int    st_misc, st_aux, st_phase, st_ctr;
+    u8     anim_state;
+    u8     frame_index;
+    u8     tick_period;
+    int    tick_countdown;
+    int    pending_state;
     s32    xq, yq;
     s32    vxq, vyq;
     s32    axq, ayq;
@@ -256,6 +274,40 @@ static void obj_phys_begin(ai_obj_t *o)
     o->xq = (s32)(o->x / 2) << 16;
     o->yq = (s32)o->y << 16;
     o->phys = true;
+}
+
+/* ─── Аним-машина (порт ai_dispatch state 2 + биты 2/4 ai_result) ──────
+ * anim_begin — то, что делает INIT типа: период тика и стартовое
+ * состояние. anim_apply — то, что делает диспетчер после обработчика:
+ * смена состояния (без рестарта, если состояние то же) и запись
+ * спрайта/смещения в bbox[0]. */
+static void anim_begin(ai_obj_t *o, int tick_period, int state)
+{
+    o->use_anim      = true;
+    o->tick_period   = (u8)tick_period;
+    o->tick_countdown = tick_period;
+    o->anim_state    = (u8)state;
+    o->frame_index   = 0;
+    o->pending_state = -1;
+}
+
+static void anim_apply(ai_obj_t *o)
+{
+    const anim_list_t *al = (o->type < 58) ? &ANIM_LISTS[o->type] : NULL;
+    if (!al || al->count == 0) return;
+    if (o->pending_state >= 0 && o->pending_state < al->count &&
+        o->pending_state != o->anim_state) {
+        o->anim_state  = (u8)o->pending_state;
+        o->frame_index = 0;                    /* рестарт только при СМЕНЕ */
+    }
+    if (o->anim_state >= al->count) o->anim_state = 0;
+    const anim_state_t *st = &al->states[o->anim_state];
+    if (o->frame_index >= st->n) o->frame_index = 0;
+    o->num_parts       = 1;
+    o->parts[0].sprite = st->spr[o->frame_index];
+    o->parts[0].dx     = (s16)(st->off[o->frame_index * 2] * 2);  /* ед. → px */
+    o->parts[0].dy     = st->off[o->frame_index * 2 + 1];
+    o->facing          = 1;    /* направление уже закодировано состоянием */
 }
 
 /* Мировая Y «ног» объекта. */
@@ -528,48 +580,6 @@ static void ai_bomb_blast(ai_obj_t *o, u16 frame, u8 input)
  * Все AI ниже — damageable (см. is_damageable_obj). Karnov-fireball
  * убивает с одного попадания, что упрощает геймплей. */
 
-/* Type 11 — наземный патрульный (декомпиляция cs:0x11D6:0x09F4 → ai_type11).
- *
- * Pre-dispatch: pending_state_id = (player_x > obj_x) ? 1 : 0 — ВСЕГДА
- * лицом к игроку (выбор анимации L/R).
- *
- * INIT (case 1):  obj.sub_timer_max = 2;  state_list_off = 0x1856;
- * TICK (case 2):
- *   phase 0 (далеко): if (abs_dx >= 10) return  // остаёмся в phase 0
- *                     else: phase = 1; pending_state_id += 2; emit ai_result|2
- *   phase 1 (близко): if (abs_dx <= 10) return  // остаёмся в phase 1
- *                     else: phase = 0;
- *
- * Семантика: phase 0 = «walk toward player», phase 1 = «stopped (близко)».
- * Реальная скорость задаётся state_list animation (не moveменно мы вычисляем).
- * Приблизительно 0.5 px/frame walk (sub_timer_max=2). */
-static void ai_ground_walker(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    int kx = physics_get_x();
-    int dx = kx - o->x;
-    int abs_dx = dx < 0 ? -dx : dx;
-
-    /* Always face player (pending_state_id = dir). */
-    o->facing = (dx >= 0) ? 1 : -1;
-
-    /* 10-кадровая walk-анимация «Зелёного стражника с мечом» (#76..85).
-     * sub_timer_max=2 × stride ≈ 4 game-ticks/кадр → ~146 ms per frame
-     * (при 27.5 FPS, цикл ≈ 1.46 s). */
-    o->anim_phase = (frame >> 2) % 10;
-
-    /* Phase-based movement: walk if far (abs_dx > 10), stop if close.
-     * 2 px/frame — под ×2-мир враги двигались втрое медленнее орлов (было
-     * 0.5 px/frame); ускорено до нормального шага (user 2026-07-06). */
-    if (abs_dx > 10) {
-        o->x += 2 * o->facing;
-    }
-    /* НЕТ позиционного clamp'а home±range_x: в оригинале ai_type11 гонится за
-     * игроком без границы, останавливается по ДИСТАНЦИИ (phase toggle на
-     * abs_dx≈10 выше). range_x в файле = маленькая подсказка патруля (5-15px),
-     * а НЕ граница преследования — раньше клампился сюда и враг застревал
-     * в ~10px от точки спавна, не доходя до Karnov (user 2026-07-07). */
-}
 
 /* Type 17 в LEVEL1 — это «Зелёный каменный человек» (метатель), а не
  * страус (user-verified 2026-05-28). Sprites #86..90 — 5-кадровая
@@ -610,34 +620,6 @@ static void ai_walking_minion(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
-/* Type 16 — горизонтальный снаряд (декомпиляция cs:0x11D6:?? → ai_type16).
- *
- * Pre-dispatch: pending_state_id = (player_x > obj_x) ? 1 : 0 — facing к
- * player'у. INIT: obj.sub_timer_max=3; vx = obj+0x10:0x0E = 0xFFFE:0x8000
- * (Q16.16 = -1.5 px/frame); state_list_off = 0x1984.
- *
- * Оригинал стреляет В СТОРОНУ ИГРОКА в момент спавна: если игрок справа —
- * снаряд летит вправо; если слева — влево. Скорость 1.5 px/frame в выбранную
- * сторону, направление не меняется на лету.
- *
- * Используем `custom` как флаг «init done», чтобы facing вычислялся только
- * однократно на первом тике. */
-static void ai_horizontal_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    if (o->custom == 0) {                /* init on first tick */
-        int kx = physics_get_x();
-        o->facing = (kx >= o->x) ? 1 : -1;
-        o->custom = 1;
-    }
-    /* Комарик — 4-фазный взмах крылышек (#91..94), стрида ≈ 4 ticks/кадр. */
-    o->anim_phase = (frame >> 2) & 3;
-    /* 3 px/frame — летящий снаряд/птица, скорость как у орлов (было 0.75,
-     * слишком медленно в ×2-мире; user 2026-07-06). */
-    o->x += 3 * o->facing;
-    /* Despawn off-world. */
-    if (o->x < -16 || o->x > (int)level_num_map_cols * TILE_W + 16) o->alive = false;
-}
 
 /* Type 5 — падающий бонус (KARNOV.EXE: ai_type05 cs:0xFFA:0x12... ).
  * INIT: vy=+2 px/frame (gravity). TICK: tile_at_xy(x, y+10) — если
@@ -787,6 +769,335 @@ static void ai_pendulum(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->x = o->home_x + (sin8[phase] * amp + 1) / 2;
     /* «Демон на облаке» — 8 фаз (#164..171), стрида ≈ 8 ticks/кадр. */
     o->anim_phase = (frame >> 3) & 7;
+}
+
+
+/* ═══ Портированные TICK'и (декомпиляция KARNOV.EXE, 2026-08-14) ═══════
+ *
+ * Общая механика: обработчик вызывается раз в tick_period кадров
+ * (THINKCYCLE, file 0x0FD88), скорость же интегрируется КАЖДЫЙ кадр
+ * (UPDATELOCS). Кадр анимации берётся из таблиц ANIM_LISTS; обработчик
+ * лишь просит состояние через o->pending_state.
+ * Единицы: vxq — Q16.16 в единицах движка (1 ед. = 2 px), vyq — Q16.16
+ * в пикселях. Константы ниже — как в оригинале.
+ */
+#define QV(hi, lo)  ((s32)(((u32)(u16)(hi) << 16) | (u16)(lo)))
+#define Q_1_0    QV(1, 0)
+#define Q_1_5    QV(1, 0x8000)
+#define Q_2_0    QV(2, 0)
+#define Q_2_5    QV(2, 0x8000)
+#define Q_0_5    QV(0, 0x8000)
+
+static int player_units(void) { return physics_get_x() / 2; }
+static int obj_units(const ai_obj_t *o) { return o->x / 2; }
+
+/* Снаряд врага: летит по прямой, гаснет за краем мира. Порт объекта,
+ * который оригинал создаёт через spawn_projectile (cs:0x11D6:0x139) с
+ * обработчиком cs:0x11D6:0x2A3. kind → набор кадров снаряда. */
+static void spawn_enemy_shot(int x, int y, int dir, s32 speed_units, int kind)
+{
+    int slot = alloc_obj_slot();
+    if (slot < 0) return;
+    g_obj[slot] = (ai_obj_t){
+        .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
+        .x = x, .y = y, .hp = 10, .level_idx = -1, .facing = dir ? 1 : -1,
+        .custom = kind,
+    };
+    obj_phys_begin(&g_obj[slot]);
+    g_obj[slot].vxq = dir ? speed_units : -speed_units;
+}
+
+static void ai_enemy_shot(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)in;
+    /* Кадры снаряда из аним-скрипта оригинала (state_list DS:0x1784):
+     * kind 1 → 1,2,3,2; kind 5 → 14,15 (влево); kind 6 → 16,17 (вправо). */
+    static const u16 K1[4] = { 1, 2, 3, 2 };
+    o->anim_phase = (u16)((frame >> 1) & 3);
+    if (o->custom == 1) o->item_sprite = K1[o->anim_phase];
+    else o->item_sprite = (u16)((o->vxq < 0 ? 14 : 16) + ((frame >> 2) & 1));
+    int world_w = (int)level_num_map_cols * TILE_W;
+    if (o->x < -16 || o->x > world_w + 16) o->alive = false;
+}
+
+/* ── Тип 11 — наземный мечник (handler cs:0x11D6:0x4CA, file 0x13A2A) ──
+ * INIT: tick_period=2, state_list DS:0x1856, фаза 1 («стоит»).
+ * TICK (file 0x13AC4): фаза 0 «идёт» → при |dx| < 10 ед. остановиться
+ * (set_motion(0)) и переключиться на анимацию удара (dir+2); фаза 1
+ * «стоит» → при |dx| > 10 ед. пойти со скоростью set_motion(±2.0)/2 =
+ * ±1.0 ед./кадр. Анимация: 0/1 — шаг влево/вправо, 2/3 — удар. */
+static void ai_type11(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    int sdx = player_units() - obj_units(o);
+    int adx = sdx < 0 ? -sdx : sdx;
+    int dir = sdx > 0;
+    o->pending_state = dir;
+    if (!o->use_anim) {                       /* state 1 — INIT */
+        anim_begin(o, 2, dir);
+        obj_phys_begin(o);
+        o->st_phase = 1;
+        return;
+    }
+    if (o->st_phase == 0) {
+        if (adx < 10) {
+            o->st_phase = 1;
+            o->vxq = o->vyq = o->axq = o->ayq = 0;   /* set_motion(0) */
+            o->pending_state = dir + 2;
+        }
+    } else {
+        if (adx > 10) {
+            o->st_phase = 0;
+            o->vxq = dir ? Q_1_0 : -Q_1_0;
+        }
+    }
+}
+
+/* ── Тип 13 — метатель (handler cs:0x11D6:0x6A8, file 0x13C08) ─────────
+ * INIT: tick_period=4, state_list DS:0x18CC, misc = (init_arg>=10)?3:0,
+ * aux (idle-таймер) = 25. TICK: в покое ждём, пока aux не уйдёт ниже 0,
+ * затем серия из 4 бросков; сам бросок — на кадре 1 анимации замаха. */
+static void ai_type13(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    int sdx = player_units() - obj_units(o);
+    int dir = sdx >= 0;
+    o->pending_state = dir;
+    if (!o->use_anim) {
+        anim_begin(o, 4, dir);
+        o->st_misc = (o->init_arg >= 10) ? 3 : 0;
+        o->st_aux  = 25;
+        return;
+    }
+    if (o->st_misc == 0) {                       /* покой */
+        if (o->st_aux < 0) { o->st_misc = 4; o->pending_state = dir + 2; }
+    } else {                                     /* серия бросков */
+        if (o->frame_index == 1) {
+            /* Снаряд — тип 12 оригинала: vx = ±3.0 ед./кадр. */
+            spawn_rock(o->x, o->y + 6, dir ? 6 : -6, frame);
+            if (--o->st_misc != 0) o->frame_index = (o->st_ctr & 3) ? 1 : 0;
+            o->pending_state = dir + 2;
+        } else if (o->frame_index == 0) {
+            o->st_aux = 25; o->st_misc = 0; o->pending_state = dir;
+        } else {
+            o->pending_state = dir + 2;
+        }
+    }
+    --o->st_aux;
+}
+
+/* ── Тип 17 — скелет на страусе (handler cs:0x11D6:0x617) ──────────────
+ * Самый простой: игрока не видит вовсе, всегда идёт ВЛЕВО −3.0 ед./кадр,
+ * анимация одна (3 кадра), tick_period=2. */
+static void ai_type17(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 2, 0);
+        obj_phys_begin(o);
+        o->vxq = -(s32)QV(3, 0);
+    }
+    o->pending_state = 0;
+}
+
+/* ── Тип 16 — комарик (handler cs:0x11D6:0x1033, file 0x14593) ─────────
+ * 7-фазный автомат; направление фиксируется в INIT. tick_period=3.
+ * Фазы: 0/1 — отсчёт 13 тиков и разворот; 2 — снижение до уровня игрока;
+ * 3 — горизонталь до |dx| > 20 ед.; 4 — подъём; 5 — выравнивание;
+ * 6 — инерция (обработчик её не трогает). */
+static void ai_type16(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, (player_units() > obj_units(o)) ? 1 : 0);
+        obj_phys_begin(o);
+        o->vxq = -Q_1_5;
+        o->st_misc = 13;      /* счётчик фазы */
+        o->st_phase = 0;      /* фаза */
+        return;
+    }
+    int sdx = player_units() - obj_units(o);
+    int dy  = physics_get_y() - o->y;
+    int dir = sdx > 0;
+    switch (o->st_phase) {
+    case 0: case 1:
+        if (--o->st_misc) break;
+        if (o->st_phase == 1) {
+            o->st_phase = 2;
+            o->st_aux = dir;                      /* зафиксированный facing */
+            o->vxq = dir ? Q_1_5 : -Q_1_5;
+            o->vyq = (dy >= 0) ? Q_2_5 : -Q_2_5;
+        } else {
+            o->st_phase = 1; o->st_misc = 13; o->vxq = Q_1_5;
+        }
+        break;
+    case 2:
+        if (dy <= 0) break;
+        o->st_phase = 3; o->vxq = dir ? Q_1_5 : -Q_1_5; o->vyq = 0;
+        break;
+    case 3:
+        if (!((o->st_aux && sdx < -20) || sdx > 20)) break;
+        o->st_phase = 4; o->vxq = dir ? Q_1_5 : -Q_1_5; o->vyq = -Q_2_5;
+        break;
+    case 4:
+        if (dy <= 40) break;
+        o->st_phase = 5; o->vxq = dir ? Q_1_5 : -Q_1_5; o->vyq = Q_2_5;
+        break;
+    case 5:
+        if (dy >= 0) break;
+        o->st_phase = 6; o->vxq = dir ? Q_1_5 : -Q_1_5; o->vyq = 0;
+        break;
+    default: break;                                /* фаза 6 — только инерция */
+    }
+}
+
+/* ── Тип 25 — PRNG-lurker (handler cs:0x1348:0xA20, file 0x156A0) ──────
+ * INIT: tick_period=4, set_motion(4) → vy = +2.0 px/кадр.
+ * TICK: когда счётчик КАДРОВ превысил 30 + (rand&15), выбирается новое
+ * направление — по одной оси к игроку, по другой случайно из таблицы
+ * пресетов DS:0x1348 — и счётчик сбрасывается. */
+static void ai_type25(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 0);
+        obj_phys_begin(o);
+        o->vyq = Q_2_0;
+        return;
+    }
+    int thr = 30 + (int)(rng_next() & 15);
+    if (thr < o->st_ctr) {
+        static const int HT[4] = { 1, 2, 0, 0 };
+        int hcode, vcode;
+        if (rng_next() & 1) {
+            hcode = HT[rng_next() & 3];
+            vcode = (physics_get_y() > o->y) ? 4 : 8;
+        } else {
+            hcode = (player_units() > obj_units(o)) ? 1 : 2;
+            vcode = HT[rng_next() & 3] * 4;
+        }
+        /* Таблица пресетов DS:0x1348: 1/2 = ±2.0 по X, 4/8 = ±2.0 по Y,
+         * комбинации 5/6/9/10 = ±1.5 по обеим осям. */
+        static const s32 VX[3] = { 0, Q_2_0, -Q_2_0 };
+        static const s32 VY[3] = { 0, Q_2_0, -Q_2_0 };
+        int hi = hcode, vi = vcode / 4;
+        if (hi && vi) { o->vxq = (hi == 1 ? Q_1_5 : -Q_1_5);
+                        o->vyq = (vi == 1 ? Q_1_5 : -Q_1_5); }
+        else          { o->vxq = VX[hi]; o->vyq = VY[vi]; }
+        o->st_ctr = 0;
+    }
+    o->pending_state = (o->vxq > 0) ? 1 : 0;
+}
+
+/* ── Тип 27 — падающий сверху (handler cs:0x1348:0x17AB, file 0x1642B) ─
+ * state 0 ставит y = player_y − 70 (в порту это делает спавн). INIT:
+ * tick_period=3, aux = −(init_arg*15) — ступенчатая задержка для стаи,
+ * phase = init_arg > 2. TICK: цикл «8 тиков по диагонали вниз» ⇄
+ * «8 тиков горизонтально назад», despawn ниже нижней границы региона. */
+static void ai_type27(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, 0);
+        obj_phys_begin(o);
+        o->y = physics_get_y() - 70;
+        obj_phys_begin(o);
+        o->st_misc  = 0;
+        o->st_aux   = -((int)o->init_arg * 15);
+        o->st_phase = (o->init_arg > 2);
+        return;
+    }
+    if (level_num_map_rows && o->y > (int)level_num_map_rows * TILE_H) {
+        o->alive = false; return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    ++o->st_aux;
+    switch (si) {
+    case 0:
+        o->pending_state = 0; o->vxq = o->vyq = 0;
+        /* fallthrough */
+    case 1:
+        if (o->st_aux >= 0) o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = o->st_phase + 2;
+        o->vxq = o->st_phase ? Q_1_0 : -Q_1_0;
+        o->vyq = Q_1_5;
+        /* fallthrough */
+    case 3:
+        if (o->st_aux >= 8) { o->st_misc = 4; o->st_aux = 0; }
+        break;
+    case 4:
+        o->pending_state = o->st_phase + 4;
+        o->vxq = o->st_phase ? -Q_1_0 : Q_1_0;
+        o->vyq = 0;
+        /* fallthrough */
+    case 5:
+        if (o->st_aux >= 8) { o->st_misc = 2; o->st_aux = 0; }
+        break;
+    default: break;
+    }
+}
+
+/* ── Тип 28 — наземный стрелок (handler cs:0x1348:0x197C, file 0x165FC) ─
+ * INIT: tick_period=4, направление к игроку, vx = ±0.5 ед./кадр.
+ * TICK: разворот с гистерезисом 10..17 ед., один горизонтальный
+ * огненный шар (2.0 ед./кадр) после 75 кадров жизни — однократно. */
+static void ai_type28(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, (player_units() > obj_units(o)) ? 1 : 0);
+        obj_phys_begin(o);
+        o->st_phase = (player_units() > obj_units(o));
+        o->st_misc = 0;                       /* «уже стрелял» */
+        return;
+    }
+    int sdx = player_units() - obj_units(o);
+    if (o->st_phase) { if (-10 - (int)(rng_next() & 7) > sdx) o->st_phase = 0; }
+    else             { if ((int)(rng_next() & 7) + 10 < sdx) o->st_phase = 1; }
+    o->vxq = o->st_phase ? Q_0_5 : -Q_0_5;
+    if (!o->st_misc && o->st_ctr > 75) {
+        spawn_enemy_shot(o->x, o->y + 7, o->st_phase, Q_2_0, 5);
+        o->st_misc = 1;
+    }
+    o->pending_state = o->st_phase;
+}
+
+/* ── Тип 48 — турель (handler cs:0x170C:0x18C, file 0x18A4C) ───────────
+ * Неподвижна. INIT: tick_period=4, стартовый кадр анимации из rand.
+ * TICK: фаза 0 — взвести таймер (rand & 0x5F), фаза 1 — ждать 250
+ * кадров (сброс при переходе игрока на другую сторону), фаза 2 —
+ * горизонтальный шар 1.5 ед./кадр и снова в фазу 0. */
+static void ai_type48(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 0);
+        u16 r = (u16)(rng_next() & 3);
+        o->frame_index = (u8)(r <= 2 ? 2 : (rng_next() & 3));
+        o->st_misc = 0;
+        return;
+    }
+    int sdx = player_units() - obj_units(o);
+    int facing = sdx > 0;
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = facing;
+        o->st_ctr = (int)(rng_next() & 0x5F);
+        /* fallthrough */
+    case 1:
+        if (o->anim_state != (u8)facing) { o->st_misc = 0; break; }
+        if (o->st_ctr > 250) o->st_misc = 2;
+        break;
+    default:
+        spawn_enemy_shot(o->x, o->y - 5, facing, Q_1_5, 1);
+        o->st_misc = 0;
+        break;
+    }
 }
 
 /* Default — no-op. */
@@ -1171,40 +1482,7 @@ static void ai_multipart(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 3) & 1;
 }
 
-/* Type 25 — PRNG-lurker (ai_type25): случайная пауза 30..45 тиков
- * (rand & 0x0F + 30), затем бросок к игроку. */
-static void ai_prng_lurker(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    o->anim_phase = (frame >> 3) & 3;
-    if (o->custom == 0) o->custom = (int)((rng_next() & 0x0F) + 30);
-    if (o->custom > 1) { --o->custom; return; }
-    /* Бросок: шаг 8 px к игроку, потом новая пауза. */
-    int kx = physics_get_x();
-    o->facing = (kx >= o->x) ? 1 : -1;
-    o->x += 8 * o->facing;
-    o->custom = (int)((rng_next() & 0x0F) + 30);
-}
 
-/* Type 27 — top-drop (ai_type27): state 0 ставит y = player.y − 70,
- * затем падает вниз до пола и ходит. Спрайты 0xC9..0xCE (201..206). */
-static void ai_top_drop(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    o->anim_phase = (frame >> 2) % 6;
-    if (o->custom == 0) {                 /* падение */
-        o->y += 3;
-        int feet = obj_feet(o);
-        if (level_solid_at(o->x, feet + 1) || feet >= physics_get_ground_y()) {
-            o->custom = 1;
-        }
-        return;
-    }
-    int kx = physics_get_x();
-    int dx = kx - o->x;
-    o->facing = (dx >= 0) ? 1 : -1;
-    if (dx > 10 || dx < -10) o->x += 2 * o->facing;
-}
 
 /* Type 30 — растущая цепь (ai_type30): num_bboxes начинается с 0 и растёт
  * во времени; спрайты чередуются 0x05 / 0x98 (152). */
@@ -1385,13 +1663,13 @@ static const ai_handler_fn AI_HANDLERS[58] = {
                                 * запись type 8 (range=0) не спавнится вовсе */
     [9]  = ai_walking_minion,  /* 2-bbox boss-like (L1: декор-дракон) */
     [10] = ai_pendulum,
-    [11] = ai_ground_walker,
+    [11] = ai_type11,
     [12] = ai_simple,          /* наземный патруль (HP=20) */
-    [13] = ai_stone_thrower,   /* Y-snap метатель */
+    [13] = ai_type13,   /* Y-snap метатель */
     [14] = ai_flying_bird,     /* летун / Селёдка-босс */
     [15] = ai_stone_golem,
-    [16] = ai_horizontal_projectile,
-    [17] = ai_ground_walker,   /* скелет на страусе */
+    [16] = ai_type16,
+    [17] = ai_type17,   /* скелет на страусе */
     [18] = ai_walking_minion,
     [19] = ai_slow_helper,
     [20] = ai_head_column,     /* колонна голов LEVEL2 (multi-bbox, статична) */
@@ -1399,10 +1677,10 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [22] = ai_simple,          /* tile-aware патруль */
     [23] = ai_homing_shot,     /* самонаводящийся шар */
     [24] = ai_flock_spawner,   /* стая из 7 */
-    [25] = ai_prng_lurker,
+    [25] = ai_type25,
     [26] = ai_simple,          /* быстрый воин */
-    [27] = ai_top_drop,
-    [28] = ai_simple,
+    [27] = ai_type27,
+    [28] = ai_type28,
     [29] = ai_simple,          /* multi-phase хелпер */
     [30] = ai_grow_chain,
     [31] = ai_simple,
@@ -1422,7 +1700,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [45] = ai_prng_spark,
     [46] = ai_simple,
     [47] = ai_hopper47,
-    [48] = ai_simple,
+    [48] = ai_type48,
     [49] = ai_ryu_helper,
     [50] = ai_multipart,
     [51] = ai_arena_static,
@@ -1448,6 +1726,7 @@ static ai_handler_fn pick_handler(u16 type)
         case TYPE_ROCK_PROJECTILE: return ai_rock_projectile;
         case TYPE_PLAYER_FIREBALL: return ai_player_fireball;
         case TYPE_BOMB_BLAST:      return ai_bomb_blast;
+        case TYPE_ENEMY_SHOT:      return ai_enemy_shot;
         default:  return ai_stub;
     }
 }
@@ -1761,9 +2040,25 @@ void ai_tick(u16 frame, u8 karnov_input)
     }
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
-        g_obj[i].cur_h = obj_height(&g_obj[i]);
-        if (g_obj[i].phys) obj_integrate(&g_obj[i]);   /* фаза 1 до THINKCYCLE */
-        pick_handler(g_obj[i].type)(&g_obj[i], frame, karnov_input);
+        ai_obj_t *o = &g_obj[i];
+        o->cur_h = obj_height(o);
+        ++o->st_ctr;                              /* +0xC7: каждый кадр */
+        if (o->phys) obj_integrate(o);            /* фаза 1 (UPDATELOCS) */
+        if (o->use_anim) {
+            /* Троттлинг THINKCYCLE: обработчик думает раз в tick_period
+             * кадров (file 0x0FD88), скорость при этом применяется каждый. */
+            if (--o->tick_countdown > 0) continue;
+            o->tick_countdown = o->tick_period;
+            const anim_list_t *al = (o->type < 58) ? &ANIM_LISTS[o->type] : NULL;
+            if (al && al->count && o->anim_state < al->count) {
+                if (++o->frame_index >= al->states[o->anim_state].n) o->frame_index = 0;
+            }
+            o->pending_state = -1;
+            pick_handler(o->type)(o, frame, karnov_input);
+            anim_apply(o);
+        } else {
+            pick_handler(o->type)(o, frame, karnov_input);
+        }
     }
 
     /* Sky-spawner — драйвер вне объектной системы (file 0x12DB5). */
@@ -2004,7 +2299,9 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
             continue;
         }
         u16 sid;
-        if ((g_obj[i].type == 6 || g_obj[i].type == 4) && g_obj[i].item_sprite > 0) {
+        if (g_obj[i].type == TYPE_ENEMY_SHOT && g_obj[i].item_sprite > 0) {
+            sid = g_obj[i].item_sprite;
+        } else if ((g_obj[i].type == 6 || g_obj[i].type == 4) && g_obj[i].item_sprite > 0) {
             /* Предмет в мире (LEVEL0 showcase / скрытый / трансформирующийся):
              * иконка OPTIONS #39..49 из item_sprite. */
             sid = g_obj[i].item_sprite;

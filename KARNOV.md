@@ -225,6 +225,54 @@ box.y0 = obj.y_world + box.dy;   box.y1 = box.y0 + sprite_h[box.sprite_id];
 архиве лежат 75 зеркальных ПАР спрайтов (98↔106, 99↔107, 100↔108, …) —
 поворот персонажа = выбор другого id, анкер при этом не меняется.
 
+### 3.5 Аним-машина: как объект получает кадр (file 0x0F885)
+
+Обработчики почти никогда не пишут `sprite_id` сами — кадр приходит из
+таблиц в DS-образе. Механика (`ai_dispatch`, полностью декомпилирована):
+
+```c
+/* Троттлинг — THINKCYCLE фаза B (file 0x0FD88): */
+if (--obj.tick_countdown(+0xCB) > 0 && obj.state_byte == 2) skip;
+obj.tick_countdown = obj.tick_period(+0xC9);      /* INIT-константа типа */
+
+/* ai_dispatch, состояние 2: */
+if (obj.anim_enabled(+0xDB))
+    if (++obj.frame_index(+0xC5) >= anim[0]) obj.frame_index = 0;
+
+обработчик();      /* пишет pending_state_id (DS:0xD88C) и ai_result (DS:0xD963) */
+
+if (ai_result & 2 && pending != cur_state_id(+0xD9) && pending != 0x3E7) {
+    e = state_list(+0xD5)[pending];                /* запись 8 байт */
+    obj.state_anim(+0xCD) = e.anim;  obj.state_offs(+0xD1) = e.deltas;
+    obj.cur_state_id = pending;      obj.frame_index = 0;   /* рестарт ТОЛЬКО при смене */
+}
+if (ai_result & 4) {                               /* применить кадр */
+    bbox[0].sprite_id = anim[1 + frame_index];
+    bbox[0].dx = deltas[frame_index].dx;
+    bbox[0].dy = deltas[frame_index].dy;
+}
+```
+
+Форматы (все указатели — far, сегмент = DS):
+
+```c
+struct StateScript { u16 anim_off, anim_seg; u16 offs_off, offs_seg; };  /* 8 байт */
+struct AnimScript  { u16 count; u16 sprite_id[count]; };
+struct FrameOffset { s16 dx, dy; } [count];        /* без заголовка */
+```
+
+`obj+0xD5` (state_list) — массив StateScript, индекс = состояние. Длина
+кадра = `tick_period` игровых тиков, длина цикла = `tick_period × count`.
+`DS:0x13F8` — общий нулевой FrameOffset для анимаций без смещений.
+
+Прочие биты `ai_result`: `1` — снять объект (в revival_list), `8` —
+продолжить диспетч для объекта из DS:0xD95B, `0x10` — передать себя
+обработчику «облачка» cs:0xD4B:0x3C0 (появление/смерть), который по
+окончании возвращает управление в `ai_init` (+0xBB).
+
+Таблицы есть у 40 типов; извлекаются `karnov_c/tools/extract_anim_tables.py`
+в `karnov_c/src/anim_data.c` (порт использует их вместо ручных циклов).
+
 ### 3.4 Постановка на землю (`cs:0xD4B:0x19F`, file 0xEE4F)
 
 Ключ к тому, почему у одних записей `spawn_y` — верх спрайта, а у других
