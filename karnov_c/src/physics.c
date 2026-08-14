@@ -74,10 +74,15 @@ static int s_world_max_x = 312;
  * (от ground y=114 до top y=45, проходя сквозь область KARNOV-текста).
  *
  * LADDER_HEIGHT — 70 px (тот же диапазон 45..115 при ground=115). Для
- * LEVEL1 при ground_y=240 верх лестницы будет y=170. */
+ * LEVEL1 при ground_y=240 верх лестницы будет y=170.
+ *
+ * Низ лестницы — ПОВЕРХНОСТЬ, НА КОТОРОЙ СТОИТ KARNOV в момент установки
+ * (s_ladder_bot_y, снимается через find_floor_y), а НЕ глобальный
+ * s_ground_y: на уступе/столбе лестница должна вырастать от уступа, иначе
+ * она «проваливалась» к самому нижнему полу уровня. */
 #define LADDER_HEIGHT 70
-#define LADDER_TOP_Y  (s_ground_y - LADDER_HEIGHT)
-#define LADDER_BOT_Y  s_ground_y
+#define LADDER_TOP_Y  (s_ladder_bot_y - LADDER_HEIGHT)
+#define LADDER_BOT_Y  s_ladder_bot_y
 
 /* Initial Karnov position для LEVEL0 SPLASH (с большой надписью KARNOV) —
  * DOSBOX-verified (2026-05-25): pixel detection на actual title screen даёт
@@ -100,9 +105,16 @@ static bool s_on_ground = true;
 /* Lestn — состояние лестницы. */
 static bool s_ladder_placed       = false;
 static int  s_ladder_x            = 0;
+static int  s_ladder_bot_y        = 0;   /* поверхность, на которой стоит лестница */
 static u16  s_ladder_placed_frame = 0;
 static bool s_on_ladder           = false;
 static bool s_prev_opt            = false;   /* для edge-detection B-нажатия */
+/* Накопитель пройденного по X пути для переключения OPTIONS движением:
+ * как в оригинале, маркер выбора едет по панели предметов, пока Karnov
+ * идёт — каждые ITEM_CYCLE_STEP_PX вправо = следующий предмет, влево =
+ * предыдущий. */
+static int  s_item_walk_accum     = 0;
+#define ITEM_CYCLE_STEP_PX 16
 static u16  s_cur_frame           = 0;
 /* Счётчик кадров лазанья — инкрементируется ТОЛЬКО когда Karnov реально
  * движется по лестнице (нажат U или D). Гарантирует, что в idle-pose Karnov
@@ -324,9 +336,11 @@ void physics_reset(int x, int y)
     s_spawn_x = x;  s_spawn_y = y;          /* для respawn после death */
     s_ladder_placed = false;
     s_ladder_x = 0;
+    s_ladder_bot_y = s_ground_y;
     s_ladder_placed_frame = 0;
     s_on_ladder = false;
     s_prev_opt = false;
+    s_item_walk_accum = 0;
     s_cur_frame = 0;
     s_climb_ticks = 0;
     s_climbing_down_prev = false;
@@ -372,6 +386,8 @@ void physics_tick(u8 input)
         return;
     }
 
+    int item_walk_prev_x = s_x;   /* для переключения OPTIONS движением */
+
     bool wants_r    = (input & INP_R)    != 0;
     bool wants_l    = (input & INP_L)    != 0;
     bool wants_u    = (input & INP_U)    != 0;
@@ -415,6 +431,9 @@ void physics_tick(u8 input)
                 if (s_on_ground && !s_ladder_placed && !s_on_ladder) {
                     s_ladder_placed       = true;
                     s_ladder_x            = s_x;
+                    /* Основание — та поверхность, на которой Karnov стоит
+                     * сейчас (уступ/столб/земля), а не пол уровня. */
+                    s_ladder_bot_y        = find_floor_y(s_x, s_y);
                     s_ladder_placed_frame = s_cur_frame;
                 }
             }
@@ -614,6 +633,26 @@ void physics_tick(u8 input)
     if (s_x < s_world_min_x) s_x = s_world_min_x;
     if (s_x > s_world_max_x) s_x = s_world_max_x;
     s_prev_u = wants_u;
+
+    /* Переключение OPTIONS движением: фактическое смещение по X (после
+     * коллизий и клампов) накапливается; каждые ITEM_CYCLE_STEP_PX хода
+     * вправо — следующий предмет, влево — предыдущий. Смена направления
+     * сбрасывает накопленное, чтобы «шаг туда-обратно» не дребезжал. */
+    {
+        int dx = s_x - item_walk_prev_x;
+        if (dx != 0) {
+            if ((dx > 0) != (s_item_walk_accum > 0)) s_item_walk_accum = 0;
+            s_item_walk_accum += dx;
+            while (s_item_walk_accum >= ITEM_CYCLE_STEP_PX) {
+                inv_cycle(+1);
+                s_item_walk_accum -= ITEM_CYCLE_STEP_PX;
+            }
+            while (s_item_walk_accum <= -ITEM_CYCLE_STEP_PX) {
+                inv_cycle(-1);
+                s_item_walk_accum += ITEM_CYCLE_STEP_PX;
+            }
+        }
+    }
 
     /* Water contact = death. Проверяем тайл прямо под ногами Karnov-а
      * (s_y — base/feet); если это вода (attr=08), стартуем dying-state.

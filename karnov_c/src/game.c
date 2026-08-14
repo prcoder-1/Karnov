@@ -177,12 +177,11 @@ static void draw_ladder(u16 frame, int scroll_x, int scroll_y)
     int cx = physics_ladder_x();
     int cy_top = physics_ladder_top();
     int cy_bot = physics_ladder_bot();
-    /* physics_ladder_bot() возвращает s_ground_y (Karnov-feet anchor), а тот
-     * в LEVEL0 splash находится на середине sand-тайла (115 при sand top=110).
-     * Округляем вниз к tile-границе, чтобы визуальный низ лесенки совпадал
-     * с поверхностью земли, а не уходил на 5 px ниже. Для LEVEL1+ где
-     * ground_y кратен TILE_H — изменений нет. */
-    cy_bot = (cy_bot / TILE_H) * TILE_H;
+    /* physics_ladder_bot() — поверхность, на которой лестница установлена
+     * (find_floor_y в момент постановки), уже выровненная по tile-границе.
+     * Прежнее округление вниз к TILE_H здесь было компенсацией того, что
+     * низ брался из s_ground_y (пол уровня); теперь оно только сдвигало бы
+     * лестницу, поставленную на нерегулярную поверхность (буквы LEVEL0). */
     /* Sprite #24 = ladder visual (8 px wide × ~8 tall, тайлится по Y). */
     const sprite_t *s = sprite_find(24);
     if (!s) return;

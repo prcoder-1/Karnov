@@ -110,8 +110,10 @@ def main():
             for si in check_frame(recs, flags, px // 2, py, left // 2):
                 r = recs[si]
                 sx, sy = r[6] * 2, r[7]
-                if level == 0 and r[0] in (4, 5, 6): sy += 12   # порт: splash anchor
-                if level == 0 and r[0] == 13:        sy += 3
+                # LEVEL0-заставку оригинал собирает кодом splash.cpp, а не
+                # записями: метатель стоит ногами на y=113 (DOSBox-verified),
+                # порт держит эту позицию в верхней привязке (113 − h(#86)).
+                if level == 0 and r[0] == 13: sy = 113 - 27
                 oracle_spawns.append((frame, si, sx, sy))
         elif f[0] == "S":
             frame, si, typ, sub, x, y, hp, goal = map(int, f[1:9])

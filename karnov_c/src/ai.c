@@ -903,32 +903,42 @@ static void ai_world_item(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
-/* Type 20 — змея LEVEL2 (ai_type20, file 0x1535D): num_bboxes = init_arg
- * (динамическая длина!), obj_type=9, x выровнен по 8-px file-сетке,
- * сегменты со смещением −8 px (file) по X. Спрайты 0xAD..0xB1 (173..177).
- * TICK не декомпилирован: ползёт к игроку, тело волной. */
-static void ai_snake(ai_obj_t *o, u16 frame, u8 karnov_input)
+/* Type 20 — КОЛОННА ГОЛОВ (LEVEL2). INIT дизассемблирован байт-в-байт
+ * (ai_type20, file 0x1535D..0x15383):
+ *
+ *     obj.obj_type   = 9
+ *     obj.num_bboxes = obj.sub_timer          ; = init_arg (в LEVEL2 = 5/6)
+ *     obj.x_world    = (x_world & 0xFFF8) + 2 ; снап к 8-ед. сетке
+ *     for (si = 0; si < num_bboxes; ++si) {
+ *         box[si].flag     = 1
+ *         box[si].x_offset = 0                ; ← ВЕРТИКАЛЬНО, не в ряд
+ *         box[si].y_offset = si * 0x14        ; ← шаг 20 строк вниз
+ *         box[si].sprite   = si ? 0xAF(175) : 0xAD(173)   ; голова + тела
+ *     }
+ *     obj.hit_points = 0xFA (250)
+ *
+ * Т.е. это неподвижный СТОЛБ из голов, растущий ВНИЗ от y_world до пола:
+ * LEVEL2 записи (spawn_y=210, init_arg=5) дают 210 + 5*20 = 310 = ровно
+ * уровень земли. Прежняя реализация раскладывала сегменты ГОРИЗОНТАЛЬНО
+ * (dx = −16) и заставляла их ползти за игроком — отсюда «головы висят
+ * в небе» вместо колонн. Реконструкция «змеи» была ошибкой: в
+ * декомпиляции TICK (state 2) — пустой `return`, объект статичен. */
+static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
     if (o->num_parts == 0) {
         int n = (int)o->init_arg;
-        if (n < 2) n = 5;
+        if (n < 1) n = 5;
         if (n > MAX_PARTS) n = MAX_PARTS;
         o->num_parts = n;
-        o->x = ((o->x / 2) & ~7) * 2 + 4;             /* file: x&0xFFF8 + 2 */
+        o->x = ((o->x / 2) & ~7) * 2 + 4;             /* file: (x & 0xFFF8) + 2 */
+        o->facing = 1;                                /* без flip: dx = 0 */
         for (int i = 0; i < n; ++i) {
-            o->parts[i].sprite = (u16)(173 + (i == 0 ? 0 : 1 + (i & 1)));
-            o->parts[i].dx = (s16)(-i * 16);          /* -8 file → -16 мир */
-            o->parts[i].dy = 0;
+            o->parts[i].sprite = (u16)(i == 0 ? 173 : 175);
+            o->parts[i].dx = 0;
+            o->parts[i].dy = (s16)(i * 20);           /* 0x14 строк вниз */
         }
     }
-    int kx = physics_get_x();
-    o->facing = (kx >= o->x) ? 1 : -1;
-    if ((frame & 3) == 0 && (kx < o->x - 12 || kx > o->x + 12))
-        o->x += o->facing;
-    /* Волна тела. */
-    for (int i = 1; i < o->num_parts; ++i)
-        o->parts[i].dy = (s16)(((frame >> 3) + i) % 4 < 2 ? 0 : -2);
     o->anim_phase = (frame >> 3) & 1;
 }
 
@@ -1226,7 +1236,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [17] = ai_ground_walker,   /* скелет на страусе */
     [18] = ai_walking_minion,
     [19] = ai_slow_helper,
-    [20] = ai_snake,           /* змея LEVEL2 (multi-part) */
+    [20] = ai_head_column,     /* колонна голов LEVEL2 (multi-bbox, статична) */
     [21] = ai_worm,            /* 7-сегментная цепь */
     [22] = ai_simple,          /* tile-aware патруль */
     [23] = ai_homing_shot,     /* самонаводящийся шар */
@@ -1375,12 +1385,16 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
         else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden_item = true; }
         else                item_id = arg;
         item_sprite = (u16)(39 + item_id);
-        if (g_ai_level_num == 0) sy += 12;  /* splash: запись хранит верх спрайта */
     }
 
     u16 type = e->type;
     if (g_ai_level_num == 0 && type == 13) {
-        sy += 3;    /* bbox y_offset метателя (DOSBox-verified feet=113) */
+        /* Заставка в оригинале собирается кодом splash.cpp, а не записями
+         * LEVEL0.BIN: метатель там стоит ногами на y=113 (DOSBox-verified),
+         * тогда как запись даёт y=110. Держим верифицированную позицию,
+         * переведя её в новую (верхнюю) привязку: top = feet − высота. */
+        const sprite_t *base = sprite_find(86);
+        sy = 113 - (base ? (int)base->h : 27);
         type = TYPE_STONE_THROWER;  /* на splash — статичная декорация */
     }
 
@@ -1677,8 +1691,22 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
     }
 }
 
-/* Блит одного спрайта в мировых координатах (anchor: body_cx по X,
- * низ спрайта по Y). Общий для одиночных спрайтов и частей multi-part. */
+/* Блит одного спрайта в мировых координатах.
+ *
+ * Anchor по Y — ВЕРХ спрайта (декомпиляция update_bboxes, KARNOV.EXE
+ * file 0x0247A): движок кладёт box.y0 = obj.y_world + box.dy и передаёт
+ * это блиттеру как верхнюю строку; арт в спрайте выровнен по верху
+ * канвы. Порт раньше якорил НИЗ (y - h), из-за чего все враги висели на
+ * высоту своего спрайта (~2 тайла) над землёй. Доказательства:
+ * helper «поставить на землю» (file 0x0EE30) считает
+ * y_world = ground_y − sprite_h, а INIT type 36 (file 0x17066) кладёт
+ * dy хвоста = высоте спрайта головы (второй спрайт ровно под первым).
+ *
+ * Anchor по X пока остаётся body_cx: в нашем кэше спрайты записаны
+ * ЗЕРКАЛЬНО (экстрактор делает col = w-1-...), тогда как оригинал
+ * хранит арт прижатым влево и кладёт левый край в x_world. Исправление
+ * X требует переизвлечения кэша и пересборки L/R-слотов Karnov'а —
+ * отдельная задача (см. KARNOV.md §9.2). */
 static void blit_sprite_world(u16 sid, int wx, int wy, int facing,
                               int scroll_x, int scroll_y)
 {
@@ -1687,7 +1715,7 @@ static void blit_sprite_world(u16 sid, int wx, int wy, int facing,
     bool flip = facing < 0;
     int anchor = flip ? (s->w - 1 - s->body_cx) : s->body_cx;
     int x0 = wx - anchor - scroll_x;
-    int y0 = wy - s->h - scroll_y;
+    int y0 = wy - scroll_y;
     u8 ck = sprite_is_cga() ? 0xFF : 1;
     const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
     for (int r = 0; r < s->h; ++r) {
@@ -1772,11 +1800,11 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
         if (s) {
             bool flip = g_obj[i].facing < 0;
-            /* Anchor: body_cx (precomputed body center). Обеспечивает
-             * совпадение visible body center с g_obj[i].x в обоих facings. */
+            /* Anchor: X — body_cx (см. blit_sprite_world), Y — ВЕРХ
+             * спрайта (obj.y_world из записи уровня = верхняя строка). */
             int anchor = flip ? (s->w - 1 - s->body_cx) : s->body_cx;
             int x0 = g_obj[i].x - anchor - scroll_x;
-            int y0 = g_obj[i].y - s->h - scroll_y;
+            int y0 = g_obj[i].y - scroll_y;
             u8 ck = sprite_is_cga() ? 0xFF : 1;
             const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
             for (int r = 0; r < s->h; ++r) {
@@ -1823,7 +1851,7 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
             default: col = 0xFF5555FFu; break;
         }
         render_fill_rect(g_obj[i].x - pw/2 - scroll_x,
-                         g_obj[i].y - ph - scroll_y, pw, ph, col);
+                         g_obj[i].y - scroll_y, pw, ph, col);
     }
   }
   (void)mode_cga;
@@ -1882,7 +1910,7 @@ void ai_try_pickup(int kx, int ky)
          * 999 = sentinel чтобы не путать с реальными items #39..#49. */
         if (o->type == 5 && o->custom == 999) {
             int ix0 = o->x - 8, ix1 = o->x + 8;
-            int iy0 = o->y - 12, iy1 = o->y;
+            int iy0 = o->y, iy1 = o->y + 12;
             if (kx1 < ix0 || kx0 > ix1) continue;
             if (ky1 < iy0 || ky0 > iy1) continue;
             o->alive = false;
@@ -1895,7 +1923,7 @@ void ai_try_pickup(int kx, int ky)
          * нельзя (см. is_damageable_enemy). */
         if (o->type == 5 && o->item_sprite > 0) {
             int ix0 = o->x - 8, ix1 = o->x + 8;
-            int iy0 = o->y - 12, iy1 = o->y;
+            int iy0 = o->y, iy1 = o->y + 12;
             if (kx1 < ix0 || kx0 > ix1) continue;
             if (ky1 < iy0 || ky0 > iy1) continue;
             give_item_by_sprite(o->item_sprite);
@@ -1910,7 +1938,7 @@ void ai_try_pickup(int kx, int ky)
         if (sid == 0) continue;
         /* Item bbox: y = bottom, body_cx=8 → (x-8..x+8, y-12..y). */
         int ix0 = o->x - 8, ix1 = o->x + 8;
-        int iy0 = o->y - 12, iy1 = o->y;
+        int iy0 = o->y, iy1 = o->y + 12;
         if (kx1 < ix0 || kx0 > ix1) continue;
         if (ky1 < iy0 || ky0 > iy1) continue;
         give_item_by_sprite(sid);
