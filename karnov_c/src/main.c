@@ -30,6 +30,7 @@ int main(int argc, char *argv[])
         if      (!strcmp(a, "--cga")) opt.video_mode = VIDEO_CGA;
         else if (!strcmp(a, "--ega")) opt.video_mode = VIDEO_EGA;
         else if (!strcmp(a, "--no-audio")) opt.with_audio = false;
+        else if (!strcmp(a, "--demo")) opt.with_demo = true;
         else if (!strcmp(a, "--level") && i + 1 < argc) opt.level_num = (u16)atoi(argv[++i]);
         else if (!strcmp(a, "--scale") && i + 1 < argc) opt.scale     = atoi(argv[++i]);
         else if (!strcmp(a, "--ppm")   && i + 1 < argc) opt.ppm_path  = argv[++i];

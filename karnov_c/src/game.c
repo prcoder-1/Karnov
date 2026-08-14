@@ -65,10 +65,10 @@ static void draw_level1_dragon(int scroll_x, int scroll_y)
     const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
     u8 ck = sprite_is_cga() ? 0xFF : 1;
 
-    /* Align body centers по body_cx — иначе верхняя часть сдвинута на 4 px
-     * вправо относительно нижней (#145 body_cx=33 vs #146 body_cx=37). */
+    /* Обе половины якорятся левым краем — как и любой спрайт (кэш больше
+     * не зеркальный, выравнивание по body_cx не нужно). */
     int x0_lower = LEVEL1_DRAGON_X - scroll_x;
-    int x0_upper = LEVEL1_DRAGON_X - ((int)lo->body_cx - (int)up->body_cx) - scroll_x;
+    int x0_upper = LEVEL1_DRAGON_X - scroll_x;
 
     const sprite_t *parts[2] = { up, lo };
     int tops[2] = { up_top, lo_top };
@@ -81,9 +81,7 @@ static void draw_level1_dragon(int scroll_x, int scroll_y)
             int yy = y0 + r;
             if (yy < 0 || yy >= WIN_H) continue;
             for (int c = 0; c < s->w; ++c) {
-                /* Mirror: читаем pixel из (w-1-c), но пишем в x0+c. */
-                int sc = s->w - 1 - c;
-                u8 v = s->pixels[r * s->w + sc];
+                u8 v = s->pixels[r * s->w + c];
                 if (v == 0xFF) continue;
                 if (v == ck) continue;
                 int xx = x0 + c;
@@ -383,7 +381,7 @@ int splash_run(const splash_options_t *opt)
 
     u16 current_level = opt->level_num;
     int rc = prepare_level(current_level,
-                            (current_level == 0) /* загружаем LEVEL0.MOV для attract */);
+                            opt->with_demo || current_level == 0);
     if (rc != 0) return rc;
 
     /* Sprite cache */

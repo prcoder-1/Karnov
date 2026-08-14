@@ -9,6 +9,7 @@ typedef struct {
     u16          level_num;
     int          scale;
     bool         with_audio;
+    bool         with_demo;    /* принудительно грузить LEVEL%d.MOV (в дистрибутиве есть 0..2) */
     const char  *ppm_path;     /* NULL = SDL2 окно, иначе headless PPM */
     int          ppm_frame;
     bool         music_test;   /* headless: ждать один цикл loader-music и выйти */

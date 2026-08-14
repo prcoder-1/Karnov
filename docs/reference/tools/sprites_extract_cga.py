@@ -90,10 +90,9 @@ def decode_sprite(sprite_bytes):
             p_lo = sprite_bytes[o + 2]
             p_hi = sprite_bytes[o + 3]
             for px in range(8):
-                # Горизонтальный flip (см. EGA decoder note про KARNOV.EXE
-                # inner blitter): спрайты на диске хранятся mirror-image от
-                # того, как игра их показывает на экране.
-                col = iw - 1 - (s * 8 + px)
+                # БЕЗ переворота — см. sprites_extract_ega_disk.py: арт в
+                # архиве прижат влево, x_world = левый край.
+                col = s * 8 + px
                 byte_idx = px // 4
                 in_byte = px % 4
                 shift = 6 - in_byte * 2

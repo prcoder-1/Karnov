@@ -439,7 +439,11 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (!e->alive) continue;
         if (e == o) continue;
         if (!is_damageable_obj(e) && !e->is_boss) continue;
-        int ex0 = e->x - 8, ex1 = e->x + 8;
+        /* bbox врага в объектной конвенции: (x, y) — левый-верх,
+         * размеры — из спрайта (в оригинале это box.x0..x1/y0..y1). */
+        const sprite_t *es = sprite_find(sprite_for_type(e->type, e->anim_phase));
+        int ew = es ? (int)es->art_w : 16;
+        int ex0 = e->x, ex1 = e->x + ew;
         int ey0 = e->y, ey1 = e->y + (e->cur_h > 0 ? e->cur_h : 24);
         if (fx1 < ex0 || fx0 > ex1) continue;
         if (fy1 < ey0 || fy0 > ey1) continue;
@@ -1635,6 +1639,35 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
     }
 }
 
+/* ─── Off-screen despawn (THINKCYCLE фаза B, file 0xFD6A..0xFD98) ──────
+ *
+ * Оригинал обходит активный список ДВУМЯ проходами (внешний si = 0,1;
+ * внутренний di = si с шагом 2), и блок деспавна стоит под `or si,si;
+ * jz` — т.е. выполняется только во втором проходе, для объектов с
+ * НЕЧЁТНЫМ индексом слота. Индекс выдаёт alloc_object(parity)
+ * (file 0x1FFB) с parity = subtype & 1 из spawn_active_object, поэтому
+ * критерий эквивалентен «нечётный subtype»: враги (1/7), multi-bbox (9)
+ * и предметы (5); Karnov-маркеры (0) и спец (4) не деспавнятся.
+ *
+ * Само условие: объект не является goal-объектом ([DS:0xD959]) и
+ * player_x − obj.x_world > 0x7D (125 ед. = 250 px) → state_byte = 6
+ * (умирание) и collision_cnt = 0. В порту state-машины объектов нет,
+ * поэтому эквивалент — снять alive; запись остаётся flags=1, т.е.
+ * враг не вернётся (как и в оригинале — он умер).
+ *
+ * Без этого отставшие враги жили вечно и занимали слоты пула (128). */
+void ai_despawn_behind(int player_x_px)
+{
+    for (int i = 0; i < g_num; ++i) {
+        ai_obj_t *o = &g_obj[i];
+        if (!o->alive) continue;
+        if (o->is_boss || o->is_scroll) continue;   /* goal-объект и его награда */
+        if (o->level_idx < 0) continue;             /* объекты порта гаснут сами */
+        if (!(o->subtype & 1)) continue;            /* чётная parity — второй проход не трогает */
+        if (player_x_px - o->x > 250) o->alive = false;
+    }
+}
+
 /* ─── Смерть игрока: rearm-цикл (file 0x1015A) ─────────────────────────
  * Все активные объекты снимаются, затем каждая запись перевзводится по
  * правилу: flags = (cur_x + range_x < player_x) ? 1 : 0 — всё, что не
@@ -1659,12 +1692,17 @@ void ai_tick(u16 frame, u8 karnov_input)
 {
     g_ai_frame = frame;
     /* Единственная точка инициализации AI — prepare_level() в game.c. */
-    if (getenv("KARNOV_DBG_THROWERS_COUNT") && (frame % 50) == 0) {
-        int n = 0;
-        for (int i = 0; i < g_num; ++i)
-            if (g_obj[i].alive && (g_obj[i].type == 17 || g_obj[i].type == TYPE_STONE_THROWER))
-                ++n;
-        fprintf(stderr, "f=%u throwers=%d g_num=%d\n", frame, n, g_num);
+    /* KARNOV_DBG_OBJECTS=1 — сколько объектов живо/выделено (диагностика
+     * заполнения пула и работы off-screen despawn'а). */
+    if (getenv("KARNOV_DBG_OBJECTS") && (frame % 50) == 0) {
+        int alive = 0, from_level = 0;
+        for (int i = 0; i < g_num; ++i) {
+            if (!g_obj[i].alive) continue;
+            ++alive;
+            if (g_obj[i].level_idx >= 0) ++from_level;
+        }
+        fprintf(stderr, "f=%u alive=%d (из уровня %d) slots=%d/%d kx=%d\n",
+                frame, alive, from_level, g_num, MAX_AI, physics_get_x());
     }
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
@@ -1674,6 +1712,9 @@ void ai_tick(u16 frame, u8 karnov_input)
 
     /* Sky-spawner — драйвер вне объектной системы (file 0x12DB5). */
     ai_sky_tick(frame);
+
+    /* Off-screen despawn — та же фаза B, сразу после AI (file 0xFD6A). */
+    ai_despawn_behind(physics_get_x());
 
     /* После убийства boss'а через ~30 ticks спавним свиток (scroll item).
      * custom=999 — sentinel маркер подбора (level-end). item_sprite=0x90 —
@@ -1829,27 +1870,27 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
  * y_world = ground_y − sprite_h, а INIT type 36 (file 0x17066) кладёт
  * dy хвоста = высоте спрайта головы (второй спрайт ровно под первым).
  *
- * Anchor по X пока остаётся body_cx: в нашем кэше спрайты записаны
- * ЗЕРКАЛЬНО (экстрактор делает col = w-1-...), тогда как оригинал
- * хранит арт прижатым влево и кладёт левый край в x_world. Исправление
- * X требует переизвлечения кэша и пересборки L/R-слотов Karnov'а —
- * отдельная задача (см. KARNOV.md §9.2). */
+ * Anchor по X — ЛЕВЫЙ КРАЙ арта в o->x (update_bboxes: box.x0 =
+ * x_world + dx). Кэш переизвлечён без зеркалирования, поэтому арт лежит
+ * так же, как в архиве — прижатым влево. Разворот в оригинале делается
+ * выбором зеркального спрайта; там, где порт этого ещё не делает, мы
+ * отражаем в пределах АРТА (art_w), а не канвы — иначе спрайт прыгал бы
+ * на ширину прозрачного паддинга. */
 static void blit_sprite_world(u16 sid, int wx, int wy, int facing,
                               int scroll_x, int scroll_y)
 {
     const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
     if (!s) return;
     bool flip = facing < 0;
-    int anchor = flip ? (s->w - 1 - s->body_cx) : s->body_cx;
-    int x0 = wx - anchor - scroll_x;
+    int x0 = wx - scroll_x;
     int y0 = wy - scroll_y;
     u8 ck = sprite_is_cga() ? 0xFF : 1;
     const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
     for (int r = 0; r < s->h; ++r) {
         int yy = y0 + r;
         if (yy < 0 || yy >= WIN_H) continue;
-        for (int c = 0; c < s->w; ++c) {
-            int sc = flip ? (s->w - 1 - c) : c;
+        for (int c = 0; c < s->art_w; ++c) {
+            int sc = flip ? (s->art_w - 1 - c) : c;
             u8 v = s->pixels[r * s->w + sc];
             if (v == 0xFF || v == ck) continue;
             int xx = x0 + c;
@@ -1927,18 +1968,17 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
         if (s) {
             bool flip = g_obj[i].facing < 0;
-            /* Anchor: X — body_cx (см. blit_sprite_world), Y — ВЕРХ
-             * спрайта (obj.y_world из записи уровня = верхняя строка). */
-            int anchor = flip ? (s->w - 1 - s->body_cx) : s->body_cx;
-            int x0 = g_obj[i].x - anchor - scroll_x;
+            /* Anchor: X — ЛЕВЫЙ край арта, Y — ВЕРХ спрайта
+             * (box.x0 = x_world + dx, box.y0 = y_world + dy). */
+            int x0 = g_obj[i].x - scroll_x;
             int y0 = g_obj[i].y - scroll_y;
             u8 ck = sprite_is_cga() ? 0xFF : 1;
             const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
             for (int r = 0; r < s->h; ++r) {
                 int yy = y0 + r;
                 if (yy < 0 || yy >= WIN_H) continue;
-                for (int c = 0; c < s->w; ++c) {
-                    int sc = flip ? (s->w - 1 - c) : c;
+                for (int c = 0; c < s->art_w; ++c) {
+                    int sc = flip ? (s->art_w - 1 - c) : c;
                     u8 v = s->pixels[r * s->w + sc];
                     if (v == 0xFF) continue;
                     if (v == ck) continue;
@@ -1994,7 +2034,7 @@ void ai_render_overlay(bool mode_cga, int scroll_x, int scroll_y)
         u16 sid = sprite_for_type(TYPE_BOMB_BLAST, g_obj[i].anim_phase);
         const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
         if (!s) continue;
-        int x0 = g_obj[i].x - s->body_cx - scroll_x;
+        int x0 = g_obj[i].x - scroll_x;
         int y0 = g_obj[i].y - scroll_y;
         u8 ck = sprite_is_cga() ? 0xFF : 1;
         const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
@@ -2036,7 +2076,7 @@ void ai_try_pickup(int kx, int ky)
          * Реальный sprite ID свитка-конца-уровня НЕ верифицирован — пока
          * 999 = sentinel чтобы не путать с реальными items #39..#49. */
         if (o->is_scroll) {
-            int ix0 = o->x - 8, ix1 = o->x + 8;
+            int ix0 = o->x, ix1 = o->x + 16;
             int iy0 = o->y, iy1 = o->y + 12;
             if (kx1 < ix0 || kx0 > ix1) continue;
             if (ky1 < iy0 || ky0 > iy1) continue;
@@ -2049,7 +2089,7 @@ void ai_try_pickup(int kx, int ky)
          * и его handler добавляет предмет в инвентарь). Стрелять по нему
          * нельзя (см. is_damageable_enemy). */
         if (o->type == 5 && o->item_sprite > 0) {
-            int ix0 = o->x - 8, ix1 = o->x + 8;
+            int ix0 = o->x, ix1 = o->x + 16;
             int iy0 = o->y, iy1 = o->y + 12;
             if (kx1 < ix0 || kx0 > ix1) continue;
             if (ky1 < iy0 || ky0 > iy1) continue;
@@ -2064,7 +2104,7 @@ void ai_try_pickup(int kx, int ky)
                 : (o->custom > 0)      ? (u16)o->custom : 0;
         if (sid == 0) continue;
         /* Item bbox: y = ВЕРХ иконки → (x-8..x+8, y..y+12). */
-        int ix0 = o->x - 8, ix1 = o->x + 8;
+        int ix0 = o->x, ix1 = o->x + 16;
         int iy0 = o->y, iy1 = o->y + 12;
         if (kx1 < ix0 || kx0 > ix1) continue;
         if (ky1 < iy0 || ky0 > iy1) continue;

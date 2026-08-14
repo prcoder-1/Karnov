@@ -77,17 +77,14 @@ int sprite_cache_load(const char *path)
         g_table[g_count].bpp    = bpp;
         g_table[g_count].pixels = &g_blob[off];
         if (!seen_bpp) { g_is_cga = (bpp == 2); seen_bpp = true; }
-        /* Pre-compute body horizontal center for seamless facing-flip. */
-        int min_c = w, max_c = -1;
+        /* Ширина непрозрачного арта (он прижат к левому краю канвы). */
+        int max_c = -1;
         for (int r = 0; r < h; ++r) {
-            for (int c = 0; c < w; ++c) {
-                if (g_blob[off + r*w + c] != 0xFF) {
-                    if (c < min_c) min_c = c;
-                    if (c > max_c) max_c = c;
-                }
+            for (int c = w - 1; c > max_c; --c) {
+                if (g_blob[off + r*w + c] != 0xFF) { max_c = c; break; }
             }
         }
-        g_table[g_count].body_cx = (max_c >= 0) ? (u8)((min_c + max_c) / 2) : (u8)(w / 2);
+        g_table[g_count].art_w = (max_c >= 0) ? (u8)(max_c + 1) : w;
         off += (size_t)w*h;
         ++g_count;
     }

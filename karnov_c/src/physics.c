@@ -183,30 +183,35 @@ static bool s_sit_scroll          = false;
  *   126..127 — летит влево на крыльях (2 кадра)
  *   128..131 — плавает вправо/влево (НЕ используется — water levels не реал.)
  *   132..143 — плавание/маска (НЕ используется). */
+/* Слоты поз Karnov'а. Спрайты 98..113 — две зеркальные группы по 8;
+ * после переизвлечения кэша БЕЗ переворота (арт лежит как в архиве)
+ * группы поменялись ролями: 98..105 смотрят ВЛЕВО, 106..113 — ВПРАВО.
+ * В архиве это подтверждается парами 98↔106, 99↔107, … (75 таких пар;
+ * flip'а в блиттере оригинала нет — разворот = выбор другого id). */
 enum {
     /* RIGHT-facing */
-    K_STAND_R = 98,
-    K_WALKR_1 = 99,  K_WALKR_2 = 100, K_WALKR_3 = 101, K_WALKR_4 = 102,
-    K_CROUCH_R = 103,
-    K_JUMP_R = 104,
-    K_FIRE_R = 105,
+    K_STAND_R = 106,
+    K_WALKR_1 = 107, K_WALKR_2 = 108, K_WALKR_3 = 109, K_WALKR_4 = 110,
+    K_CROUCH_R = 111,
+    K_JUMP_R = 112,
+    K_FIRE_R = 113,
     /* LEFT-facing */
-    K_STAND_L = 106,
-    K_WALKL_1 = 107, K_WALKL_2 = 108, K_WALKL_3 = 109, K_WALKL_4 = 110,
-    K_CROUCH_L = 111,
-    K_JUMP_L = 112,
-    K_FIRE_L = 113,
+    K_STAND_L = 98,
+    K_WALKL_1 = 99,  K_WALKL_2 = 100, K_WALKL_3 = 101, K_WALKL_4 = 102,
+    K_CROUCH_L = 103,
+    K_JUMP_L = 104,
+    K_FIRE_L = 105,
     /* DEATH — 4-кадровая анимация утопления/гибели. */
     K_DIE_1 = 114, K_DIE_2 = 115, K_DIE_3 = 116, K_DIE_4 = 117,
     /* FALL — отличаются от JUMP'ов: используются при vy_q4 >= 0 (descending) */
-    K_FALL_R = 118,
-    K_FALL_L = 119,
+    K_FALL_R = 119,
+    K_FALL_L = 118,
     /* LADDER cycle + at-top pose */
     K_CLIMB_A = 120, K_CLIMB_B = 121, K_CLIMB_C = 122,
     K_CLIMB_TOP = 123,
     /* FLY (крылья) */
-    K_FLYR_1 = 124, K_FLYR_2 = 125,
-    K_FLYL_1 = 126, K_FLYL_2 = 127,
+    K_FLYR_1 = 126, K_FLYR_2 = 127,
+    K_FLYL_1 = 124, K_FLYL_2 = 125,
 };
 
 /* LEVEL0 splash имеет статичные «платформы» — буквы KARNOV в верхней
@@ -802,15 +807,12 @@ void physics_render(u8 input, u16 frame, bool mode_cga, int scroll_x, int scroll
     u16 sid = pick_sprite_id(input, frame);
     const sprite_t *s = sprite_find(sid);
     if (s) {
-        /* Anchor — BODY center (precomputed s->body_cx). pick_sprite_id уже
-         * вернул facing-correct sprite (отдельные L/R sprites #98 vs #106,
-         * #99..102 vs #107..110 и т.д.), так что flip не нужен.
-         *
-         * 2026-05-29: user-feedback показал что cache хранит спрайты в
-         * NATURAL orientation для Karnov (#98 raw уже facing-RIGHT). Ранее
-         * предположение о mirror'е оказалось неверным — после применения
-         * flip Karnov ходил спиной вперёд. Revert. */
-        int x0 = s_x - s->body_cx - scroll_x;
+        /* pick_sprite_id уже вернул спрайт нужного разворота (в архиве
+         * зеркальные пары), поэтому flip не нужен. s_x в физике — ЦЕНТР
+         * тела, а спрайт якорится левым краем арта → сдвигаем на art_w/2.
+         * (Оригинал хранит в объекте сам левый край; у нас Karnov живёт в
+         * своей конвенции ноги/центр, см. KARNOV.md §3.3.) */
+        int x0 = s_x - s->art_w / 2 - scroll_x;
         int y0 = s_y - s->h - scroll_y;
         u8 ck = sprite_is_cga() ? 0xFF : 1;
         const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;

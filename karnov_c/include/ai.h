@@ -17,11 +17,15 @@ void ai_init_from_level(u16 level_num);
  * Вызывается каждый кадр. Спаун срабатывает по близости ИГРОКА:
  * |player_x − cur_x| < range_x и |player_y − cur_y| < range_y (строго),
  * в окне [camera_left, player_x + 320px] по sorted-таблице записей.
- * flags записи — one-shot защёлка. NB: в оригинале ЕСТЬ off-screen
- * despawn (THINKCYCLE фаза B, file 0xFD6A: отставшие >250 px враги
- * уходят в state 6), в порту он пока не реализован — см. KARNOV.md §4. */
+ * flags записи — one-shot защёлка; отставшие враги снимаются отдельно,
+ * в ai_despawn_behind (порт off-screen despawn'а из THINKCYCLE). */
 void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
                        u16 frame);
+
+/* Off-screen despawn (THINKCYCLE фаза B, file 0xFD6A): объекты с нечётным
+ * subtype, отставшие от игрока более чем на 250 px и не являющиеся
+ * goal-объектом, снимаются. Вызывается из ai_tick. */
+void ai_despawn_behind(int player_x_px);
 
 /* Rearm после смерти игрока (file 0x1015A): снять все активные объекты и
  * перевзвести записи по правилу flags = (cur_x + range_x < player_x)?1:0.
