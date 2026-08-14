@@ -13,6 +13,9 @@
 #include "karnov.h"
 
 void physics_reset(int x, int y);
+/* Сменить точку респауна после смерти (checkpoint из ObjectRegion),
+ * не сбрасывая текущее состояние. */
+void physics_set_spawn_point(int x, int y);
 /* Меняет world-bounds для физики (clamp по X, ground/ceiling по Y).
  * По умолчанию: min_x=8, max_x=312, ground=115, ceiling=75 (LEVEL0 splash).
  * Для широкого LEVEL1+ game.c вызывает с min_x=8, max_x=level_w_px-8,

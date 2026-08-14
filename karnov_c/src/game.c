@@ -110,6 +110,9 @@ static int g_scroll_y = 0;
  * но не короче LEVEL_END_MIN_TICKS (чтобы посадка была видна). */
 static bool s_level_end       = false;
 static u16  s_level_end_start = 0;
+/* Максимальный достигнутый прогресс игрока по X (в 2px-единицах) —
+ * аналог DS:0xD8CC; участвует в выборе региона респауна после смерти. */
+static int  s_max_progress_units = 0;
 /* Жизни Karnov'а (KARNOV.EXE: 3 в начале — «begins each game with three
  * lives»; var DS:0xCF4E, game-over при <=0). Death: -1; K-Mark / завершение
  * уровня («символ жизни выпадает»): +1. */
@@ -306,15 +309,20 @@ static level_phys_t level_phys_for(u16 level_num)
         };
     }
     /* LEVEL1+: широкий мир со скроллом.
-     * spawn_x=80 — справа от brown dragon (x=0..64), на каменной dragon-
-     * платформе (x=0..191, top y=260). ground_y вычисляется per-level
-     * сканом карты (level_compute_ground_y): LEVEL1=290 (sand), LEVEL2=310
-     * (трава), LEVEL3=400, и т.д. Это аналог поведения KARNOV.EXE, где
-     * нет hardcoded floor — Karnov падает до реальной solid-строки. */
+     * Стартовая позиция Karnov'а — из region[0].respawn_x/y (KARNOV.EXE
+     * read_object_regions tail, file 0x51F0 копирует их в шаблон игрока
+     * DS:0x480). X в 2px-единицах → ×2. L1: (40,205)→(80,205);
+     * L2: (36,280)→(72,280); L3: (32,360)→(64,360); и т.д.
+     * ground_y вычисляется per-level сканом карты (level_compute_ground_y). */
     int level_w_px = level_num_map_cols * TILE_W;
     int ground_y = level_compute_ground_y();
+    int sx = 80, sy = 300;   /* fallback = шаблон игрока DS:0x480 (40,300) */
+    if (level_num_objects > 0) {
+        sx = (int)level_objects[0].respawn_x * 2;
+        sy = (int)level_objects[0].respawn_y;
+    }
     return (level_phys_t){
-        .spawn_x = 80, .spawn_y = 260,
+        .spawn_x = sx, .spawn_y = sy,
         .ground_y = ground_y, .ceiling_y = 10,
         .min_x = 8, .max_x = (level_w_px > 16 ? level_w_px - 8 : 312)
     };
@@ -344,11 +352,12 @@ static int prepare_level(u16 level_num, bool load_demo)
     physics_reset(sx, ph.spawn_y);
 
     ai_init_from_level(level_num);
-    /* Если стартовый X сдвинут — установим g_max_right_edge так, чтобы
-     * враги в области стартового viewport-а активировались. */
+    s_max_progress_units = sx / 2;
+    /* Первый вызов CHECKTRIGGERS — записи с широким range вокруг старта
+     * (метатель LEVEL0, стартовые враги LEVEL1) срабатывают сразу. */
     int init_view_left = sx - VIEW_W/2;
     if (init_view_left < 0) init_view_left = 0;
-    ai_spawn_pending(init_view_left, VIEW_W, 0);
+    ai_check_triggers(sx, ph.spawn_y, init_view_left, 0);
 
     if (load_demo) {
         int dr = demo_load(level_num);
@@ -407,11 +416,22 @@ int splash_run(const splash_options_t *opt)
             u8 inp = demo_input_state();
             ai_tick(frame, inp);
             physics_set_current_frame(frame);
+            bool was_dying = physics_is_dying();
             physics_tick(inp);
+            if (physics_just_died()) {
+                int checkpoint_units = physics_get_x() / 2 + 0xBB;
+                const object_region_t *rg = level_region_for_respawn(
+                    checkpoint_units, physics_get_y(), s_max_progress_units);
+                if (rg) physics_set_spawn_point((int)rg->respawn_x * 2,
+                                                (int)rg->respawn_y);
+            }
+            if (was_dying && !physics_is_dying())
+                ai_respawn_rearm(physics_get_x());
             ai_try_pickup(physics_get_x(), physics_get_y());
             update_scroll(physics_get_x(), physics_get_y());
-            ai_despawn_offscreen(g_scroll_x);
-            ai_spawn_pending(g_scroll_x, VIEW_W, frame);
+            if (physics_get_x() / 2 > s_max_progress_units)
+                s_max_progress_units = physics_get_x() / 2;
+            ai_check_triggers(physics_get_x(), physics_get_y(), g_scroll_x, frame);
             ++frame;
         }
         /* Initial scroll для frame=0 (когда цикл не выполнился). */
@@ -561,6 +581,20 @@ int splash_run(const splash_options_t *opt)
             if (physics_just_died() && s_lives > 0) {
                 --s_lives;   /* KARNOV.EXE: hit once → минус жизнь (dec [0xCF4E]) */
             }
+            if (physics_just_died()) {
+                /* Checkpoint (file 0x10026): точка гибели + 0xBB (187 ед.),
+                 * затем поиск региона → его respawn_x/y — точка возрождения. */
+                int checkpoint_units = physics_get_x() / 2 + 0xBB;
+                const object_region_t *rg = level_region_for_respawn(
+                    checkpoint_units, physics_get_y(), s_max_progress_units);
+                if (rg) physics_set_spawn_point((int)rg->respawn_x * 2,
+                                                (int)rg->respawn_y);
+            }
+            if (was_dying && !physics_is_dying()) {
+                /* Karnov возродился: rearm-цикл записей спауна (file 0x1015A) —
+                 * всё, что не полностью позади точки возрождения, оживает. */
+                ai_respawn_rearm(physics_get_x());
+            }
             if (audio_running) {
                 if (physics_just_died()) {
                     audio_play_music(5, /*loop=*/false);
@@ -602,8 +636,9 @@ int splash_run(const splash_options_t *opt)
             }
 
             update_scroll(physics_get_x(), physics_get_y());
-            ai_despawn_offscreen(g_scroll_x);
-            ai_spawn_pending(g_scroll_x, VIEW_W, frame);
+            if (physics_get_x() / 2 > s_max_progress_units)
+                s_max_progress_units = physics_get_x() / 2;
+            ai_check_triggers(physics_get_x(), physics_get_y(), g_scroll_x, frame);
             render_clear(0xFF000000u);
             draw_level(mode_cga);
             if (current_level == 1) draw_level1_dragon(g_scroll_x, g_scroll_y);

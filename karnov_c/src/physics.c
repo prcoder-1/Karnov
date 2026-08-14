@@ -306,6 +306,14 @@ void physics_set_world_bounds(int min_x, int max_x, int ground_y, int ceiling_y)
 }
 
 void physics_set_level0_splash(bool enable) { s_level0_splash = enable ? 1 : 0; }
+
+/* Обновить точку респауна БЕЗ полного сброса состояния. Используется
+ * checkpoint-логикой смерти (KARNOV.EXE file 0x10019): точка возрождения
+ * берётся из ObjectRegion по позиции гибели, а не из старта уровня. */
+void physics_set_spawn_point(int x, int y)
+{
+    s_spawn_x = x;  s_spawn_y = y;
+}
 void physics_set_level1_dragon_platform(bool enable) {
     s_level1_dragon_platform = enable ? 1 : 0;
 }

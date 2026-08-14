@@ -17,10 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* MAX_AI bumped 32→64. LEVEL1 имеет 78 cumulative-spawn записей; даже
- * без recycling это слишком мало. 64 даёт запас под десятки одновременно
- * активных + projectiles + items. */
-#define MAX_AI 64
+/* Пул объектов оригинала = 128 (init-циклы `cmp si,0x80` @ file 0x1F30/
+ * 0x1F87; две parity-очереди по 64). При переполнении spawn просто не
+ * удаётся — запись остаётся невзведённой и ретраится следующим кадром. */
+#define MAX_AI 128
 
 /* Splash-only psevdo-типы (выше 1000, не пересекаются с KARNOV.EXE).
  * Реальные типы [1..57] — это enemy types из ai_scripts.cpp. */
@@ -106,41 +106,31 @@ static u16      g_ai_frame = 0;
  * активен только на LEVEL9). Не static: читается extern-объявлением. */
 u16 g_ai_level_num = 0;
 
-/* Per-entry state машинка для bidirectional scroll spawn:
- *   g_alive_idx[i]  — индекс активного g_obj-слота для level_enemies[i],
- *                     или -1 если не активен сейчас (despawned, но может
- *                     re-spawn при возврате камеры).
- *   g_killed[i]     — true если игрок убил этого врага; повторно не спавним.
- *   g_one_shot[i]   — для пикапов / projectiles: однократный спавн (после
- *                     активации больше не возвращаемся).
- * Размер LEVEL_MAX_ENEMIES (256). Сбрасывается в ai_init_from_level. */
-static s16  g_alive_idx[LEVEL_MAX_ENEMIES];
-static bool g_killed   [LEVEL_MAX_ENEMIES];
-static bool g_one_shot [LEVEL_MAX_ENEMIES];
-static bool g_spawn_triggered[LEVEL_MAX_ENEMIES];   /* spawn_x порог однажды пройден */
-/* Наибольший right edge viewport'а, достигнутый камерой. Инициализирован
- * VIEW_W в `ai_init_from_level` — все spawn_x ≤ VIEW_W считаются «уже
- * пройденными» (Image #8 user-spec: чистый старт уровня). */
-static int g_max_right_edge = 0;
+/* Состояние спауна живёт в самих записях level_enemies[]: поле flags —
+ * one-shot защёлка (0 = взведена, 1 = отработала), как в оригинале
+ * (check_triggers @ file 0x5011 пропускает flags≠0; spawn_active_object
+ * @ file 0x4FFE ставит flags=1 только при успешном alloc). Перевзводит
+ * записи ТОЛЬКО rearm-цикл после смерти игрока (file 0x1015A). Никакого
+ * центрального деспавна/респавна-при-возврате-камеры в оригинале нет. */
 
-/* Boss-конец: когда type 14 boss убит — g_boss_dead=true и через 30 ticks
+/* Boss-конец: когда goal-объект убит — g_boss_dead=true и через 30 ticks
  * спавним свиток (scroll item) сверху. После пикапа Karnov-ом инициируем
- * level-end transition. */
+ * level-end transition. Goal-объект определяется данными (check_triggers
+ * file 0x517F..0x518D): на уровне 9 — запись type 56, на остальных —
+ * последняя (по sort cur_x) запись таблицы спаунов. */
 static bool g_boss_dead = false;
 static u16  g_boss_dead_frame = 0;
 static bool g_scroll_picked = false;
 static int  g_boss_x = 0;   /* X boss'а на момент смерти — фикс. точка падения свитка */
 
-/* Запас в пикселях справа от viewport, на котором мы заранее активируем
- * врага (чтобы он успел появиться до того, как игрок увидит). 32 px
- * соответствует двум 16-px тайлам — типичная safe-зона.
- * Также применяется СЛЕВА — если scroll вернулся назад, мы не ре-спаунит
- * (это monotone cursor), но новых не активируем тоже. */
-#define SPAWN_MARGIN 32
-/* Окно ре-спауна: после первой активации враг снова появляется, когда его
- * позиция spawn_x возвращается в [scroll−RESPAWN_MARGIN, scroll+VIEW_W+RESPAWN_MARGIN].
- * Меньше despawn-порогов (128/256), чтобы не было spawn↔despawn-осцилляции. */
-#define RESPAWN_MARGIN 64
+/* Sky-spawner (драйвер file 0x12DB5) — работает ВНЕ объектной системы.
+ * Запись type 8 cur=(0,0) range=(0,0) в BIN никогда не спавнится сама
+ * (range=0 при строгом «<») — она лишь маркер «уровень имеет sky-спаун».
+ * Состояние: последняя точка прогресса игрока (DS:0xD8A0) и счётчик
+ * простоя (DS:0xD8A4). */
+static bool s_sky_enabled = false;
+static int  s_sky_last_x_units = 0;
+static int  s_sky_idle = 0;
 
 
 static void spawn_rock(int x, int y, int vx, u16 frame);
@@ -826,31 +816,40 @@ static void ai_simple(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
-/* Type 8 — sky-spawner (ai_type08, file 0x12B3F). Невидимый объект-шаблон
- * (по одному на уровень, запись [0]); периодически рождает летуна в
- * случайной точке у игрока:
- *   x = player.x + (rand & 0x3F) − 10   (file-коорд. → мир ×2)
- *   y = player.y − 100 − (rand & 0x3F)
- * Летун — TYPE_FLYING_BIRD (спрайты #147/#148), поведение ai_flying_bird.
- * Одновременно живых детей ≤ 2 (как «два орла» начала LEVEL1). */
-#define SKY_SPAWN_PERIOD 110
-static void ai_sky_spawner(ai_obj_t *o, u16 frame, u8 karnov_input)
+/* ─── Sky-spawner (тип 8) ──────────────────────────────────────────────
+ * Драйвер cs:0xFFA:0x1615 (file 0x12DB5), работает ВНЕ объектной системы:
+ *   — если игрок продвинулся на ≥ 0x32 единиц (= 100 px) с последней
+ *     отметки (DS:0xD8A0): убить цепь летунов, сбросить отметку и счётчик;
+ *   — иначе счётчик простоя (DS:0xD8A4) растёт; при > 0x186 (390 кадров)
+ *     и пустой цепи — спаун (rand&1)+1 летунов.
+ * Цепь убивается также при спауне любого scripted-врага subtype 1/7
+ * (jump-table в check_triggers @ file 0x5155 → helper file 0x12CFE).
+ * Точка рождения летуна — из creator (ai_type08, file 0x12B3F):
+ *   x = player.x + (rand & 0x3F) − 10 (file-ед. → мир ×2),
+ *   y = player.y − 100 − (rand & 0x3F). */
+#define SKY_IDLE_FRAMES     390     /* 0x186 */
+#define SKY_PROGRESS_UNITS  50      /* 0x32 (= 100 px) */
+
+static void ai_kill_sky_chain(void)
 {
-    (void)karnov_input;
-    o->invisible = true;
-    if ((u16)(frame - o->spawn_frame) < 60) return;   /* пауза на старте уровня */
-    if ((frame % SKY_SPAWN_PERIOD) != 0) return;
-
-    int children = 0;
     for (int i = 0; i < g_num; ++i)
-        if (g_obj[i].alive && g_obj[i].type == TYPE_FLYING_BIRD) ++children;
-    if (children >= 2) return;
+        if (g_obj[i].alive && g_obj[i].type == TYPE_FLYING_BIRD)
+            g_obj[i].alive = false;
+}
 
+static bool sky_chain_alive(void)
+{
+    for (int i = 0; i < g_num; ++i)
+        if (g_obj[i].alive && g_obj[i].type == TYPE_FLYING_BIRD) return true;
+    return false;
+}
+
+static void spawn_sky_bird(u16 frame, int idx)
+{
     int kx = physics_get_x(), ky = physics_get_y();
     int bx = kx + 2 * ((int)(rng_next() & 0x3F) - 10);
     int by = ky - 100 - (int)(rng_next() & 0x3F);
     if (by < 16) by = 16;
-
     int slot = alloc_obj_slot();
     if (slot < 0) return;
     if (getenv("KARNOV_DBG_SPAWN"))
@@ -865,10 +864,28 @@ static void ai_sky_spawner(ai_obj_t *o, u16 frame, u8 karnov_input)
         .hp          = 10,
         .level_idx   = -1,
         .home_x      = bx, .home_y = by,
-        .custom      = children,          /* противофаза для пары */
+        .custom      = idx,               /* противофаза для пары */
         .spawn_x     = (u16)bx, .spawn_y = (u16)by,
         .spawn_frame = frame,
     };
+}
+
+static void ai_sky_tick(u16 frame)
+{
+    if (!s_sky_enabled) return;
+    int px = physics_get_x() / 2;
+    if (px - s_sky_last_x_units >= SKY_PROGRESS_UNITS) {
+        ai_kill_sky_chain();
+        s_sky_last_x_units = px;
+        s_sky_idle = 0;
+        return;
+    }
+    ++s_sky_idle;
+    if (s_sky_idle > SKY_IDLE_FRAMES && !sky_chain_alive()) {
+        int n = (int)(rng_next() & 1) + 1;
+        for (int i = 0; i < n; ++i) spawn_sky_bird(frame, i);
+        s_sky_idle = 0;
+    }
 }
 
 /* Types 4 и 6 — предмет, лежащий в мире (ai_type04/ai_type06).
@@ -1196,7 +1213,8 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [5]  = ai_falling_bonus,   /* падающий бонус */
     [6]  = ai_world_item,      /* предмет в мире (init_arg≥11 → скрыт) */
     [7]  = ai_stub,            /* невидимый триггер */
-    [8]  = ai_sky_spawner,     /* sky-spawner (летуны у игрока) */
+    [8]  = ai_stub,            /* sky-spawner — драйвер ai_sky_tick вне объектов;
+                                * запись type 8 (range=0) не спавнится вовсе */
     [9]  = ai_walking_minion,  /* 2-bbox boss-like (L1: декор-дракон) */
     [10] = ai_pendulum,
     [11] = ai_ground_walker,
@@ -1295,99 +1313,202 @@ static void spawn_rock(int x, int y, int vx, u16 frame)
 void ai_init_from_level(u16 level_num)
 {
     g_num = 0;
-    for (int i = 0; i < LEVEL_MAX_ENEMIES; ++i) g_alive_idx[i] = -1;
-    memset(g_killed,         0, sizeof(g_killed));
-    memset(g_one_shot,       0, sizeof(g_one_shot));
-    memset(g_spawn_triggered, 0, sizeof(g_spawn_triggered));
     g_boss_dead = false;
     g_boss_dead_frame = 0;
     g_scroll_picked = false;
-    /* Right edge инициализирован view_w — все spawn_x ≤ view_w считаются
-     * «уже пройденными» (Karnov визуально видит их при старте, но эти
-     * враги в LEVEL%d.BIN — будут спавниться только если scroll вернулся
-     * назад и снова пошёл вправо, что обычно не случается). */
-    /* Стартовое значение = −SPAWN_MARGIN, чтобы инициальный вызов
-     * ai_spawn_pending(0, VIEW_W, 0) активировал ВСЕХ врагов с
-     * spawn_x в [0, VIEW_W] (видимых на старте уровня). Раньше было
-     * VIEW_W → инициальные враги никогда не спавнились. */
-    g_max_right_edge = -SPAWN_MARGIN;
 
     g_rng_seed = 0x4B41u + level_num;   /* детерминизм демо: сид от уровня */
     g_ai_level_num = level_num;
 
-    if (level_num == 0) {
-        /* LEVEL0 splash: всё спаунится upfront из записей LEVEL0.BIN —
-         * НЕ hardcode. Записи (проверено дампом):
-         *   [1] t=6 arg=0  spawn=(8,100)   → лестница (#39)
-         *   [2] t=6 arg=6  spawn=(56,30)   → крылья (#45) над буквой R
-         *   [3] t=6 arg=13 spawn=(112,30)  → СКРЫТЫЙ предмет (Glasses)
-         *   [4] t=13 hp=20 spawn=(128,110) → зелёный метатель камней
-         *   [5] t=6 cur=(2000,2000)        → sentinel, пропуск
-         * X ×2 действует и на splash (128×2=256 ≈ verified 254). */
-        for (u16 i = 0; i < level_num_enemies && g_num < MAX_AI; ++i) {
-            const enemy_spawn_t *e = &level_enemies[i];
-            g_one_shot[i] = true;             /* LEVEL0 → spawn один раз */
-            if (e->type == 0 || e->type <= 3) continue;
-            if (e->cur_x >= 2000) continue;   /* sentinel-запись */
-            u16 arg = (u16)(e->trigger & 0xFF);
-            int hp  = (int)(e->trigger >> 8);
-            if (hp == 0) hp = 1;
-            int sx = (int)e->spawn_x * 2;
-            int sy = (int)e->spawn_y;
-            u16 item_sprite = 0;
-            bool hidden = false;
-            if (e->type == 4 || e->type == 5 || e->type == 6) {
-                u16 item_id;
-                if (arg == 99)      item_id = (u16)(rng_next() % 11u);
-                else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden = true; }
-                else                item_id = arg;
-                item_sprite = (u16)(39 + item_id);
-                sy += 12;   /* запись хранит верх спрайта; рендер якорит низ */
-            }
-            if (e->type == 13) {
-                sy += 3;    /* bbox y_offset метателя (DOSBox-verified feet=113) */
-                /* На splash метатель — псевдотип STONE_THROWER (статичный
-                 * facing влево, как декорация). */
-            }
-            g_obj[g_num] = (ai_obj_t){
-                .alive       = true,
-                .invisible   = hidden,
-                .type        = (e->type == 13) ? (u16)TYPE_STONE_THROWER : e->type,
-                .subtype     = e->subtype,
-                .init_arg    = arg,
-                .x           = sx,
-                .y           = sy,
-                .facing      = -1,
-                .hp          = hp,
-                .spawn_x     = (u16)sx,
-                .spawn_y     = (u16)sy,
-                .item_sprite = item_sprite,
-                .level_idx   = (int)i,
-            };
-            g_alive_idx[i] = (s16)g_num;
-            ++g_num;
-        }
-    } else {
-        /* LEVEL1+: scroll-gated spawn в ai_spawn_pending. */
-        if (getenv("KARNOV_DBG_L1_ENEMIES")) {
-            for (u16 i = 0; i < level_num_enemies; ++i) {
-                const enemy_spawn_t *e = &level_enemies[i];
-                fprintf(stderr, "L%u en[%u]: type=%u sub=%u cur=(%u,%u) rng=(%u,%u) spawn=(%u,%u) trg=%u (hp=%u init=%u) flg=%04x\n",
-                        level_num, i, e->type, e->subtype, e->cur_x, e->cur_y,
-                        e->range_x, e->range_y, e->spawn_x, e->spawn_y,
-                        e->trigger, (e->trigger >> 8), (e->trigger & 0xFF), e->flags);
-            }
-        }
+    /* Sky-spawner активен только на уровнях, где есть type-8 запись
+     * (её range=(0,0) — она никогда не спавнится сама, это маркер). */
+    s_sky_enabled = false;
+    for (u16 i = 0; i < level_num_enemies; ++i)
+        if (level_enemies[i].type == 8) { s_sky_enabled = true; break; }
+    s_sky_last_x_units = 0;
+    s_sky_idle = 0;
 
-        /* «Два орла» в начале LEVEL1 больше НЕ hardcode: их рождает
-         * настоящий type-8 sky-spawner (запись [0] уровня, ai_sky_spawner)
-         * по PRNG-формуле оригинала. */
+    if (getenv("KARNOV_DBG_L1_ENEMIES")) {
+        for (u16 i = 0; i < level_num_enemies; ++i) {
+            const enemy_spawn_t *e = &level_enemies[i];
+            fprintf(stderr, "L%u en[%u]: type=%u sub=%u cur=(%u,%u) rng=(%u,%u) spawn=(%u,%u) trg=%u (hp=%u init=%u) flg=%04x\n",
+                    level_num, i, e->type, e->subtype, e->cur_x, e->cur_y,
+                    e->range_x, e->range_y, e->spawn_x, e->spawn_y,
+                    e->trigger, (e->trigger >> 8), (e->trigger & 0xFF), e->flags);
+        }
     }
 
-    /* Splash-композиция теперь ПОЛНОСТЬЮ data-driven (см. ветку level 0
-     * выше): лестница/крылья/скрытый предмет — записи type 6, зелёный
-     * метатель — запись type 13 (spawn 128×2=256, y=110+3 ≈ verified
-     * 254/113). Прежние hardcoded-блоки удалены. */
+    /* Спаунов «upfront» нет ни на одном уровне (включая LEVEL0 splash):
+     * оригинал зовёт check_triggers каждый кадр, и записи с широкими
+     * range срабатывают сразу же в первый кадр по близости игрока.
+     * Скрытый предмет LEVEL0 rec[3] (range 30×30) появляется только
+     * когда Karnov подходит — это и есть поведение оригинала. */
+}
+
+/* ─── Спаун одной записи (spawn_active_object, file 0x4F3D) ────────────
+ * obj_type = subtype; hp = trigger>>8; x/y = spawn_x/spawn_y (unscaled в
+ * единицах движка: X ×2 в пикселях порта); init_arg = trigger&0xFF;
+ * flags=1 ставит ВЫЗЫВАЮЩИЙ — только при успехе. Возврат: slot или -1. */
+static int ai_spawn_from_record(u16 rec_idx, u16 frame)
+{
+    const enemy_spawn_t *e = &level_enemies[rec_idx];
+    int slot = alloc_obj_slot();
+    if (slot < 0) return -1;
+
+    int hp  = (int)(e->trigger >> 8);
+    u16 arg = (u16)(e->trigger & 0xFF);
+    if (hp == 0) hp = 1;
+    /* Type 12: оригинальный INIT ставит hit_points=20 (file 0x13E3C). */
+    if (e->type == 12 && hp <= 1) hp = 20;
+
+    int sx = (int)e->spawn_x * 2;   /* единицы движка (2px) → пиксели */
+    int sy = (int)e->spawn_y;
+
+    /* Предметы: item_id = (init_arg == 99) ? RND%11 : init_arg;
+     * sprite_id = item_id + 0x27 (= #39..49) — байт-порт ai_type05/06.
+     * arg ≥ 11 → СКРЫТЫЙ предмет (misc_state≥11), виден только с Glasses. */
+    u16 item_sprite = 0;
+    bool hidden_item = false;
+    if (e->type == 4 || e->type == 5 || e->type == 6) {
+        u16 item_id;
+        if (arg == 99)      item_id = (u16)(rng_next() % 11u);
+        else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden_item = true; }
+        else                item_id = arg;
+        item_sprite = (u16)(39 + item_id);
+        if (g_ai_level_num == 0) sy += 12;  /* splash: запись хранит верх спрайта */
+    }
+
+    u16 type = e->type;
+    if (g_ai_level_num == 0 && type == 13) {
+        sy += 3;    /* bbox y_offset метателя (DOSBox-verified feet=113) */
+        type = TYPE_STONE_THROWER;  /* на splash — статичная декорация */
+    }
+
+    /* Goal-объект (его смерть = конец уровня) — из данных (file 0x517F):
+     * level 9 → запись type 56; иначе — последняя запись sorted-таблицы. */
+    bool goal = (g_ai_level_num == 9)
+                    ? (e->type == 56)
+                    : (rec_idx == (u16)(level_num_enemies - 1));
+
+    g_obj[slot] = (ai_obj_t){
+        .alive        = true,
+        .invisible    = hidden_item,
+        .is_boss      = goal,
+        .type         = type,
+        .subtype      = e->subtype,           /* → obj_type (+0xE5) */
+        .init_arg     = arg,
+        .x            = sx,
+        .y            = sy,
+        .facing       = -1,
+        .hp           = hp,
+        .level_idx    = (int)rec_idx,
+        .home_x       = sx,
+        .home_y       = sy,
+        /* range — окно СПАУНА, в объект оригинал его не копирует. Порт
+         * пока использует его как амплитуду патруля/маятника (port-
+         * invention до декомпиляции TICK-хэндлеров). */
+        .half_range_x = (int)e->range_x,
+        .half_range_y = (int)e->range_y / 2,
+        .spawn_x      = (u16)sx,
+        .spawn_y      = (u16)sy,
+        .item_sprite  = item_sprite,
+        .spawn_frame  = frame,
+    };
+    return slot;
+}
+
+/* ─── CHECKTRIGGERS (cs:0x365:0x1C1, file 0x5011) — дословный порт ─────
+ * Каждый кадр: два бинпоиска по sorted-таблице (окно [camera_left,
+ * player_x + 160 единиц]), затем линейный скан с one-shot flags и
+ * строгими range-тестами по близости ИГРОКА (не камеры!). */
+/* KARNOV_SPAWN_LOG=path — машинно-читаемый лог для сверки с оракулом
+ * (tools/spawn_oracle.py): «P frame px py left» на каждый вызов и
+ * «S frame rec type sub x y hp goal» на каждый успешный спаун. */
+static FILE *spawn_log(void)
+{
+    static FILE *fp = NULL;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        const char *p = getenv("KARNOV_SPAWN_LOG");
+        if (p) fp = fopen(p, "w");
+    }
+    return fp;
+}
+
+void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
+                       u16 frame)
+{
+    bool dbg = getenv("KARNOV_DBG_SPAWN") != NULL;
+    int n = (int)level_num_enemies;
+    if (n == 0) return;
+    if (spawn_log())
+        fprintf(spawn_log(), "P %u %d %d %d\n",
+                frame, player_x_px, player_y_px, camera_left_px);
+
+    int px   = player_x_px / 2;     /* X движка — в 2px-единицах */
+    int py   = player_y_px;
+    int left = camera_left_px / 2;
+
+    /* Бинпоиск 1 (file 0x5041): lo=0, hi=n-1, порог = camera_left. */
+    int lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if ((int)level_enemies[mid].cur_x < left) lo = mid; else hi = mid;
+    }
+    int start = lo;
+    /* Бинпоиск 2 (file 0x507D): порог = player_x + 0xA0 (160 ед. = 320 px). */
+    lo = 0; hi = n - 1;
+    int ahead = px + 0xA0;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if ((int)level_enemies[mid].cur_x < ahead) lo = mid; else hi = mid;
+    }
+    int end = hi;   /* скан ВКЛЮЧИТЕЛЬНО (loop tail file 0x5148) */
+
+    for (int si = start; si <= end; ++si) {
+        enemy_spawn_t *r = &level_enemies[si];
+        if (r->flags != 0) continue;               /* one-shot защёлка */
+        int dx = px - (int)r->cur_x; if (dx < 0) dx = -dx;
+        if (dx >= (int)r->range_x) continue;       /* строгое «<»; range 0 ⇒ никогда */
+        int dy = py - (int)r->cur_y; if (dy < 0) dy = -dy;
+        if (dy >= (int)r->range_y) continue;
+        /* Спаун scripted-врага subtype 1/7 убивает sky-цепь (file 0x5155). */
+        if (r->subtype == 1 || r->subtype == 7) ai_kill_sky_chain();
+        int slot = ai_spawn_from_record((u16)si, frame);
+        if (slot < 0) continue;   /* alloc fail: flags остаётся 0 — ретрай */
+        r->flags = 1;             /* file 0x4FFE: только при успехе */
+        if (spawn_log())
+            fprintf(spawn_log(), "S %u %d %u %u %d %d %d %d\n",
+                    frame, si, r->type, r->subtype,
+                    g_obj[slot].x, g_obj[slot].y, g_obj[slot].hp,
+                    g_obj[slot].is_boss ? 1 : 0);
+        if (dbg)
+            fprintf(stderr, "spawn[%d]: f=%u type=%u sub=%u at=(%d,%d) hp=%d%s\n",
+                    si, frame, r->type, r->subtype,
+                    g_obj[slot].x, g_obj[slot].y, g_obj[slot].hp,
+                    g_obj[slot].is_boss ? " GOAL" : "");
+    }
+}
+
+/* ─── Смерть игрока: rearm-цикл (file 0x1015A) ─────────────────────────
+ * Все активные объекты снимаются, затем каждая запись перевзводится по
+ * правилу: flags = (cur_x + range_x < player_x) ? 1 : 0 — всё, что не
+ * полностью позади точки возрождения, оживает вновь (включая убитых и
+ * босса/goal). player_x_px — позиция ПОСЛЕ респауна. */
+void ai_respawn_rearm(int player_x_px)
+{
+    int px = player_x_px / 2;
+    for (int i = 0; i < g_num; ++i) g_obj[i].alive = false;
+    g_num = 0;
+    for (u16 i = 0; i < level_num_enemies; ++i) {
+        enemy_spawn_t *r = &level_enemies[i];
+        r->flags = ((int)r->cur_x + (int)r->range_x < px) ? 1 : 0;
+    }
+    /* Goal/босс мог быть убит до смерти игрока — он тоже возвращается
+     * (оригинальное правило rearm не делает исключений). */
+    g_boss_dead = false;
+    g_boss_dead_frame = 0;
 }
 
 void ai_tick(u16 frame, u8 karnov_input)
@@ -1409,6 +1530,9 @@ void ai_tick(u16 frame, u8 karnov_input)
         if (!g_obj[i].alive) continue;
         pick_handler(g_obj[i].type)(&g_obj[i], frame, karnov_input);
     }
+
+    /* Sky-spawner — драйвер вне объектной системы (file 0x12DB5). */
+    ai_sky_tick(frame);
 
     /* После убийства boss'а через ~30 ticks спавним свиток (scroll item).
      * custom=999 — sentinel маркер подбора (level-end). item_sprite=0x90 —
@@ -1494,20 +1618,10 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
                                                     * ошибочно рисовался комариком #91-94. */
             return 86 + (anim_phase % 5);
         }
-        case  14: {                                /* Селёдка (boss / flying minion) — 4 фазы.
-                                                    * Декомпиляция ai_type14 (file_io.h:184):
-                                                    * spawn(obj, sprite=0x95=149). */
-            return 149 + (anim_phase & 3);
-        }
         case TYPE_FLYING_BIRD: {                    /* Летящая зелёная птица — 2 фазы (#147-148).
-                                                    * type8 sky-spawn AnimSeg 0x93/0x94. */
+                                                    * type8 sky-spawn AnimSeg 0x93/0x94.
+                                                    * Манифест: ai=522 (Karnov-категория). */
             return 147 + (anim_phase & 1);
-        }
-        case  15: {                                /* ЧЁРТИК на дереве (#153-160). В LEVEL1
-                                                    * type15 (idx18/49) висит на дереве —
-                                                    * user 2026-07-07: раньше рисовался «серой
-                                                    * дверью» (placeholder #178/179). */
-            return 153 + (anim_phase & 7);
         }
         case  16: {                                /* КОМАРИК — горизонтальный летун (type16,
                                                     * vx≈-1.5 px/frame). Дизассемблирование
@@ -1519,23 +1633,6 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
                                                     * Раньше ошибочно рисовался птицей, как в начале
                                                     * (user 2026-07-08). 4-фазный взмах крылышек. */
             return 91 + (anim_phase & 3);
-        }
-        case  17: {                                /* Скелет на страусе — 3 фазы (#161-163).
-                                                    * Декомпиляция ai_type17 (file_io.h:198):
-                                                    * spawn(sprite=0xA1=161). Раньше ошибочно
-                                                    * = зелёный каменный человек #86-90. */
-            return 161 + (anim_phase % 3);
-        }
-        case  18: {                                /* ДЕМОН НА ОБЛАКЕ (#164-171) — 8 фаз.
-                                                    * Тип определяется полем type в LEVEL%d.BIN
-                                                    * (НЕ координатами/высотой). Ранее демон
-                                                    * форсировался в ai_render — консолидировано
-                                                    * сюда, чтобы type→sprite решался в одном месте. */
-            return 164 + (anim_phase & 7);
-        }
-        case  19: {                                /* медленный одно-bbox враг (#172).
-                                                    * Декомпиляция ai_type19: sprite_id=0xAC=172. */
-            return 172 + (anim_phase & 1);
         }
         case 512: {                                /* stone man декорация (splash) — Зелёный каменный человек */
             static const u16 stone[5] = { 86, 87, 88, 89, 90 };
@@ -1560,22 +1657,23 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
             static const u16 rock[3] = { 21, 22, 23 };
             return rock[anim_phase % 3];
         }
-        /* Спец-типы вне SIMPLE_AI (спрайты из ENEMY_GUIDE / INIT-констант). */
-        case  23: return (u16)(185 + (anim_phase & 1));   /* homing шар 0xB9/0xBA */
-        case  25: return (u16)(189 + (anim_phase & 3));   /* PRNG-lurker 0xBD..C0 */
-        case  27: return (u16)(201 + (anim_phase % 6));   /* top-drop 0xC9..CE */
-        case  42: return (u16)(267 + (anim_phase & 7));   /* частицы 0x10B..112 */
-        case  44: return (u16)(284 + (anim_phase & 3));   /* PRNG-снаряд 0x11C.. */
-        case  45: return (u16)(288 + (anim_phase & 3));
-        case  47: return (u16)(296 + (anim_phase & 1));   /* 0x128/0x129 */
-        case  49: return (u16)(304 + (anim_phase & 1));   /* хелпер Рю 0x130/131 */
-        default:
-            /* Generic-типы из таблицы SIMPLE_AI. */
+        default: {
+            /* Data-driven: манифест ai_type из директории SPRITES.EGA/CGA
+             * (KS v4). Для каждого типа спрайты идут непрерывным диапазоном
+             * base..base+count-1 — это и есть анимация. Покрывает типы
+             * 14,15,17..50,52..56; ручные case'ы выше — только для типов
+             * без манифест-записи (10/11/13/16 делят чужие спрайты) и
+             * псевдотипов порта. */
+            u16 mb, mc;
+            if (type >= 4 && type <= 57 && sprite_manifest(type, &mb, &mc))
+                return (u16)(mb + (anim_phase % mc));
+            /* Fallback (кэш v3 без манифеста): таблица SIMPLE_AI. */
             if (type <= 57 && SIMPLE_AI[type].nframes > 0) {
                 const simple_ai_t *s = &SIMPLE_AI[type];
                 return (u16)(s->base + (anim_phase % s->nframes));
             }
             return 0xFFFF;                   /* нет спрайта — placeholder rect */
+        }
     }
 }
 
@@ -1802,9 +1900,7 @@ void ai_try_pickup(int kx, int ky)
             if (ky1 < iy0 || ky0 > iy1) continue;
             give_item_by_sprite(o->item_sprite);
             audio_play_sfx(5);   /* подбор предмета — play_sound(5) */
-            o->alive = false;
-            int li = o->level_idx;
-            if (li >= 0 && li < LEVEL_MAX_ENEMIES) g_alive_idx[li] = -1;
+            o->alive = false;    /* запись остаётся flags=1 — предмет одноразов */
             continue;
         }
         if (o->type != 6 && o->type != 4) continue;
@@ -1819,30 +1915,14 @@ void ai_try_pickup(int kx, int ky)
         if (ky1 < iy0 || ky0 > iy1) continue;
         give_item_by_sprite(sid);
         audio_play_sfx(5);
-        o->alive = false;   /* убираем из мира */
-        int li = o->level_idx;
-        if (li >= 0 && li < LEVEL_MAX_ENEMIES) g_alive_idx[li] = -1;
+        o->alive = false;   /* убираем из мира; запись остаётся flags=1 */
     }
 }
 
-/* ─── Scroll-gated spawn ───────────────────────────────────────────────
- *
- * Враги в `level_enemies[]` уже отсортированы по cur_x по конструкции
- * самого файла LEVEL%d.BIN (наблюдается на LEVEL1: cur_x растёт от 0 до
- * 1632 монотонно). Курсор g_pending_idx продвигается только вперёд: когда
- * cur_x пересекает (scroll_x + view_w + SPAWN_MARGIN), враг превращается
- * в активный g_obj и индекс инкрементируется. Возврат камеры назад врагов
- * не ре-спаунит — это поведение оригинала (одноразовая активация).
- *
- * Что отфильтровываем:
- *   - type == 0  — пустая запись/терминатор.
- *   - type == 2  — Karnov-spawn-marker.
- *   - cur_x >= ULTRA_HIGH (32000) — sentinel-маркер конца списка.
- *   - type == 8  с cur=(0,0) и spawn=(0,0) — sky-spawn template (sky-spawn
- *     enemies формируются динамически в ai_type08, не из этой записи).
- */
 /* Найти свободный слот в g_obj[] (alive=false) или вернуть g_num (если все
- * заняты и есть запас в массиве). Возвращает -1 если массив переполнен. */
+ * заняты и есть запас в массиве). Возвращает -1 если массив переполнен —
+ * тогда check_triggers НЕ ставит flags=1 и запись ретраится (оригинальное
+ * поведение при пустой free-list, file 0x4F3D). */
 static int alloc_obj_slot(void)
 {
     for (int i = 0; i < g_num; ++i) {
@@ -1850,182 +1930,6 @@ static int alloc_obj_slot(void)
     }
     if (g_num < MAX_AI) return g_num++;
     return -1;
-}
-
-/* User-spec (2026-05-29 — Image #8 reference): при старте уровня видны
- * ТОЛЬКО декорации (дракон, платформа, Karnov) — НИ ОДНОГО врага. Только
- * при дальнейшем scroll'е, когда триггер cur_x ПЕРЕСЕКАЕТ правый край
- * viewport'а из-вне-кадра-вправо в кадр, враг материализуется. */
-void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame)
-{
-    bool dbg = getenv("KARNOV_DBG_SPAWN") != NULL;
-    int cur_right_edge = scroll_x + view_w;
-    if (cur_right_edge > g_max_right_edge) g_max_right_edge = cur_right_edge;
-
-    /* Ре-спаун убитых при возврате камеры (как в оригинале Karnov): убитый
-     * обычный враг «забывается», когда его позиция ушла далеко за край экрана
-     * — и снова появляется, когда камера возвращается к нему. БОСС (type14)
-     * убит навсегда. Пикапы — g_one_shot, их это не касается. */
-    for (u16 i = 0; i < level_num_enemies; ++i) {
-        if (!g_killed[i]) continue;
-        if ((level_enemies[i].trigger >> 8) >= 50 &&
-            level_enemies[i].subtype == 7) continue;  /* босс — мёртв навсегда */
-        int px = (int)level_enemies[i].spawn_x * 2;
-        if (px < scroll_x - 128 || px > scroll_x + view_w + 256) {
-            g_killed[i] = false;   /* забыли — снова появится, когда позиция
-                                    * вернётся в обзор (через re-spawn window;
-                                    * g_spawn_triggered остаётся true). */
-        }
-    }
-
-    for (u16 i = 0; i < level_num_enemies; ++i) {
-        const enemy_spawn_t *e = &level_enemies[i];
-
-        if (e->type == 0) continue;             /* пустой */
-        if (e->type <= 3) continue;             /* Karnov-маркеры (типы 1-3) */
-        if (e->cur_x >= 2000 && e->spawn_x == 0) continue;  /* sentinel-запись */
-        if (g_killed[i]) continue;              /* уже убит — навсегда */
-        if (g_alive_idx[i] >= 0) continue;      /* уже активен в g_obj */
-        if (g_one_shot[i]) continue;            /* пикапы — однократно */
-
-        /* Разделение полей записи (верифицировано на LEVEL1/2/3, декомпиляция
-         * spawn_active_object cs:0x4F30 + damage pair-loop level.cpp):
-         *
-         *   cur_x/cur_y  (offset 0x04/0x06) — ТРИГГЕР спавна: враг рождается,
-         *                когда правый край viewport'а доходит до cur_x. НЕ
-         *                позиция!
-         *   spawn_x/spawn_y (0x0C/0x0E) — ПОЗИЦИЯ размещения (obj.x_world,
-         *                obj.y_world).
-         *
-         * Раньше эти роли путались: spawn_x использовался и как позиция, и как
-         * триггер, из-за чего координаты смотрелись сдвинутыми. */
-
-        /* Группы врагов появляются ЦЕЛИКОМ, а не по одному. В оригинале
-         * (user 2026-07-05) враг активируется, как только правый край
-         * viewport'а доходит до его триггера cur_x — и все члены группы с
-         * одинаковым/близким cur_x активируются на одном тике, появляясь
-         * разом (напр. отряд скелетов на страусах или зелёных мечников).
-         * NO kill-gated очереди — это была ошибка. */
-
-        /* Координаты врагов по X — ×2 (world = 2 × file). Так враги
-         * распределяются по всей ширине уровня (3600), а босс (spawn_x=1730)
-         * оказывается в конце (~3460). Без ×2 они ужаты в левую половину и
-         * босса в конце нет (user 2026-07-05: «верни как было»). Y — 1:1. */
-        int tx = (int)e->cur_x  * 2;            /* триггер по X (world) */
-        int rx = (int)e->spawn_x * 2;           /* позиция X (world) */
-        int ry = (int)e->spawn_y;               /* позиция Y */
-
-        /* Первая активация — по триггеру cur_x (группа появляется разом, когда
-         * правый край viewport'а доходит до cur_x). ПОСЛЕ этого враг может
-         * ре-спауниться: если камера ушла и он был despawn'нут, он снова
-         * появляется, когда его позиция spawn_x возвращается в зону видимости
-         * (user 2026-07-06: зелёный метатель на тумбе «пропал» после того как
-         * Karnov отошёл и вернулся). Убитые (g_killed) не воскресают. */
-        if (!g_spawn_triggered[i]) {
-            if (tx > cur_right_edge + SPAWN_MARGIN) continue;   /* триггер ещё впереди */
-            g_spawn_triggered[i] = true;
-        } else {
-            int respawn_left  = scroll_x - RESPAWN_MARGIN;
-            int respawn_right = scroll_x + view_w + RESPAWN_MARGIN;
-            if (rx < respawn_left || rx > respawn_right) continue; /* позиция вне обзора */
-        }
-
-        int slot = alloc_obj_slot();
-        if (slot < 0) {
-            if (dbg) fprintf(stderr, "spawn_pending: g_obj full @ entry=%u\n", i);
-            break;
-        }
-        if (dbg) {
-            fprintf(stderr, "spawn[%u]: type=%u spawn=(%d,%d) slot=%d\n",
-                    i, e->type, rx, ry, slot);
-        }
-
-        /* HP из старшего байта поля trigger (декомпиляция spawn_active_object:
-         * obj.hit_points = spawn[0x11] — high byte of WORD at offset 0x10).
-         * Младший байт — init_arg/sub_timer. Если 0 — fallback hp=1.
-         * Boss = HP ≥ 50 (только Селёдка в конце LEVEL1: hp=100). */
-        int hp = (int)(e->trigger >> 8);
-        u16 arg = (u16)(e->trigger & 0xFF);       /* init_arg (spawn[0x10] lo) */
-        if (hp == 0) hp = 1;
-        /* Type 12: оригинальный INIT ставит hit_points=20 (file 0x13E3C). */
-        if (e->type == 12 && hp <= 1) hp = 20;
-        /* Босс уровня (смерть → выпадает свиток → конец уровня): большой
-         * HP И subtype 7 (L1 Селёдка: type14 st7 hp=100). Просто hp≥50
-         * нельзя: змеи LEVEL2 (type 20 st9) имеют hp=250, но не боссы. */
-        bool boss = (hp >= 50 && e->subtype == 7);
-        /* Предметы (типы 4/5/6) — однократные. */
-        if (e->type == 4 || e->type == 5 || e->type == 6) g_one_shot[i] = true;
-
-        /* Предметы: item_id = (init_arg == 99) ? RND%11 : init_arg;
-         * sprite_id = item_id + 0x27 (= #39..49) — байт-порт ai_type05/06.
-         * Для type 6: arg ≥ 11 → СКРЫТЫЙ предмет (misc_state≥11 в
-         * оригинале), виден только с Glasses. */
-        u16 item_sprite = 0;
-        bool hidden_item = false;
-        if (e->type == 4 || e->type == 5 || e->type == 6) {
-            u16 item_id;
-            if (arg == 99)          item_id = (u16)(rng_next() % 11u);
-            else if (arg >= 11)     { item_id = (u16)(arg % 11u); hidden_item = true; }
-            else                    item_id = arg;
-            item_sprite = (u16)(39 + item_id);
-        }
-
-        g_obj[slot] = (ai_obj_t){
-            .alive        = true,
-            .invisible    = hidden_item,
-            .is_boss      = boss,
-            .type         = e->type,
-            .subtype      = e->subtype,           /* → obj_type (+0xE5) */
-            .init_arg     = arg,
-            .x            = rx,
-            .y            = ry,
-            .facing       = -1,
-            .hp           = hp,
-            .level_idx    = (int)i,
-            .home_x       = rx,
-            .home_y       = ry,
-            .half_range_x = (int)e->range_x,        /* range_x×2 (world) / 2 */
-            .half_range_y = (int)e->range_y / 2,
-            .spawn_x      = (u16)rx,
-            .spawn_y      = (u16)ry,
-            .item_sprite  = item_sprite,
-            .spawn_frame  = current_frame,
-        };
-        g_alive_idx[i] = (s16)slot;
-    }
-}
-
-/* Despawn врагов, ушедших слишком далеко за левый край viewport.
- * Освобождённые слоты переиспользует ai_spawn_pending.
- * Вызывается каждый тик из game.c после update_scroll. */
-void ai_despawn_offscreen(int scroll_x)
-{
-    /* Despawn zone: 128 px за левым краем И 128 px за правым краем viewport.
-     * Despawn освобождает g_obj-слот и СБРАСЫВАЕТ g_alive_idx — при возврате
-     * scroll'а enemy re-spawn'нется через ai_spawn_pending.
-     * Killed-флаг (g_killed) этим НЕ затрагивается — убитые остаются мёртвыми. */
-    /* despawn_right с запасом 256: враг размещается в spawn_x, который может
-     * быть на ~112 px правее своего триггера cur_x. При узком правом margin
-     * такой враг был бы срезан в тот же тик, когда родился, и (из-за
-     * одноразовой активации) больше не появился бы. 256 > 112+SPAWN_MARGIN. */
-    int despawn_left  = scroll_x - 128;
-    int despawn_right = scroll_x + VIEW_W + 256;
-    for (int i = 0; i < g_num; ++i) {
-        if (!g_obj[i].alive) continue;
-        /* Не дезактивируем projectiles (player fireball) и items — они
-         * сами завершаются. Только обычных врагов LEVEL1+. */
-        u16 t = g_obj[i].type;
-        if (t == TYPE_PLAYER_FIREBALL) continue;
-        if (t == TYPE_BOMB_BLAST) continue;  /* короткоживущая вспышка у Karnov'а */
-        if (t == 4 || t == 5 || t == 6) continue; /* предметы — лежат до подбора */
-        if (t == 7 || t == 8) continue;   /* триггер / sky-spawner — вечные */
-        if (g_obj[i].is_boss) continue;   /* boss остаётся пока не убит */
-        if (g_obj[i].x < despawn_left || g_obj[i].x > despawn_right) {
-            g_obj[i].alive = false;
-            int li = g_obj[i].level_idx;
-            if (li >= 0 && li < LEVEL_MAX_ENEMIES) g_alive_idx[li] = -1;
-        }
-    }
 }
 
 /* Player hit detection: вызывается из game.c когда player-fireball
@@ -2042,11 +1946,8 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     if (o->hp > 0) return;
     o->alive = false;
     audio_play_sfx(1);   /* враг убит — play_sound(1), KARNOV.EXE @ 0xFC5A */
-    int li = o->level_idx;
-    if (li >= 0 && li < LEVEL_MAX_ENEMIES) {
-        g_killed[li]    = true;
-        g_alive_idx[li] = -1;
-    }
+    /* Запись врага остаётся flags=1 (one-shot): убитый не возвращается,
+     * пока rearm-цикл после смерти игрока не перевзведёт его. */
     if (o->is_boss) {
         g_boss_dead       = true;
         g_boss_dead_frame = frame;
@@ -2056,8 +1957,8 @@ void ai_notify_enemy_hit(int slot, u16 frame)
 
 /* Уничтожить всех живых damageable-врагов на экране (Bomb / Clapper).
  * exclude_boss=true (Clapper) пропускает boss'а; false (Bomb) убивает всех.
- * Логика зеркалит ai_notify_enemy_hit: снимаем alive, метим g_killed,
- * очищаем g_alive_idx, отмечаем boss_dead. */
+ * Логика зеркалит ai_notify_enemy_hit: снимаем alive (записи остаются
+ * flags=1 — one-shot), отмечаем boss_dead. */
 void ai_clear_enemies(bool exclude_boss)
 {
     for (int i = 0; i < g_num; ++i) {
@@ -2066,11 +1967,6 @@ void ai_clear_enemies(bool exclude_boss)
         if (!is_damageable_obj(o) && !o->is_boss) continue;
         if (exclude_boss && o->is_boss) continue;
         o->alive = false;
-        int li = o->level_idx;
-        if (li >= 0 && li < LEVEL_MAX_ENEMIES) {
-            g_killed[li]    = true;
-            g_alive_idx[li] = -1;
-        }
         if (o->is_boss) {
             g_boss_dead       = true;
             g_boss_dead_frame = 0;

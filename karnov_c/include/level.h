@@ -8,16 +8,25 @@
 
 #include "karnov.h"
 
-/* 12-байтная структура из LEVEL%d.BIN (см. FORMATS.md §3).
- * (x0,y0)–(x1,y1) — bbox области в world-пикселях; (vx,vy) — скорость скролла
- * или связанная точка (start camera position для региона). */
+/* 12-байтная структура региона из LEVEL%d.BIN.
+ * Декомпиляция респавн-логики (KARNOV.EXE file 0x10019) показала настоящую
+ * семантику: bbox области + точка возрождения игрока внутри неё.
+ * read_object_regions (хвост, file 0x51F0) копирует region[0].respawn_x/y
+ * в шаблон игрока DS:0x480 — это стартовая позиция Карнова на уровне.
+ * X-координаты — в 2px-единицах движка, Y — в пикселях. */
 typedef struct {
-    u16 x0, y0;
-    u16 x1, y1;
-    u16 vx, vy;
+    u16 x_start, y_start;
+    u16 x_end,   y_end;
+    u16 respawn_x, respawn_y;
 } object_region_t;
 
-/* 20-байтная структура спауна врага. */
+/* 20-байтная структура спауна врага.
+ * Семантика (check_triggers, file 0x5011): спаун срабатывает, когда
+ * |player_x - cur_x| < range_x И |player_y - cur_y| < range_y (строго),
+ * flags — one-shot защёлка (0 = взведён; 1 ставится при успешном спауне;
+ * файл может содержать записи с preset flags=1 — «death-only» враги,
+ * взводимые только rearm-циклом после смерти игрока).
+ * trigger>>8 = HP, trigger&0xFF = init_arg. X — в 2px-единицах. */
 typedef struct {
     u16 type, subtype;
     u16 cur_x, cur_y;
@@ -46,6 +55,13 @@ extern u8  level_map[MAX_MAP_ROWS][MAX_MAP_COLS];
 
 /* Загружает level_num (0..9). Возвращает 0 = OK, иначе код ошибки. */
 int level_load(u16 level_num);
+
+/* Регион для респавна после смерти (условие из KARNOV.EXE file 0x1008D).
+ * checkpoint_x_units — X в 2px-единицах, y_px — Y в пикселях. NULL только
+ * если у уровня нет регионов вовсе. */
+const object_region_t *level_region_for_respawn(int checkpoint_x_units,
+                                                int y_px,
+                                                int max_progress_units);
 
 /* Запрос «есть ли твёрдый тайл в мире на пикселе (wx, wy)?».
  * Использует level_tile_attr[tile_id] & 1 — байт-верифицированный

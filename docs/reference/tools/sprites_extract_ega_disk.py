@@ -25,15 +25,22 @@ SPRITES.EGA #76: блок 0 содержит ~47/124 байт 0xFF — это MA
 имеет mask ПОСЛЕДНИЙ (см. sprites_extract.py), потому что loader делает
 переупорядочивание при загрузке. На диске же mask стоит ПЕРВЫМ.
 
-Output cache (v3, bpp=4):
-  uint16 magic, version, count
+Directory entry (8 bytes): u16 ai_type, u16 size, u16 offset, u16 bank.
+Четвёртое слово — индекс 64КБ-банка: file_offset = bank*65536 + offset
+(offset 16-битный, а архив ~120КБ; bank=1 у id 211..337). Игнорирование
+банка — причина, по которой раньше извлекались только id 0..210.
+
+Output cache (v4, bpp=4):
+  uint16 magic, version=4, count
   per sprite: uint16 sid, uint8 w, uint8 h, uint8 bpp=4, uint8 reserved,
+              uint16 ai_type (слово 0 директории — манифест sprite→AI type),
               uint8 pixels[w*h]   (0..15 EGA color, 0xFF = transparent)
 """
 import os, sys, struct
 
-MAGIC, VERSION = 0x534B, 3
-MAX_W, MAX_H = 96, 60
+MAGIC, VERSION = 0x534B, 4
+# 128×63 — по факту: id 180 = 128×30 (cnt=8), id 172 = 64×63 (wid=63).
+MAX_W, MAX_H = 128, 63
 
 
 def rle_decompress_from(data, start_off, num_bytes):
@@ -74,7 +81,7 @@ def decode_sprite(bs):
     if len(bs) < 12: return None
     wid = bs[0]
     cnt = bs[1]
-    if not (1 <= cnt <= 6 and 1 <= wid <= MAX_H): return None
+    if not (1 <= cnt <= MAX_W // 16 and 1 <= wid <= MAX_H): return None
     cw = cnt * wid
     if 2 + cw * 10 != len(bs): return None
     iw, ih = cnt * 16, wid
@@ -129,27 +136,34 @@ def main():
 
     sprites = []
     skipped_bad = 0
+    skipped_empty = 0
     for i in range(count):
         eoff = 2 + i * 8
-        ai, sz, doff, _ = struct.unpack("<HHHH", dir_bytes[eoff:eoff + 8])
-        if doff >= len(raw):
+        ai, sz, doff, bank = struct.unpack("<HHHH", dir_bytes[eoff:eoff + 8])
+        foff = bank * 65536 + doff
+        if sz <= 2:  # ids 334..337: заглушки без пиксельных данных
+            skipped_empty += 1; continue
+        if foff >= len(raw):
             skipped_bad += 1; continue
-        data = rle_decompress_from(raw, doff, sz)
+        data = rle_decompress_from(raw, foff, sz)
         if len(data) < sz:
             skipped_bad += 1; continue
         res = decode_sprite(data)
         if res is None:
-            skipped_bad += 1; continue
+            skipped_bad += 1
+            print(f"  decode failed: id {i} ai_type {ai} size {sz}")
+            continue
         w, h, px = res
-        sprites.append((i, w, h, px))
+        sprites.append((i, w, h, ai, px))
 
-    print(f"Extracted {len(sprites)} sprites ({skipped_bad} skipped)")
+    print(f"Extracted {len(sprites)} sprites "
+          f"({skipped_bad} skipped, {skipped_empty} empty placeholders)")
 
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "wb") as f:
         f.write(struct.pack("<HHH", MAGIC, VERSION, len(sprites)))
-        for sid, w, h, px in sprites:
-            f.write(struct.pack("<HBBBB", sid, w, h, 4, 0))
+        for sid, w, h, ai, px in sprites:
+            f.write(struct.pack("<HBBBBH", sid, w, h, 4, 0, ai))
             f.write(px)
     print(f"Wrote {out}")
 

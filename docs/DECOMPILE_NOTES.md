@@ -72,7 +72,7 @@
 | 1 | `cs:0x6E:0x6D3`  | `0x025B3` | UPDATELOCS |
 | 2 | `cs:0x6E:0xCDB`  | `0x02BBB` | POSTHITS |
 | 3 | `cs:0x20F:0x2FB` | `0x03BEB` | DOCONTROLS |
-| 4 | `cs:0x365:0x1C1` | `0x051D1` | CHECKTRIGGERS |
+| 4 | `cs:0x365:0x1C1` | `0x05011` | CHECKTRIGGERS (декомпилирована; прежний адрес 0x051D1 ошибочен — это середина read_object_regions. См. KARNOV.md §5) |
 | 5 | `cs:0xFFA:0x1A1A`| `0x125BA` | PRE-KARNOV |
 | **6** | **`cs:0xD4B:0xE03`** | **`0x0FAB3`** | **THINKCYCLE** |
 | 7 | `cs:0xFFA:0x1C04`| `0x127A4` | POST-KARNOV |

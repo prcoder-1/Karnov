@@ -56,6 +56,22 @@ static int read_enemies(FILE *fp)
     if (level_num_enemies == 0) return 0;
     if (bin_fread(level_enemies, sizeof(enemy_spawn_t),
                   level_num_enemies, fp) != level_num_enemies) return 1;
+    /* Selection sort по возрастанию cur_x — точная копия оригинала
+     * (file 0x5268..0x5345): минимум обновляется только при СТРОГО
+     * меньшем ключе, swap только если min != i. От порядка при равных
+     * ключах зависит и порядок спауна, и то, какая запись окажется
+     * последней (= goal-объект уровня). flags из файла сохраняются. */
+    for (u16 i = 0; i + 1 < level_num_enemies; ++i) {
+        u16 min = i;
+        for (u16 j = i + 1; j < level_num_enemies; ++j) {
+            if (level_enemies[j].cur_x < level_enemies[min].cur_x) min = j;
+        }
+        if (min != i) {
+            enemy_spawn_t tmp = level_enemies[i];
+            level_enemies[i] = level_enemies[min];
+            level_enemies[min] = tmp;
+        }
+    }
     return 0;
 }
 
@@ -120,6 +136,27 @@ int level_load(u16 level_num)
     level_tile_attr[0] = 2;
 
     return 0;
+}
+
+/* Поиск региона для респауна после смерти игрока — порт условия из
+ * KARNOV.EXE file 0x1008D: регион подходит, если его bbox содержит
+ * checkpoint (X в 2px-единицах, Y в пикселях) и его начало не дальше
+ * максимального достигнутого прогресса. Возвращает region[0] как
+ * fallback (он же — стартовая точка уровня, см. file 0x51F0). */
+const object_region_t *level_region_for_respawn(int checkpoint_x_units,
+                                                int y_px,
+                                                int max_progress_units)
+{
+    for (u16 i = 0; i < level_num_objects; ++i) {
+        const object_region_t *r = &level_objects[i];
+        if ((int)r->x_start <= max_progress_units &&
+            (int)r->x_end   >  checkpoint_x_units &&
+            (int)r->x_start <= checkpoint_x_units &&
+            (int)r->y_end   >  y_px &&
+            (int)r->y_start <= y_px)
+            return r;
+    }
+    return (level_num_objects > 0) ? &level_objects[0] : NULL;
 }
 
 /* Per-tile attr → 16-bit "props" bitmask. Байт-верифицированная таблица из

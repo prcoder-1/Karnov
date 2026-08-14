@@ -11,25 +11,22 @@
 #include "karnov.h"
 
 /* Инициализирует AI из level_enemies. Сбрасывает локальное состояние.
- * level_num позволяет добавлять splash-only декорации (stone-man +
- * катящиеся глыбы для LEVEL0 заставки).
- *
- * Для LEVEL0 (splash) всё спаунится upfront, как было раньше. Для LEVEL1+
- * враги остаются в `level_enemies[]` как pending и пуляются игроком в мир
- * через ai_spawn_pending() по мере прокрутки камеры. Это соответствует
- * оригинальной механике: «враг становится активным, когда его cur_x
- * попадает в поле зрения». */
+ * Ничего не спаунит: все спауны (включая LEVEL0 splash) происходят через
+ * ai_check_triggers по близости игрока — как в оригинале. */
 void ai_init_from_level(u16 level_num);
 
-/* Активирует pending-врагов из level_enemies, чьи cur_x попадают в
- * scroll_x..scroll_x+view_w+SPAWN_MARGIN. Вызывается каждый кадр после
- * update_scroll(). Внутри — sequential cursor, ничего не сортирует. */
-void ai_spawn_pending(int scroll_x, int view_w, u16 current_frame);
+/* CHECKTRIGGERS (KARNOV.EXE cs:0x365:0x1C1, file 0x5011) — дословный порт.
+ * Вызывается каждый кадр. Спаун срабатывает по близости ИГРОКА:
+ * |player_x − cur_x| < range_x и |player_y − cur_y| < range_y (строго),
+ * в окне [camera_left, player_x + 320px] по sorted-таблице записей.
+ * flags записи — one-shot защёлка; центрального деспавна/респавна нет. */
+void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
+                       u16 frame);
 
-/* Снимает alive=false с врагов, ушедших более чем 64 px за левый край
- * viewport. Слот свободен для следующего ai_spawn_pending. Не трогает
- * fireball'ы (сами despawn'ятся) и type 6 OPTIONS. */
-void ai_despawn_offscreen(int scroll_x);
+/* Rearm после смерти игрока (file 0x1015A): снять все активные объекты и
+ * перевзвести записи по правилу flags = (cur_x + range_x < player_x)?1:0.
+ * player_x_px — позиция Karnov'а ПОСЛЕ респауна (в пикселях). */
+void ai_respawn_rearm(int player_x_px);
 
 /* Прокачивает все живые AI-объекты по своим хендлерам. */
 void ai_tick(u16 frame, u8 karnov_input);
