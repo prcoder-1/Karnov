@@ -1,9 +1,14 @@
-/* ai.c — function-pointer table AI dispatcher.
+/* ai.c — таблица обработчиков AI (порт AI_HANDLERS из DS:0x10FE).
  *
- * AI_HANDLERS[type] вызывается для каждого живого объекта.
- * Реализованы: type 13 (Y-tracker), type 6 (bird), type 512 (stone man).
- * Остальные = ai_stub (no-op — враг остаётся на стартовой позиции,
- * рендерится плейсхолдер).
+ * Обработчик вызывается для каждого живого объекта раз в кадр.
+ * Покрыты все типы 4..57 + псевдотипы порта (см. AI_HANDLERS ниже).
+ * Степень достоверности разная: INIT-константы и раскладки спрайт-боксов
+ * взяты из дизассемблирования, TICK-логика у большинства типов ещё
+ * реконструирована «по смыслу» — такие места помечены в комментариях.
+ *
+ * Координатная конвенция: o->x — позиция по X в пикселях (= 2 × x_world
+ * оригинала), o->y — ВЕРХНЯЯ строка спрайта (KARNOV.md §3.3).
+ * «Ноги» объекта = obj_feet(o) = o->y + высота текущего спрайта.
  */
 #include "ai.h"
 #include "level.h"
@@ -58,7 +63,13 @@ typedef struct ai_part {
 typedef struct ai_obj {
     bool   alive;
     bool   invisible;     /* OPTIONS items (type 6) — на splash скрыты */
-    bool   is_boss;       /* type 14 в конце уровня (Селёдка) */
+    bool   is_boss;       /* goal-объект уровня (его смерть = конец) */
+    bool   is_scroll;     /* свиток-награда за goal-объект. ОТДЕЛЬНОЕ поле:
+                           * раньше признаком был custom==999, но custom
+                           * принадлежит обработчику type 5, который при
+                           * приземлении пишет туда 1 — свиток «терялся»,
+                           * level-end не наступал, а ai_tick бесконечно
+                           * спавнил новые свитки, забивая пул объектов. */
     u16    type;          /* PRIMARY type = индекс AI-обработчика (spawn[0]) */
     u16    subtype;       /* EnemySpawn.subtype → obj_type (+0xE5): категория
                            * pair-loop: 0=Karnov-маркер, 1/7=враг, 4=спец,
@@ -111,8 +122,11 @@ u16 g_ai_level_num = 0;
  * one-shot защёлка (0 = взведена, 1 = отработала), как в оригинале
  * (check_triggers @ file 0x5011 пропускает flags≠0; spawn_active_object
  * @ file 0x4FFE ставит flags=1 только при успешном alloc). Перевзводит
- * записи ТОЛЬКО rearm-цикл после смерти игрока (file 0x1015A). Никакого
- * центрального деспавна/респавна-при-возврате-камеры в оригинале нет. */
+ * записи ТОЛЬКО rearm-цикл после смерти игрока (file 0x1015A).
+ * Респавна-при-возврате-камеры в оригинале нет, но off-screen despawn
+ * ЕСТЬ — в THINKCYCLE (file 0xFD6A): объект, отставший от игрока более
+ * чем на 0x7D единиц (250 px) и не являющийся goal-объектом, получает
+ * state_byte = 6. В порту пока не реализовано (TODO). */
 
 /* Boss-конец: когда goal-объект убит — g_boss_dead=true и через 30 ticks
  * спавним свиток (scroll item) сверху. После пикапа Karnov-ом инициируем
@@ -235,45 +249,6 @@ static bool type_snaps_to_ground(u16 type)
 }
 
 /* ─── Handlers ──────────────────────────────────────────────────────── */
-
-/* Type 13 — Комарик (mosquito Y-tracker, спрайты #91..94).
- * Каждые ~64 кадра делает шаг по X/Y в сторону Karnov.
- * 4-кадровая анимация полёта со страйдом ~8 ticks/кадр. */
-static void ai_y_tracker(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    o->anim_phase = (frame >> 3) & 3;
-    if ((frame & 0x3F) != 0) return;
-    int kx = physics_get_x(), ky = physics_get_y();
-    int feet = obj_feet(o);
-    if (ky < feet - 2)      o->y -= 1;
-    else if (ky > feet + 2) o->y += 1;
-    if (kx > o->x + 40)     { o->x += 1; o->facing =  1; }
-    else if (kx < o->x - 40){ o->x -= 1; o->facing = -1; }
-
-    /* Movement bounds: home ± half_range (из EnemySpawn.range_x/range_y).
-     * Если range нулевой (LEVEL0 splash — нет данных), fallback на
-     * исходные splash-границы 20..300 / 90..115. */
-    if (o->half_range_x > 0) {
-        int xmin = o->home_x - o->half_range_x;
-        int xmax = o->home_x + o->half_range_x;
-        if (o->x < xmin) o->x = xmin;
-        if (o->x > xmax) o->x = xmax;
-    } else {
-        if (o->x < 20) o->x = 20;
-        if (o->x > 300) o->x = 300;
-    }
-    if (o->half_range_y > 0) {
-        int ymin = o->home_y - o->half_range_y;
-        int ymax = o->home_y + o->half_range_y;
-        if (o->y < ymin) o->y = ymin;
-        if (o->y > ymax) o->y = ymax;
-    } else {
-        int h = o->cur_h > 0 ? o->cur_h : obj_height(o);
-        if (o->y + h < 90)  o->y = 90  - h;
-        if (o->y + h > 115) o->y = 115 - h;
-    }
-}
 
 /* Type 512 — Stone Man (статичная декорация с лёгкой анимацией).
  * Стрида ≈ 16 game-ticks (медленный четырёхкадровый цикл — без байт-верификации
@@ -499,7 +474,7 @@ static void ai_bomb_blast(ai_obj_t *o, u16 frame, u8 input)
  *   anim_phase — индекс в массиве sprite-id'ов для рендера.
  *   custom — type-specific scratch (timer, HP, sub-state).
  *
- * Все AI ниже — damageable (см. is_damageable_enemy). Karnov-fireball
+ * Все AI ниже — damageable (см. is_damageable_obj). Karnov-fireball
  * убивает с одного попадания, что упрощает геймплей. */
 
 /* Type 11 — наземный патрульный (декомпиляция cs:0x11D6:0x09F4 → ai_type11).
@@ -610,7 +585,7 @@ static void ai_horizontal_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
      * слишком медленно в ×2-мире; user 2026-07-06). */
     o->x += 3 * o->facing;
     /* Despawn off-world. */
-    if (o->x < -16 || o->x > 32000) o->alive = false;
+    if (o->x < -16 || o->x > (int)level_num_map_cols * TILE_W + 16) o->alive = false;
 }
 
 /* Type 5 — падающий бонус (KARNOV.EXE: ai_type05 cs:0xFFA:0x12... ).
@@ -636,8 +611,14 @@ static void ai_falling_bonus(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->y = (feet / 10) * 10 - h;   /* ноги на верхнюю кромку строки */
         o->custom = 1;
     }
-    if (feet >= 300) {            /* fallback: дефолт ground LEVEL1 */
-        o->y = 290 - h;
+    /* Страховка от проваливания сквозь карту: пол уровня из скана карты
+     * (level_compute_ground_y через physics_get_ground_y). Прежний вариант
+     * «feet >= 300 → y = 290 − h» был захардкожен под LEVEL1 и, работая по
+     * УЖЕ устаревшему feet, перекрывал корректное приземление на тайл:
+     * на уровнях с полом ниже 300 (L3 390, L7 450, L9 580) предметы
+     * зависали в воздухе и становились недосягаемы. */
+    else if (o->y + h >= physics_get_ground_y()) {
+        o->y = physics_get_ground_y() - h;
         o->custom = 1;
     }
 }
@@ -693,7 +674,10 @@ static void ai_flying_bird(ai_obj_t *o, u16 frame, u8 karnov_input)
         +20, +18, +14,  +8,   0,  -8, -14, -18,
     };
     int phase = ((frame >> (fixed_left ? 2 : 3)) + (o->custom ? 8 : 0)) & 15;
-    o->y = o->home_y + sin16[phase];
+    /* Колебание только ВВЕРХ от точки спавна: для type 14 INIT оригинала
+     * ставит объект ногами на пол (хелпер cs:0xD4B:0x19F), и симметричная
+     * синусоида утапливала бы его в землю на половине периода. */
+    o->y = o->home_y - (sin16[phase] < 0 ? -sin16[phase] : sin16[phase]);
 
     /* Movement bounds. */
     if (o->half_range_x > 0) {
@@ -995,44 +979,6 @@ static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 3) & 1;
 }
 
-/* Types 21/33/34/39/50 — многосегментные цепи/черви (фикс. длина).
- * INIT-константы из ai_scripts.cpp; TICK: медленное преследование. */
-static void worm_init(ai_obj_t *o, int len, u16 sprite0, u16 sprite_body,
-                      int step_dx, int step_dy)
-{
-    if (len > MAX_PARTS) len = MAX_PARTS;
-    o->num_parts = len;
-    for (int i = 0; i < len; ++i) {
-        o->parts[i].sprite = (i == 0) ? sprite0 : sprite_body;
-        o->parts[i].dx = (s16)(step_dx * i);
-        o->parts[i].dy = (s16)(step_dy * i);
-    }
-}
-
-static void ai_worm(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    if (o->num_parts == 0) {
-        switch (o->type) {
-        case 21: worm_init(o, 7, 178, 178, 2, -5); break;  /* bbox0 (2,-3), далее y −30..+5 */
-        case 33: worm_init(o, 7, 230, 231, -12, 0); break;
-        case 34: worm_init(o, 6, 233, 234, -14, 0); break;
-        case 39: worm_init(o, 6, 259, 259, -12, 0); break;
-        case 50: worm_init(o, 7, 306, 306, -12, 0); break; /* bbox0 x=-4 file */
-        default: worm_init(o, 4, 178, 178, -12, 0); break;
-        }
-    }
-    int kx = physics_get_x();
-    o->facing = (kx >= o->x) ? 1 : -1;
-    if (o->type != 21 && (frame & 3) == 0) o->x += o->facing;
-    /* Лёгкая волна по сегментам. */
-    for (int i = 1; i < o->num_parts; ++i) {
-        int ph = ((frame >> 3) + i) & 3;
-        o->parts[i].dy = (s16)(o->parts[i].dy / 2 * 2 + (ph < 2 ? 0 : (o->type == 21 ? 2 : -2)));
-    }
-    o->anim_phase = (frame >> 3) & 1;
-}
-
 /* Type 23 — самонаводящийся снаряд (ai_type23, file 0x14C87): при init
  * vx = ±3 file (=±6 мир) в сторону игрока, sprite 0xB9 (185), прямой
  * полёт до столкновения с тайлом. */
@@ -1082,6 +1028,98 @@ static void ai_flock_spawner(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->alive = false;
 }
 
+/* ─── Многосегментные объекты (типы 21/33/34/39/50) ────────────────────
+ *
+ * Раскладки спрайт-боксов взяты ПРЯМО ИЗ INIT'ов KARNOV.EXE (дизасм
+ * 2026-08-14), а не из C++-реконструкции: та описывала эти типы как
+ * «цепочки» с горизонтальным шагом, чего в бинарнике нет.
+ *
+ * Единицы: dx оригинала — в единицах движка (1 ед. = 2 px), поэтому в
+ * таблицах ниже он уже удвоен; dy — строки развёртки, 1:1. Проверка
+ * сходимости: у type 21 шаг колонок 64 ед. = 128 px = ровно ширина
+ * спрайта 180, шаг строк 30 = его высота (бесшовная мозаика 2×3); у
+ * type 50 шаг 24 ед. = 48 px = ширина спрайта 308; у type 39 шаг
+ * 8 ед. = 16 px = ширина спрайта 259.
+ *
+ * TICK этих типов в оригинале богаче (у 33 — «схлопывание» сегментов,
+ * у 50 — триггер по позиции игрока, у 34 — ожидание игрока в 100 px),
+ * и пока не портирован: объекты статичны. Прежняя «волна» сегментов
+ * была изобретением порта и к тому же интегрировала собственное dy,
+ * из-за чего тело уползало за экран.
+ */
+typedef struct { u16 sprite; s16 dx, dy; } part_def_t;
+
+/* type 21 (INIT file 0x15DFD): голова 178 (+2,−3) + мозаика 2×3 из 180.
+ * Внешний цикл X = 16, 80 (шаг 64, пока < 144); внутренний Y = −30, 0, +30. */
+static const part_def_t PARTS_21[] = {
+    {178,   +4,  -3},
+    {180,   32, -30}, {180,  32,   0}, {180,  32, +30},
+    {180,  160, -30}, {180, 160,   0}, {180, 160, +30},
+};
+/* type 33 (INIT file 0x16A97): вертикальный стек ВВЕРХ. Голова 230
+ * (dx=−4), тело 231 (dx=−2); dy накапливается как −Σ sprite_h + 2,
+ * где h[230] = h[231] = 10 (таблица DS:0x0FAC). */
+static const part_def_t PARTS_33[] = {
+    {230, -8,  -8}, {231, -4, -18}, {231, -4, -28}, {231, -4, -38},
+    {231, -4, -48}, {231, -4, -58}, {231, -4, -68},
+};
+/* type 34 (phase 0 file 0x16CDB): слои sprite = 0xEE − i (238…233),
+ * dx = 0, dy из таблицы DS:0x1C14 = {1,1,1,1,2,0}. */
+static const part_def_t PARTS_34[] = {
+    {238, 0, 1}, {237, 0, 1}, {236, 0, 1},
+    {235, 0, 1}, {234, 0, 2}, {233, 0, 0},
+};
+/* type 39 (INIT file 0x17A18): ряд из 6 спрайтов 0x103 (259), шаг
+ * si*8 ед. = 16 px, dy = 0. TICK крутит кадры 259..262. */
+static const part_def_t PARTS_39[] = {
+    {259,  0, 0}, {259, 16, 0}, {259, 32, 0},
+    {259, 48, 0}, {259, 64, 0}, {259, 80, 0},
+};
+/* type 50 (INIT file 0x18E19): голова 0x132 (306) при dx=−4, dy=0 +
+ * 6 тел 0x134 (308), x = 32..152 шаг 24 (ед.), y = −10. */
+static const part_def_t PARTS_50[] = {
+    {306,  -8,   0},
+    {308,  64, -10}, {308, 112, -10}, {308, 160, -10},
+    {308, 208, -10}, {308, 256, -10}, {308, 304, -10},
+};
+
+static void parts_apply(ai_obj_t *o, const part_def_t *defs, int n)
+{
+    if (n > MAX_PARTS) n = MAX_PARTS;
+    o->num_parts = n;
+    for (int i = 0; i < n; ++i) {
+        o->parts[i].sprite = defs[i].sprite;
+        o->parts[i].dx     = defs[i].dx;
+        o->parts[i].dy     = defs[i].dy;
+    }
+    /* dx задан для facing-right; flip в рендере зеркалит смещения. */
+    o->facing = 1;
+}
+
+static void ai_multipart(ai_obj_t *o, u16 frame, u8 karnov_input)
+{
+    (void)karnov_input;
+    if (o->num_parts == 0) {
+        switch (o->type) {
+        case 21: parts_apply(o, PARTS_21, 7); break;
+        case 33: parts_apply(o, PARTS_33, 7); break;
+        case 34: parts_apply(o, PARTS_34, 6); break;
+        case 39: parts_apply(o, PARTS_39, 6); break;
+        case 50: parts_apply(o, PARTS_50, 7); break;
+        default: parts_apply(o, PARTS_33, 4); break;
+        }
+    }
+    /* Единственная портированная TICK-логика: у type 39 каждый бокс
+     * прокручивает кадр в диапазоне 0x103..0x106 (file 0x17ABB). */
+    if (o->type == 39 && (frame & 3) == 0) {
+        for (int i = 0; i < o->num_parts; ++i) {
+            u16 f = (u16)((o->parts[i].sprite - 259 + 1) & 3);
+            o->parts[i].sprite = (u16)(259 + f);
+        }
+    }
+    o->anim_phase = (frame >> 3) & 1;
+}
+
 /* Type 25 — PRNG-lurker (ai_type25): случайная пауза 30..45 тиков
  * (rand & 0x0F + 30), затем бросок к игроку. */
 static void ai_prng_lurker(ai_obj_t *o, u16 frame, u8 karnov_input)
@@ -1122,13 +1160,19 @@ static void ai_top_drop(ai_obj_t *o, u16 frame, u8 karnov_input)
 static void ai_grow_chain(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
-    int target = 6;
-    if (o->num_parts < target && (frame & 7) == 0) {
-        int i = o->num_parts;
-        o->parts[i].sprite = (i & 1) ? 152 : 5;
-        o->parts[i].dx = (s16)(-i * 12);
-        o->parts[i].dy = 0;
-        ++o->num_parts;
+    /* INIT file 0x15FB5: спрайт КОНСТАНТНЫЙ 0xDA (218); чередуются
+     * x_offset 152 и 5 (единицы → 304 и 10 px), dy = (i>>1)*20.
+     * C++-реконструкция принимала 0x98/0x05 за sprite_id — отсюда была
+     * «цепь из 152/5». TICK (file 0x1608A): +2 бокса каждые 11 тиков. */
+    if (o->num_parts < 6 && ++o->custom > 10) {
+        o->custom = 0;
+        for (int k = 0; k < 2 && o->num_parts < 6; ++k) {
+            int i = o->num_parts;
+            o->parts[i].sprite = 218;
+            o->parts[i].dx = (s16)((i & 1) ? 304 : 10);
+            o->parts[i].dy = (s16)((i >> 1) * 20);
+            ++o->num_parts;
+        }
     }
     o->anim_phase = (frame >> 3) & 1;
 }
@@ -1143,8 +1187,11 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (o->num_parts == 0) {
         o->x = ((o->x / 2) & ~7) * 2;
         o->num_parts = 2;
-        o->parts[0].sprite = 245; o->parts[0].dx = 4;  o->parts[0].dy = 0;
-        o->parts[1].sprite = 249; o->parts[1].dx = -20; o->parts[1].dy = 0;
+        /* INIT file 0x16FFF/0x17017: голова 0xF5 при dx=+2 ед. (=+4 px),
+         * хвост 0xF9 при dx=0 и dy = sprite_h[0xF5] = 20 — т.е. РОВНО
+         * ПОД головой (file 0x17058), а не слева, как было в порту. */
+        o->parts[0].sprite = 245; o->parts[0].dx = 4; o->parts[0].dy = 0;
+        o->parts[1].sprite = 249; o->parts[1].dx = 0; o->parts[1].dy = 20;
     }
     int kx = physics_get_x();
     o->facing = (kx >= o->x) ? 1 : -1;
@@ -1157,7 +1204,7 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (slot >= 0) {
             g_obj[slot] = (ai_obj_t){
                 .alive = true, .type = 23, .subtype = 1,
-                .x = o->x, .y = o->y - 16,
+                .x = o->x, .y = o->y + 8,
                 .facing = o->facing, .hp = 1,
                 .level_idx = -1, .spawn_frame = frame,
             };
@@ -1254,13 +1301,18 @@ static void ai_arena_static(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)frame; (void)karnov_input;
     if (o->num_parts == 0) {
+        /* INIT (file 0x192A0): num_bboxes=8, но заполняется только
+         * bbox[0] = спрайт 0x135 (309) в (0,0), плюс y выравнивается
+         * по 10. Настоящее 8-сегментное тело арены (столб из спрайтов
+         * 0x13D=317 с шагом 10) в оригинале создаёт ОТДЕЛЬНЫЙ объект,
+         * поднимаемый в state 4 через queue_state(cs:175E:0x3A9) — его
+         * нет в таблице DS:0x10FE и он пока не портирован. Прежняя
+         * сетка 4×2 из 309 была изобретением порта. */
         o->y -= o->y % 10;
-        o->num_parts = MAX_PARTS;
-        for (int i = 0; i < MAX_PARTS; ++i) {
-            o->parts[i].sprite = 309;
-            o->parts[i].dx = (s16)((i % 4) * 16);
-            o->parts[i].dy = (s16)((i / 4) * -12);
-        }
+        o->num_parts = 1;
+        o->parts[0].sprite = 309;
+        o->parts[0].dx = 0;
+        o->parts[0].dy = 0;
     }
 }
 
@@ -1292,7 +1344,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [18] = ai_walking_minion,
     [19] = ai_slow_helper,
     [20] = ai_head_column,     /* колонна голов LEVEL2 (multi-bbox, статична) */
-    [21] = ai_worm,            /* 7-сегментная цепь */
+    [21] = ai_multipart,            /* 7-сегментная цепь */
     [22] = ai_simple,          /* tile-aware патруль */
     [23] = ai_homing_shot,     /* самонаводящийся шар */
     [24] = ai_flock_spawner,   /* стая из 7 */
@@ -1304,13 +1356,13 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [30] = ai_grow_chain,
     [31] = ai_simple,
     [32] = ai_simple,
-    [33] = ai_worm,
-    [34] = ai_worm,            /* червь с HP-индикатором */
+    [33] = ai_multipart,
+    [34] = ai_multipart,            /* червь с HP-индикатором */
     [35] = ai_simple,          /* dual-mode */
     [36] = ai_ryu,             /* ★ Рю */
     [37] = ai_simple,          /* slow boss */
     [38] = ai_simple,          /* delayed 75 кадров */
-    [39] = ai_worm,
+    [39] = ai_multipart,
     [40] = ai_simple,
     [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
     [42] = ai_particle42,
@@ -1321,7 +1373,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [47] = ai_hopper47,
     [48] = ai_simple,
     [49] = ai_ryu_helper,
-    [50] = ai_worm,
+    [50] = ai_multipart,
     [51] = ai_arena_static,
     [52] = ai_simple,
     [53] = ai_simple,
@@ -1436,7 +1488,7 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
     bool hidden_item = false;
     if (e->type == 4 || e->type == 5 || e->type == 6) {
         u16 item_id;
-        if (arg == 99)      item_id = (u16)(rng_next() % 11u);
+        if (arg == 99)      item_id = (u16)(rng_next() % (u16)ITEM_NUM);
         else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden_item = true; }
         else                item_id = arg;
         item_sprite = (u16)(39 + item_id);
@@ -1606,11 +1658,7 @@ void ai_respawn_rearm(int player_x_px)
 void ai_tick(u16 frame, u8 karnov_input)
 {
     g_ai_frame = frame;
-    /* Прежде здесь был static-auto-init, вызывавший
-     * ai_init_from_level(0). При запуске напрямую с --level 1 он сбрасывал
-     * g_pending_idx уже после prepare_level → каждый тик re-spawn'ил тех
-     * же врагов, индексы дублировались, активные слоты росли необратимо.
-     * Удалено: prepare_level() в game.c — единственная точка инициализации. */
+    /* Единственная точка инициализации AI — prepare_level() в game.c. */
     if (getenv("KARNOV_DBG_THROWERS_COUNT") && (frame % 50) == 0) {
         int n = 0;
         for (int i = 0; i < g_num; ++i)
@@ -1637,7 +1685,7 @@ void ai_tick(u16 frame, u8 karnov_input)
     if (g_boss_dead && !g_scroll_picked) {
         bool scroll_exists = false;
         for (int i = 0; i < g_num; ++i) {
-            if (g_obj[i].alive && g_obj[i].type == 5 && g_obj[i].custom == 999) {
+            if (g_obj[i].alive && g_obj[i].is_scroll) {
                 scroll_exists = true; break;
             }
         }
@@ -1651,7 +1699,7 @@ void ai_tick(u16 frame, u8 karnov_input)
                     .y           = 50,            /* высоко над землёй */
                     .vy          = 1,
                     .facing      = 1,
-                    .custom      = 999,           /* sentinel: boss-reward scroll */
+                    .is_scroll   = true,
                     .item_sprite = 0x90,          /* настоящий спрайт свитка (#0x90) */
                     .level_idx   = -1,
                     .spawn_frame = frame,
@@ -1686,8 +1734,8 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
              *   #43 boomerang, #44 mask, #45 wings, #47 aqualung,
              *   #48 treasure, #49 multi-shot.
              * #46 не указан — gap. Anim_phase крутит 10 опций. */
-            static const u16 opts[10] = { 39, 40, 41, 42, 43, 44, 45, 47, 48, 49 };
-            return opts[anim_phase % 10];
+            /* item_id = sprite − 39 (см. inventory.h): #39..#48 подряд. */
+            return (u16)(39 + (anim_phase % (u16)ITEM_NUM));
         }
         case   9: {                                /* Стартовый ДРАКОН (декорация).
                                                     * Единственный type9 в LEVEL1 — idx3 @ world 22,
@@ -1947,7 +1995,7 @@ void ai_render_overlay(bool mode_cga, int scroll_x, int scroll_y)
         const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
         if (!s) continue;
         int x0 = g_obj[i].x - s->body_cx - scroll_x;
-        int y0 = g_obj[i].y - s->h - scroll_y;
+        int y0 = g_obj[i].y - scroll_y;
         u8 ck = sprite_is_cga() ? 0xFF : 1;
         const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
         for (int r = 0; r < s->h; ++r) {
@@ -1966,9 +2014,9 @@ void ai_render_overlay(bool mode_cga, int scroll_x, int scroll_y)
 }
 
 /* ─── Pickup detection ─────────────────────────────────────────────────
- * Karnov bbox ≈ 16×24 от (kx, ky) = центр-ног. Items (type 6, custom>0) —
- * это showcase-иконки 16×12 с anchor (cx=body_cx=8, y=bottom). Простое
- * AABB-пересечение. */
+ * Karnov bbox ≈ 16×24 от (kx, ky) = центр-ног (его физика ведёт Y по
+ * ногам). Предмет: o->y — ВЕРХ иконки, высота ≈ 12 → (o->y .. o->y+12).
+ * Простое AABB-пересечение. */
 /* Положить в инвентарь предмет по его sprite_id (#39..48 = OPTIONS-иконки).
  * В оригинале pickup вызывает cs:0x41d:0x9be(item_id) — «добавить в очередь
  * OPTIONS». Полная 10-предметная модель: item_id = sprite - 39. */
@@ -1987,7 +2035,7 @@ void ai_try_pickup(int kx, int ky)
         /* Scroll-свиток (type=5 custom=999) — boss-награда, sentinel ID.
          * Реальный sprite ID свитка-конца-уровня НЕ верифицирован — пока
          * 999 = sentinel чтобы не путать с реальными items #39..#49. */
-        if (o->type == 5 && o->custom == 999) {
+        if (o->is_scroll) {
             int ix0 = o->x - 8, ix1 = o->x + 8;
             int iy0 = o->y, iy1 = o->y + 12;
             if (kx1 < ix0 || kx0 > ix1) continue;
@@ -2015,7 +2063,7 @@ void ai_try_pickup(int kx, int ky)
         u16 sid = (o->item_sprite > 0) ? o->item_sprite
                 : (o->custom > 0)      ? (u16)o->custom : 0;
         if (sid == 0) continue;
-        /* Item bbox: y = bottom, body_cx=8 → (x-8..x+8, y-12..y). */
+        /* Item bbox: y = ВЕРХ иконки → (x-8..x+8, y..y+12). */
         int ix0 = o->x - 8, ix1 = o->x + 8;
         int iy0 = o->y, iy1 = o->y + 12;
         if (kx1 < ix0 || kx0 > ix1) continue;
@@ -2093,7 +2141,9 @@ void ai_bomb_explode(void)
             .alive       = true,
             .type        = TYPE_BOMB_BLAST,
             .x           = physics_get_x(),
-            .y           = physics_get_y() - 6,   /* по центру тела Karnov'а, а не у ног */
+            /* Karnov-Y — ноги; вспышке нужен ВЕРХ (общая объектная
+             * конвенция), поэтому поднимаем на высоту спрайта вспышки. */
+            .y           = physics_get_y() - 24,
             .spawn_frame = g_ai_frame,
         };
     }
@@ -2110,7 +2160,7 @@ int  ai_scroll_target_x(void)  { return g_boss_x;        }
 bool ai_scroll_spawned(void)
 {
     for (int i = 0; i < g_num; ++i)
-        if (g_obj[i].alive && g_obj[i].type == 5 && g_obj[i].custom == 999)
+        if (g_obj[i].alive && g_obj[i].is_scroll)
             return true;
     return false;
 }
@@ -2122,7 +2172,7 @@ bool ai_scroll_spawned(void)
 bool ai_scroll_onscreen(int cam_x, int cam_y, int view_w, int view_h)
 {
     for (int i = 0; i < g_num; ++i) {
-        if (g_obj[i].alive && g_obj[i].type == 5 && g_obj[i].custom == 999) {
+        if (g_obj[i].alive && g_obj[i].is_scroll) {
             int sx = g_obj[i].x - cam_x;
             int sy = g_obj[i].y - cam_y;
             return sx >= 0 && sx <= view_w && sy >= 0 && sy <= view_h;
@@ -2135,8 +2185,8 @@ bool ai_scroll_onscreen(int cam_x, int cam_y, int view_w, int view_h)
 void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
 {
     /* Через alloc_obj_slot() — переиспользует слоты dead enemies/fireballs,
-     * иначе через ~30 выстрелов g_num достигает MAX_AI=64 и Karnov только
-     * принимает позу стрельбы без вылета снарядов. */
+     * иначе пул MAX_AI заполняется и Karnov только принимает позу
+     * стрельбы без вылета снарядов. */
     int slot = alloc_obj_slot();
     if (slot < 0) return;
     int vx = (facing < 0) ? -PLAYER_FIREBALL_SPEED : +PLAYER_FIREBALL_SPEED;

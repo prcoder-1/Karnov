@@ -26,8 +26,9 @@ make                              # → ./karnov
 ./karnov --music-test             # ждать один цикл loader-music и выйти
 ```
 
-Клавиатура в SDL2-окне: стрелки = R/L/D/U, Z или Space = FIRE, X = OPTION,
-ESC = выход.
+Клавиатура в SDL2-окне: стрелки = R/L/D/U, **X или Space = FIRE, Z = OPTION**
+(как в оригинале: биты 0x10 и 0x20), ESC = выход. Движение влево/вправо
+также листает выбранный предмет OPTIONS (каждые 16 px пути).
 
 ## Что работает
 
@@ -37,7 +38,7 @@ ESC = выход.
 | Парсер LEVEL%d.MOV (attract-demo) | ✅ |
 | Рендер тайл-карты (16×10 px @ 2bpp) | ✅ |
 | EGA-палитра + attr-driven sub-палитры | ✅ (титул в правильных цветах) |
-| Sprite-cache (KS v3, 209 EGA / 228 CGA) | ✅ |
+| Sprite-cache (KS v4, 334 EGA / 338 CGA) | ✅ после банк-фикса директории |
 | Karnov (sprite #98-#123, 8 анимаций) | ✅ |
 | Анимация раскладной лесенки (#24) | ✅ за 60 кадров |
 | Физика Karnov (gravity/jump/walk/crouch/fire) | ✅ |
@@ -67,7 +68,7 @@ karnov_c/
 │   ├── karnov.h           # типы (u8/u16/u32/u64), константы окна/тайла
 │   ├── file_io.h          # bin_fopen/fread (RLE 0x5A)
 │   ├── palette.h          # EGA-16 + CGA-4 + attr-sub-палитры
-│   ├── sprite.h           # KS v3 cache loader
+│   ├── sprite.h           # KS v3/v4 cache loader + манифест ai_type
 │   ├── level.h            # парсер LEVEL%d.BIN
 │   ├── demo.h             # парсер LEVEL%d.MOV + tick
 │   ├── audio.h            # API плеера (init, play_music, cycle_count)

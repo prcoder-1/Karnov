@@ -270,8 +270,8 @@ int level_compute_ground_y(void)
 {
     /* Найти row с максимумом solid-тайлов (= основной grounded-floor
      * уровня). Используется как fallback ground_y, чтобы Karnov падал
-     * до настоящей земли — LEVEL1 row 29 (sand y=290), LEVEL2 row 31
-     * (y=310), LEVEL3 row 40 (y=400), и т.д. */
+     * до настоящей земли. Замерено: L1 300, L2 310, L3 390, L4 380,
+     * L6 400, L7 450, L9 580. */
     int max_solid = -1;
     int ground_row = (int)level_num_map_rows - 1;  /* default: bottom row */
     for (int r = 0; r < (int)level_num_map_rows; ++r) {

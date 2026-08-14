@@ -42,7 +42,11 @@ void inv_give(int id)
 
 void inv_give_by_sprite(u16 sprite)
 {
-    if (sprite >= 39 && sprite <= 48) inv_give((int)sprite - 39);
+    /* #39..#48 — десять OPTIONS (item_id = sprite − 39). Спрайт #49 в
+     * порту выдавался рандомайзером предметов (rnd % 11), но в инвентарь
+     * не попадал — предмет молча исчезал. Рандом теперь ограничен ITEM_NUM
+     * (см. ai.c), а сюда добавлена явная отбраковка. */
+    if (sprite >= 39 && sprite < 39 + ITEM_NUM) inv_give((int)sprite - 39);
 }
 
 int inv_count(int id)

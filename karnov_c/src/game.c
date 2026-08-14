@@ -37,10 +37,10 @@ static int try_load_sprites(const char *sprite_file)
             *slash = 0;
             const char *rel_list[] = { "/data/", "/../data/", NULL };
             for (int i = 0; rel_list[i]; ++i) {
-                snprintf(path, sizeof(path), "%s/%s%s", exe, rel_list[i], sprite_file);
-                if (sprite_cache_load(path) == 0) return 0;
-                snprintf(path, sizeof(path), "%s/../%s", exe, rel_list[i] + 1);
-                snprintf(path, sizeof(path), "%s/%s", exe, rel_list[i] + 1);
+                /* exe/data/... и exe/../data/... — двух вариантов достаточно.
+                 * (Раньше здесь был третий snprintf, результат которого тут же
+                 * затирался следующей строкой, плюс -Wformat-truncation.) */
+                snprintf(path, sizeof(path), "%.2000s%s%s", exe, rel_list[i], sprite_file);
                 if (sprite_cache_load(path) == 0) return 0;
             }
         }
@@ -120,6 +120,7 @@ static int  s_max_progress_units = 0;
 #define KARNOV_MAX_LIVES   9
 #define LIFE_ICON_SPRITE   0x32 /* белый череп-иконка жизни */
 static int  s_lives = KARNOV_START_LIVES;
+static bool s_game_over = false;
 #define LEVEL_END_MIN_TICKS 55    /* ~2 сек @ 27.5fps — минимум на «посадку» */
 #define LEVEL_END_MAX_TICKS 165   /* ~6 сек — потолок, чтобы не зависнуть если jingle не сигналит конец */
 
@@ -577,8 +578,12 @@ int splash_run(const splash_options_t *opt)
              * запускаем death-music (track 5, не зацикленную). По окончании
              * анимации physics возвращает is_dying=false, и мы возобновляем
              * in-game music (track 0). */
-            if (physics_just_died() && s_lives > 0) {
-                --s_lives;   /* KARNOV.EXE: hit once → минус жизнь (dec [0xCF4E]) */
+            if (physics_just_died()) {
+                /* KARNOV.EXE: hit once → минус жизнь (dec [0xCF4E]);
+                 * при исчерпании — game over (в оригинале строка "Game Over"
+                 * DS:0xCCB и возврат в attract). */
+                if (s_lives > 0) --s_lives;
+                else             s_game_over = true;
             }
             if (physics_just_died()) {
                 /* Checkpoint (file 0x10026): точка гибели + 0xBB (187 ед.),
@@ -634,6 +639,23 @@ int splash_run(const splash_options_t *opt)
                 }
             }
 
+            /* Game over: жизни кончились — возврат к заставке/аттракту. */
+            if (s_game_over && !physics_is_dying()) {
+                printf("GAME OVER → LEVEL0 (attract)\n");
+                s_game_over = false;
+                s_lives = KARNOV_START_LIVES;
+                if (prepare_level(0, /*load_demo=*/true) == 0) {
+                    current_level = 0;
+                    g_scroll_x = g_scroll_y = 0;
+                    frame = 0;
+                    s_demo_done_frame = 0;
+                    s_level_end = false;
+                    physics_set_invuln(false);
+                    physics_set_sit_scroll(false);
+                    if (audio_running) audio_play_music(0, true);
+                    continue;
+                }
+            }
             update_scroll(physics_get_x(), physics_get_y());
             if (physics_get_x() / 2 > s_max_progress_units)
                 s_max_progress_units = physics_get_x() / 2;
