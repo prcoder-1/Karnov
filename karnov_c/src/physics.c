@@ -374,6 +374,10 @@ static bool in_ladder_column(void)
     return dx <= LADDER_HALF_W;
 }
 
+/* Кадр Карнова нужен раньше своего определения: коллизия берёт размеры
+ * ТЕКУЩЕГО спрайта, как оригинал (sprite_w/sprite_h по bbox[0].sprite_id). */
+static u16 pick_sprite_id(u8 input, u16 frame);
+
 void physics_tick(u8 input)
 {
     /* Сбрасываем «just_died»-импульс предыдущего кадра. game.c прочитает
@@ -406,6 +410,19 @@ void physics_tick(u8 input)
      * gravity, мягко уронив Karnov на землю. */
     inv_tick();
     s_flying = inv_flying();
+    /* KARNOV_DBG_GIVE=<id>[,<id>...] — выдать предметы на старте (тестовый
+     * хук: иначе эффекты предметов в headless-прогоне не проверить). */
+    { static bool given = false;
+      const char *dg = getenv("KARNOV_DBG_GIVE");
+      if (dg && !given) {
+          given = true;
+          for (const char *q = dg; *q; ) {
+              inv_give(atoi(q));
+              while (*q && *q != ',') ++q;
+              if (*q == ',') ++q;
+          }
+      } }
+
     /* KARNOV_DBG_LADDER=1 — поставить лестницу без предмета (тестовый
      * хук: иначе анимацию лазанья не проверить в headless-прогоне). */
     { const char *dl = getenv("KARNOV_DBG_LADDER");
@@ -552,21 +569,23 @@ void physics_tick(u8 input)
             int remain = (dx_walk > 0) ? dx_walk : -dx_walk;
             for (int i = 0; i < remain; ++i) {
                 int probe_x = s_x + step;
-                int lead_x = probe_x + (step > 0 ? +7 : -7);
-                /* Sample body at 3 heights — bottom, middle, top.
-                 * Top probe at s_y-20 (bbox ≈ 20 px), а не -28: визуальный
-                 * sprite Karnov-а ~29 px, но collision-bbox в KARNOV.EXE
-                 * короче — иначе голова застревает в overhang'ах.
-                 *
-                 * Используем level_blocks_walk_h_at — горизонтальную маску
-                 * 0x001F (passes attrs 0..4 включая walls=attr3). Карnov
-                 * проходит сквозь каменные столбы боком, но всё ещё стоит
-                 * на их вершинах через find_floor_y (KARNOV_WALK_MASK 0x0006).
-                 * One-way platform behaviour. Блокируют только специальные
-                 * obstacles с attr 5..9 (бочки, шипы и т.п.). */
-                bool blocked = level_blocks_walk_h_at(lead_x, s_y - 4) ||
-                               level_blocks_walk_h_at(lead_x, s_y - 12) ||
-                               level_blocks_walk_h_at(lead_x, s_y - 20);
+                /* Коллизия ведущего ребра — как в оригинале
+                 * (move_with_collision, file 0xF37B): пробуются РОВНО ДВА
+                 * угла хитбокса со СВОИМИ масками, а не три точки одной:
+                 *   нижний угол (подошва − 10 px) — маска 0x0006: проходит
+                 *     только потолок и небо, значит пол и СТУПЕНИ твёрдые;
+                 *   верхний угол (макушка)        — маска 0x0085: проходит
+                 *     пол, небо и attr 7, поэтому на ступень/колонну можно
+                 *     запрыгнуть сверху (one-way platform).
+                 * Прежняя маска 0x001F была изобретением порта и пропускала
+                 * Карнова боком сквозь пол, ступени и стены. */
+                const sprite_t *ks = sprite_find(pick_sprite_id(input, s_cur_frame));
+                int half_w = ks ? (int)ks->art_w / 2 : 8;
+                int body_h = ks ? (int)ks->h : 26;
+                int lead_x = probe_x + (step > 0 ? +half_w : -half_w);
+                bool blocked =
+                    level_tile_blocks(lead_x, s_y - KARNOV_FEET_PROBE_UP, KARNOV_MASK_FEET) ||
+                    level_tile_blocks(lead_x, s_y - body_h,               KARNOV_MASK_HEAD);
                 if (blocked) break;
                 s_x = probe_x;
             }
@@ -803,8 +822,8 @@ void physics_render(u8 input, u16 frame, bool mode_cga, int scroll_x, int scroll
     /* KARNOV_DBG_POSE=1 — печатать выбранный кадр Карнова (диагностика
      * анимаций: какой sid, состояние лестницы, счётчик лазанья). */
     if (getenv("KARNOV_DBG_POSE"))
-        fprintf(stderr, "f=%u sid=%u y=%d on_ladder=%d climb=%u\n",
-                frame, sid, s_y, (int)s_on_ladder, s_climb_ticks);
+        fprintf(stderr, "f=%u sid=%u x=%d y=%d on_ladder=%d climb=%u\n",
+                frame, sid, s_x, s_y, (int)s_on_ladder, s_climb_ticks);
     const sprite_t *s = sprite_find(sid);
     if (s) {
         /* pick_sprite_id уже вернул спрайт нужного разворота (в архиве

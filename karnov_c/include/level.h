@@ -76,12 +76,10 @@ const object_region_t *level_region_for_respawn(int checkpoint_x_units,
  * Возвращает false при out-of-bounds. */
 bool level_solid_at(int wx, int wy);
 
-/* Тот же тест, но для горизонтального движения Karnov-а. Использует более
- * широкую маску (passes attrs 0..4 → floor/wall/ladder/sky/decoration),
- * блокирует только attr 5..9 — особо обозначенные obstacles. Это обеспечивает
- * one-way-platform поведение каменных столбов: Karnov стоит на верху
- * (через level_solid_at), но проходит сквозь них боком. */
-bool level_blocks_walk_h_at(int wx, int wy);
+/* Проба тайла произвольной маской прохождения (порт probe_tile,
+ * file 0xF214): true = столкновение, т.е. props ⊄ mask. Маски берутся
+ * из state-структуры объекта по углу хитбокса (KARNOV_MASK_* в karnov.h). */
+bool level_tile_blocks(int wx, int wy, u16 mask);
 
 /* Первая строка карты (>= start_row) в колонке пикселя wx, тайл которой
  * удовлетворяет маске свойств. Порт ядра постановки на землю KARNOV.EXE

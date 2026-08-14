@@ -44,6 +44,16 @@ typedef int32_t  s32;
 #define MAX_MAP_COLS  256
 
 /* Биты input_state (соответствуют KARNOV.EXE bitfield для ввода). */
+/* Маски прохождения тайлов для состояния «ходьба» Карнова — из
+ * state-структуры DS:0x1580 (file 0x20710) оригинала: верхние углы
+ * хитбокса 0x0085 (проходят пол/небо/attr7), нижние 0x0006 (проходят
+ * только потолок и небо → ступени и пол ТВЁРДЫЕ на уровне ног).
+ * Нижний угол пробуется на 10 px выше подошвы (move_with_collision
+ * @file 0xF37B: y += sprite_h − 10). */
+#define KARNOV_MASK_HEAD   0x0085
+#define KARNOV_MASK_FEET   0x0006
+#define KARNOV_FEET_PROBE_UP  10
+
 #define INP_R     0x01
 #define INP_L     0x02
 #define INP_D     0x04

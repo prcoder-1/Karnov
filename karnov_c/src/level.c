@@ -165,7 +165,10 @@ const object_region_t *level_region_for_respawn(int checkpoint_x_units,
  *
  *   attr 0 → 0x0001  bit 0  (standable floor — sand, dragon platform,
  *                            yellow column tops, тайлы 1/5/6/7/10/11/...)
- *   attr 1 → 0x0002  bit 1  (ladder / climb)
+ *   attr 1 → 0x0002  bit 1  (ПОТОЛОК / нижняя кромка скалы — проходим
+ *                            для ходьбы и падения, твёрдый при движении
+ *                            вверх и на уровне головы. «Лестницей» его
+ *                            называли по ошибке: тайлов-лестниц в игре нет)
  *   attr 2 → 0x0004  bit 2  (sky / background — passable)
  *   attr 3 → 0x0008  bit 3  (wall — rocks/grey blocks)
  *   attr 4 → 0x0009  bits 0+3  (floor + wall — decorations с твёрдой кромкой)
@@ -209,27 +212,27 @@ bool level_solid_at(int wx, int wy)
     return (props & KARNOV_WALK_MASK) != props;
 }
 
-/* Горизонтальная маска: passes bits 0..4 (= attrs 0..4: floor, ladder, sky,
- * wall, floor+wall), блокирует bits 5..9 (special obstacles). Это
- * one-way-platform поведение: каменные столбы (attr 3/4) являются
- * landable-полом для find_floor_y, но прозрачны для бокового движения.
+/* Проба тайла произвольной маской — ядро коллизии оригинала (probe_tile,
+ * cs:0xD4B:0x564 = file 0xF214):
+ *     ax = props AND mask;  cmp ax, props;  jnz collision
+ * т.е. столкновение, если у тайла есть свойство ВНЕ маски прохождения.
  *
- * 0x001F = bits 0+1+2+3+4 = 0x01|0x02|0x04|0x08|0x10. (attr 4 props=0x0009
- * полностью покрыт 0x000F, не требует bit 4; bit 4 включён за-доп.) */
-#define KARNOV_WALK_H_MASK  0x001F
-
-bool level_blocks_walk_h_at(int wx, int wy)
+ * Маска не одна на объект: move_with_collision (cs:0xD4B:0x6CB, file
+ * 0xF37B) берёт её из state-структуры по УГЛУ хитбокса —
+ * struct[+0]/[+2] для верхних углов, [+4]/[+6] для нижних, [+8] для
+ * свип-пробы вдоль вектора. У ходьбы Карнова (DS:0x1580, file 0x20710)
+ * это 0x0085 сверху и 0x0006 снизу (см. karnov.h). */
+bool level_tile_blocks(int wx, int wy, u16 mask)
 {
     if (wx < 0 || wy < 0) return false;
     int col = wx / TILE_W;
     int row = wy / TILE_H;
     if (col >= (int)level_num_map_cols) return false;
     if (row >= (int)level_num_map_rows) return false;
-    u8 tile_id = level_map[row][col];
-    u8 attr    = level_tile_attr[tile_id];
+    u8 attr = level_tile_attr[level_map[row][col]];
     if (attr >= 10) return true;
     u16 props = LEVEL_ATTR_TO_PROPS[attr];
-    return (props & KARNOV_WALK_H_MASK) != props;
+    return (props & mask) != props;
 }
 
 /* Первая строка карты (>= start_row), тайл которой в колонке wx имеет

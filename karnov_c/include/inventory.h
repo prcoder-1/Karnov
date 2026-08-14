@@ -18,22 +18,39 @@
 
 #include "karnov.h"
 
-/* DOS item order (disassembly-verified): item_id = icon_sprite - 39.
- *   0=LADDER(#39) 1=BOOTS(#40) 2=BOMB(#41) 3=FIRE(#42, passive)
- *   4=BOOMERANG(#43) 5=CLAPPER(#44) 6=GLASSES(#45) 7=MASK(#46)
- *   8=WINGS(#47) 9=SHIELD(#48). */
+/* Порядок предметов — из таблицы «использовать» DS:0x0C30 и обработчика
+ * подбора option_pickup (cs:0x41D:0x9BE, file 0x638E). Подбираемых id
+ * ОДИННАДЦАТЬ (0..10, спрайты #39..#49): рандом предмета в оригинале —
+ * `rand() % 11` (file 0x12477), ротация выбора — тоже mod 11 (file 0x633D).
+ *
+ *   0 LADDER(#39)   спавн объекта-лестницы, не расходуется
+ *   1 BOOTS(#40)    таймер [0xD8B4] = 250 кадров, двойной прыжок
+ *   2 BOMB(#41)     спавн объекта-взрыва
+ *   3 FIRE(#42)     «30 огненных шаров»: запас [0xD943], оружие [0xD947]=1
+ *   4 BOOMERANG(#43) оружие [0xD947]=2, cooldown до возврата
+ *   5 GLASSES(#44)  таймер [0xD8B8]=150 — показывает скрытые предметы
+ *   6 WINGS(#45)    таймер [0xD8B6]=200 + переинициализация игрока
+ *   7 SHIELD(#46)   в EXE обработчик — пустой стаб
+ *   8 MASK(#47)     акваланг: только в воде ([0xD8BA]=1)
+ *   9 KMARK(#48)    спрайт — буква «K»; копится, даёт жизнь; «использовать» нельзя
+ *  10 SUPERFIRE(#49) ШАР: firepower++ (макс 3) — раздвоение/растроение
+ *                   выстрела; «использовать» нельзя, эффект при подборе
+ *
+ * Прежний порядок в порту был сдвинут с id5 (Clapper/Glasses/Mask/Wings/
+ * Shield), а 11-го предмета не было вовсе. */
 typedef enum {
     ITEM_LADDER = 0,
     ITEM_BOOTS,
     ITEM_BOMB,
     ITEM_FIRE,
     ITEM_BOOMERANG,
-    ITEM_CLAPPER,
     ITEM_GLASSES,
-    ITEM_MASK,
     ITEM_WINGS,
     ITEM_SHIELD,
-    ITEM_NUM = 10
+    ITEM_MASK,
+    ITEM_KMARK,
+    ITEM_SUPERFIRE,
+    ITEM_NUM = 11
 } item_id_t;
 
 /* Сброс инвентаря и состояния полёта. Вызывается из physics_reset. */
@@ -59,6 +76,14 @@ void inv_cycle(int dir);
 int  inv_use(void);
 
 bool inv_boots_active(void); /* boots_timer > 0 */
+
+/* Сила огня 1..3 ([DS:0xD949] оригинала): столько снарядов вылетает за
+ * выстрел. Растёт подбором «шара» (#49, id 10) до 3, сбрасывается в 1
+ * при (ре)спавне Карнова (file 0x104DE). */
+int  inv_firepower(void);
+
+/* Показывать ли скрытые предметы (таймер Glasses, [DS:0xD8B8]). */
+bool inv_glasses_active(void);
 
 /* Тик каждого кадра — декрементирует boots_timer и fly_timer. */
 void inv_tick(void);

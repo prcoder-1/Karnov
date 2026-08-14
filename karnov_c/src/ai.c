@@ -1841,7 +1841,7 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
     bool hidden_item = false;
     if (e->type == 4 || e->type == 5 || e->type == 6) {
         u16 item_id;
-        if (arg == 99)      item_id = (u16)(rng_next() % (u16)ITEM_NUM);
+        if (arg == 99)      item_id = (u16)(rng_next() % (u16)ITEM_NUM);   /* file 0x12477: rand() % 11 */
         else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden_item = true; }
         else                item_id = arg;
         item_sprite = (u16)(39 + item_id);
@@ -2053,16 +2053,19 @@ void ai_tick(u16 frame, u8 karnov_input)
     /* Единственная точка инициализации AI — prepare_level() в game.c. */
     /* KARNOV_DBG_OBJECTS=1 — сколько объектов живо/выделено (диагностика
      * заполнения пула и работы off-screen despawn'а). */
-    if (getenv("KARNOV_DBG_OBJECTS") && (frame % 50) == 0) {
-        int alive = 0, from_level = 0;
+    { const char *dbo = getenv("KARNOV_DBG_OBJECTS");
+      int every = dbo ? atoi(dbo) : 0;
+      if (every > 0 && (frame % (u16)every) == 0) {
+        int alive = 0, from_level = 0, shots = 0;
         for (int i = 0; i < g_num; ++i) {
             if (!g_obj[i].alive) continue;
             ++alive;
             if (g_obj[i].level_idx >= 0) ++from_level;
+            if (g_obj[i].type == TYPE_PLAYER_FIREBALL) ++shots;
         }
-        fprintf(stderr, "f=%u alive=%d (из уровня %d) slots=%d/%d kx=%d\n",
-                frame, alive, from_level, g_num, MAX_AI, physics_get_x());
-    }
+        fprintf(stderr, "f=%u alive=%d (из уровня %d) выстрелов=%d сила=%d slots=%d/%d kx=%d\n",
+                frame, alive, from_level, shots, inv_firepower(), g_num, MAX_AI, physics_get_x());
+    } }
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
         ai_obj_t *o = &g_obj[i];
@@ -2151,8 +2154,8 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
              *   #43 boomerang, #44 mask, #45 wings, #47 aqualung,
              *   #48 treasure, #49 multi-shot.
              * #46 не указан — gap. Anim_phase крутит 10 опций. */
-            /* item_id = sprite − 39 (см. inventory.h): #39..#48 подряд. */
-            return (u16)(39 + (anim_phase % (u16)ITEM_NUM));
+            /* item_id = sprite − 39 (см. inventory.h): #39..#49 подряд. */
+            return (u16)(39 + (anim_phase % (u16)ITEM_NUM));   /* #39..#49 */
         }
         case   9: {                                /* Стартовый ДРАКОН (декорация).
                                                     * Единственный type9 в LEVEL1 — idx3 @ world 22,
@@ -2292,7 +2295,11 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
   for (int pass = 0; pass < 2; ++pass) {
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
-        if (g_obj[i].invisible) continue;  /* OPTIONS items на splash */
+        /* Скрытые предметы (misc_state ≥ 11 в оригинале) видны, пока идёт
+         * таймер Glasses — file 0x12507 читает [0xD8B8]. */
+        if (g_obj[i].invisible &&
+            !((g_obj[i].type == 4 || g_obj[i].type == 6) && inv_glasses_active()))
+            continue;
         if (g_obj[i].type == 7) continue;  /* невидимый триггер-«призрак» (num_bboxes=0) */
         if (g_obj[i].type == 9) continue;  /* стартовый дракон — рисуется draw_level1_dragon() */
         if (g_obj[i].type == TYPE_BOMB_BLAST) continue;  /* вспышка — поверх Karnov'а (ai_render_overlay) */
@@ -2477,7 +2484,7 @@ void ai_try_pickup(int kx, int ky)
             continue;
         }
         if (o->type != 6 && o->type != 4) continue;
-        if (o->invisible) continue;            /* скрытые — только с Glasses */
+        if (o->invisible && !inv_glasses_active()) continue;  /* скрытые — только с Glasses */
         u16 sid = (o->item_sprite > 0) ? o->item_sprite
                 : (o->custom > 0)      ? (u16)o->custom : 0;
         if (sid == 0) continue;
@@ -2600,22 +2607,47 @@ bool ai_scroll_onscreen(int cam_x, int cam_y, int view_w, int view_h)
 }
 
 /* ─── Player fireball spawn ──────────────────────────────────────────── */
+/* Сколько снарядов игрока сейчас в воздухе — оригинал не даёт стрелять,
+ * если их 15 и больше (счётчик DS:0x1424, проверка в fire() @file 0x1303B). */
+static int player_shots_alive(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_num; ++i)
+        if (g_obj[i].alive && g_obj[i].type == TYPE_PLAYER_FIREBALL) ++n;
+    return n;
+}
+
 void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
 {
-    /* Через alloc_obj_slot() — переиспользует слоты dead enemies/fireballs,
-     * иначе пул MAX_AI заполняется и Karnov только принимает позу
-     * стрельбы без вылета снарядов. */
-    int slot = alloc_obj_slot();
-    if (slot < 0) return;
+    /* Порт fire() (cs:0xFFA:0x1888, file 0x13028) и обычного огня
+     * (cs:0xFFA:0x17AF, file 0x12F4F):
+     *   • при 15 живых снарядах выстрел не происходит вовсе (file 0x1303B);
+     *   • звук — play_sound(0) (file 0x13045), НЕ 7;
+     *   • число снарядов = firepower (1..3, [DS:0xD949]); ветки таблицы
+     *     file 0x12FB5 «проваливаются», давая смещения по Y:
+     *       3 → y−2, y+2, y     2 → y+2, y     1 → y
+     *     вертикальной скорости оригинал не задаёт — только стартовый Y. */
+    if (player_shots_alive() >= 15) return;
+
+    int fp = inv_firepower();
+    if (fp < 1) fp = 1;
+    if (fp > 3) fp = 3;
+    static const int DY3[3] = { -2, +2, 0 };
+    const int *dys = DY3 + (3 - fp);          /* fp=1 → {0}; fp=2 → {+2,0} */
+
     int vx = (facing < 0) ? -PLAYER_FIREBALL_SPEED : +PLAYER_FIREBALL_SPEED;
-    g_obj[slot] = (ai_obj_t){
-        .alive       = true,
-        .type        = TYPE_PLAYER_FIREBALL,
-        .x           = x,
-        .y           = y,
-        .vx          = vx,
-        .facing      = (facing < 0) ? -1 : +1,
-        .spawn_frame = frame,
-    };
-    audio_play_sfx(7);   /* выстрел — play_sound(7), KARNOV.EXE @ 0x10515 (fireball spawn) */
+    for (int k = 0; k < fp; ++k) {
+        int slot = alloc_obj_slot();
+        if (slot < 0) break;
+        g_obj[slot] = (ai_obj_t){
+            .alive       = true,
+            .type        = TYPE_PLAYER_FIREBALL,
+            .x           = x,
+            .y           = y + dys[k],
+            .vx          = vx,
+            .facing      = (facing < 0) ? -1 : +1,
+            .spawn_frame = frame,
+        };
+    }
+    audio_play_sfx(0);   /* выстрел — play_sound(0), KARNOV.EXE @ file 0x13045 */
 }
