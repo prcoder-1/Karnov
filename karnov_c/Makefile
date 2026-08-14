@@ -6,10 +6,12 @@
 
 CC      ?= gcc
 CFLAGS  ?= -std=c99 -pedantic -Wall -Wextra -Wno-unused-parameter -O2 -Iinclude -D_DEFAULT_SOURCE
+CFLAGS  += -MMD -MP
 LDLIBS  ?= -lSDL2 -lpthread -lm
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
+DEP := $(OBJ:.o=.d)
 
 karnov: $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDLIBS)
@@ -17,7 +19,9 @@ karnov: $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+-include $(DEP)
+
 clean:
-	rm -f $(OBJ) karnov
+	rm -f $(OBJ) $(DEP) karnov
 
 .PHONY: clean

@@ -1,0 +1,6 @@
+*.o
+*.d
+__pycache__/
+karnov_c/karnov
+out/
+karnov_c/out/

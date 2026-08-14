@@ -1,0 +1,53 @@
+# Karnov reconstruction — Makefile
+#
+# Сборка скелета. Реальный запуск игры требует графики/звука,
+# но статически линкуется и проходит компиляцию.
+
+CXX        ?= g++
+CXXFLAGS   ?= -std=c++17 -Wall -Wextra -Wno-unused-parameter -O2 -Iinclude
+LDLIBS     ?= -lSDL2 -lpthread
+
+SRC := \
+    src/main.cpp \
+    src/globals.cpp \
+    src/file_io.cpp \
+    src/level.cpp \
+    src/demo.cpp \
+    src/input.cpp \
+    src/video.cpp \
+    src/sprite.cpp \
+    src/think.cpp \
+    src/ai_scripts.cpp \
+    src/scroll.cpp \
+    src/sprite_render.cpp \
+    src/audio.cpp \
+    src/game.cpp \
+    src/splash.cpp \
+    src/sprites.cpp
+
+OBJ := $(SRC:.cpp=.o)
+
+karnov: $(OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJ) $(LDLIBS)
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# Тест совместимости с реальными файлами уровня и демо.
+TEST_SRC := test/test_io.cpp \
+            src/globals.cpp \
+            src/file_io.cpp \
+            src/level.cpp \
+            src/video.cpp
+TEST_OBJ := $(TEST_SRC:.cpp=.o)
+
+test_io: $(TEST_OBJ)
+	$(CXX) $(CXXFLAGS) -o $@ $(TEST_OBJ)
+
+test: test_io
+	./test_io
+
+clean:
+	rm -f $(OBJ) $(TEST_OBJ) karnov test_io
+
+.PHONY: clean test
