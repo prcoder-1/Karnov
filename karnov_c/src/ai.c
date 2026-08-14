@@ -68,7 +68,8 @@ typedef struct ai_obj {
     int    num_parts;     /* 0 = обычный односпрайтовый рендер через
                            * sprite_for_type; >0 = массив parts[]. */
     ai_part_t parts[MAX_PARTS];
-    int    x, y;
+    int    x, y;          /* x — левый край / y — ВЕРХ спрайта (KARNOV.md §3.3) */
+    int    cur_h;         /* высота текущего спрайта: «ноги» = y + cur_h */
     int    vx, vy;        /* пикс/кадр для простых types */
     int    facing;        /* +1 / -1 */
     int    hp;            /* health (для boss'а >1) */
@@ -186,6 +187,53 @@ static bool is_damageable_obj(const struct ai_obj *o)
     return true;
 }
 
+/* ─── Высота объекта ───────────────────────────────────────────────────
+ * o->y — ВЕРХНЯЯ строка спрайта (конвенция оригинала, см. KARNOV.md §3.3
+ * и update_bboxes @ file 0x0247A). Обработчикам же нужны «ноги» — для
+ * контакта с полом и для слежения за Karnov'ом (его physics-Y = ноги).
+ * cur_h обновляется раз в тик перед вызовом обработчика. */
+static u16 sprite_for_type(u16 type, u16 anim_phase);
+
+static int obj_height(const ai_obj_t *o)
+{
+    if (o->num_parts > 0) {
+        int bottom = 0;
+        for (int i = 0; i < o->num_parts; ++i) {
+            const sprite_t *ps = sprite_find(o->parts[i].sprite);
+            int b = (int)o->parts[i].dy + (ps ? (int)ps->h : 16);
+            if (b > bottom) bottom = b;
+        }
+        if (bottom > 0) return bottom;
+    }
+    u16 sid = ((o->type == 4 || o->type == 5 || o->type == 6) && o->item_sprite > 0)
+                  ? o->item_sprite
+                  : sprite_for_type(o->type, o->anim_phase);
+    const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
+    return s ? (int)s->h : 16;
+}
+
+/* Мировая Y «ног» объекта. */
+static int obj_feet(const ai_obj_t *o)
+{
+    return o->y + (o->cur_h > 0 ? o->cur_h : obj_height(o));
+}
+
+/* Типы, чей INIT ставит объект НОГАМИ на землю (хелпер cs:0xD4B:0x19F,
+ * file 0xEE4F). Список получен сканом far-call'ов `9A 9F 01 4B 0D` по
+ * KARNOV.EXE с привязкой адреса к таблице обработчиков DS:0x10FE:
+ *   8, 11, 14, 17, 24, 28, 29, 31, 32, 46, 48, 53, 54, 55.
+ * (8 — sky-спаунер, в порту не материализуется, поэтому опущен.) */
+static bool type_snaps_to_ground(u16 type)
+{
+    switch (type) {
+        case 11: case 14: case 17: case 24: case 28: case 29:
+        case 31: case 32: case 46: case 48: case 53: case 54: case 55:
+            return true;
+        default:
+            return false;
+    }
+}
+
 /* ─── Handlers ──────────────────────────────────────────────────────── */
 
 /* Type 13 — Комарик (mosquito Y-tracker, спрайты #91..94).
@@ -197,8 +245,9 @@ static void ai_y_tracker(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 3) & 3;
     if ((frame & 0x3F) != 0) return;
     int kx = physics_get_x(), ky = physics_get_y();
-    if (ky < o->y - 2)      o->y -= 1;
-    else if (ky > o->y + 2) o->y += 1;
+    int feet = obj_feet(o);
+    if (ky < feet - 2)      o->y -= 1;
+    else if (ky > feet + 2) o->y += 1;
     if (kx > o->x + 40)     { o->x += 1; o->facing =  1; }
     else if (kx < o->x - 40){ o->x -= 1; o->facing = -1; }
 
@@ -220,8 +269,9 @@ static void ai_y_tracker(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (o->y < ymin) o->y = ymin;
         if (o->y > ymax) o->y = ymax;
     } else {
-        if (o->y < 90) o->y = 90;
-        if (o->y > 115) o->y = 115;
+        int h = o->cur_h > 0 ? o->cur_h : obj_height(o);
+        if (o->y + h < 90)  o->y = 90  - h;
+        if (o->y + h > 115) o->y = 115 - h;
     }
 }
 
@@ -298,7 +348,7 @@ static void ai_stone_thrower(ai_obj_t *o, u16 frame, u8 karnov_input)
     /* Spawn rock на переходе #88 → #89. */
     if (phase == idle_len + WINDUP_LEN && frame != o->spawn_frame) {
         int rock_x  = o->x + (o->facing < 0 ? -10 : 10);
-        int rock_y  = o->y - 18;
+        int rock_y  = o->y + 6;        /* руки ≈ верх спрайта + 6 */
         int rock_vx = (o->facing < 0 ? -3 : 3);
         spawn_rock(rock_x, rock_y, rock_vx, frame);
     }
@@ -336,12 +386,12 @@ static void ai_rock_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (level_num_map_rows <= 12) {
         floor_hit = (o->y >= ROCK_FLOOR_Y_SPLASH && o->vy_q16 > 0);
         floor_y_snap = ROCK_FLOOR_Y_SPLASH;
-    } else if (o->vy_q16 > 0 && level_solid_at(o->x, o->y + 1)) {
+    } else if (o->vy_q16 > 0 && level_solid_at(o->x, obj_feet(o) + 1)) {
         floor_hit = 1;
         floor_y_snap = o->y;
-    } else if (o->vy_q16 > 0 && o->y >= level1_floor) {
+    } else if (o->vy_q16 > 0 && obj_feet(o) >= level1_floor) {
         floor_hit = 1;
-        floor_y_snap = level1_floor;
+        floor_y_snap = level1_floor - (o->cur_h > 0 ? o->cur_h : obj_height(o));
     } else {
         floor_hit = 0;
         floor_y_snap = o->y;
@@ -415,7 +465,7 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (e == o) continue;
         if (!is_damageable_obj(e) && !e->is_boss) continue;
         int ex0 = e->x - 8, ex1 = e->x + 8;
-        int ey0 = e->y - 24, ey1 = e->y;
+        int ey0 = e->y, ey1 = e->y + (e->cur_h > 0 ? e->cur_h : 24);
         if (fx1 < ex0 || fx0 > ex1) continue;
         if (fy1 < ey0 || fy0 > ey1) continue;
         /* Hit. */
@@ -528,8 +578,9 @@ static void ai_walking_minion(ai_obj_t *o, u16 frame, u8 karnov_input)
     /* Y-snap — медленное подтягивание к Y игрока (1 px каждые 8 кадров), без
      * clamp'а, чтобы демон-на-облаке снижался к Karnov'у. */
     if ((frame & 7) == 0) {
-        if (ky < o->y - 1)      o->y -= 1;
-        else if (ky > o->y + 1) o->y += 1;
+        int feet = obj_feet(o);
+        if (ky < feet - 1)      o->y -= 1;
+        else if (ky > feet + 1) o->y += 1;
     }
 }
 
@@ -578,14 +629,15 @@ static void ai_falling_bonus(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (o->custom == 1) return;  /* приземлился */
     /* Падаем 2 px/frame. */
     o->y += 2;
-    /* Tile collision — feet are at o->y (по нашей конвенции — bottom of sprite). */
-    if (level_solid_at(o->x, o->y + 1)) {
-        /* Snap к верху найденного solid-row'а. */
-        o->y = ((o->y) / 10) * 10;
+    /* Контакт с полом считаем по НОГАМ (o->y — верх спрайта). */
+    int h = o->cur_h > 0 ? o->cur_h : obj_height(o);
+    int feet = o->y + h;
+    if (level_solid_at(o->x, feet + 1)) {
+        o->y = (feet / 10) * 10 - h;   /* ноги на верхнюю кромку строки */
         o->custom = 1;
     }
-    if (o->y >= 300) {            /* fallback: дефолт ground LEVEL1 */
-        o->y = 290;
+    if (feet >= 300) {            /* fallback: дефолт ground LEVEL1 */
+        o->y = 290 - h;
         o->custom = 1;
     }
 }
@@ -795,7 +847,7 @@ static void ai_simple(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (o->half_range_x > 0 &&
             (nx < o->home_x - o->half_range_x || nx > o->home_x + o->half_range_x))
             turn = true;
-        if (o->type == 22 && !level_solid_at(nx + 4 * o->custom, o->y + 1))
+        if (o->type == 22 && !level_solid_at(nx + 4 * o->custom, obj_feet(o) + 1))
             turn = true;
         if (turn) o->custom = -o->custom;
         else      o->x = nx;
@@ -807,8 +859,9 @@ static void ai_simple(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->x += s->speed * o->facing;
         if ((frame & 3) == 0) {
             int ky = physics_get_y();
-            if (ky < o->y - 2)      o->y -= 1;
-            else if (ky > o->y + 2) o->y += 1;
+            int feet = obj_feet(o);
+            if (ky < feet - 2)      o->y -= 1;
+            else if (ky > feet + 2) o->y += 1;
         }
         break;
     default:
@@ -993,7 +1046,7 @@ static void ai_homing_shot(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
     o->anim_phase = (frame >> 1) & 1;
     o->x += 6 * o->facing;
-    if (level_solid_at(o->x, o->y - 4)) { o->alive = false; return; }
+    if (level_solid_at(o->x, o->y + (o->cur_h > 0 ? o->cur_h / 2 : 4))) { o->alive = false; return; }
     int world_w = (int)level_num_map_cols * TILE_W;
     if (o->x < -16 || o->x > world_w + 16) o->alive = false;
 }
@@ -1052,7 +1105,8 @@ static void ai_top_drop(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 2) % 6;
     if (o->custom == 0) {                 /* падение */
         o->y += 3;
-        if (level_solid_at(o->x, o->y + 1) || o->y >= physics_get_ground_y()) {
+        int feet = obj_feet(o);
+        if (level_solid_at(o->x, feet + 1) || feet >= physics_get_ground_y()) {
             o->custom = 1;
         }
         return;
@@ -1188,8 +1242,9 @@ static void ai_ryu_helper(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->facing = (kx >= o->x) ? 1 : -1;
     if ((frame & 1) == 0) {
         o->x += 2 * o->facing;
-        if (ky < o->y - 2)      o->y -= 1;
-        else if (ky > o->y + 2) o->y += 1;
+        int feet = obj_feet(o);
+        if (ky < feet - 2)      o->y -= 1;
+        else if (ky > feet + 2) o->y += 1;
     }
 }
 
@@ -1428,6 +1483,27 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
         .item_sprite  = item_sprite,
         .spawn_frame  = frame,
     };
+    g_obj[slot].cur_h = obj_height(&g_obj[slot]);
+
+    /* Постановка на землю в INIT. Дизассемблирование показало 14 типов,
+     * чей INIT зовёт хелпер cs:0xD4B:0x19F (file 0xEE4F):
+     *     snap_to_ground(obj, base_sprite, attr_category = 0)
+     * → сканирует строки вниз от row(y_world)−1 до первой «половой» и
+     * ставит y_world = row*10 − sprite_h, т.е. НОГАМИ на её кромку.
+     * Поэтому у этих типов запись хранит линию земли (напр. LEVEL1 type 11:
+     * spawn_y = 290 = поверхность песка), а не верх спрайта. Без снапа они
+     * рисовались бы закопанными по макушку. Тип 8 из списка исключён:
+     * это sky-спаунер, в порту он не материализуется. */
+    if (type_snaps_to_ground(e->type)) {
+        int row0 = sy / TILE_H - 1;
+        int r = level_ground_row_below(sx, row0 < 0 ? 0 : row0);
+        if (r >= 0) {
+            int ny = r * TILE_H - g_obj[slot].cur_h;
+            g_obj[slot].y = ny;
+            g_obj[slot].home_y = ny;
+            g_obj[slot].spawn_y = (u16)ny;
+        }
+    }
     return slot;
 }
 
@@ -1492,10 +1568,12 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
         int slot = ai_spawn_from_record((u16)si, frame);
         if (slot < 0) continue;   /* alloc fail: flags остаётся 0 — ретрай */
         r->flags = 1;             /* file 0x4FFE: только при успехе */
+        /* В лог идёт позиция ИЗ ЗАПИСИ (до постановки на землю в INIT) —
+         * оракул проверяет алгоритм триггеров, а не визуальную укладку. */
         if (spawn_log())
             fprintf(spawn_log(), "S %u %d %u %u %d %d %d %d\n",
                     frame, si, r->type, r->subtype,
-                    g_obj[slot].x, g_obj[slot].y, g_obj[slot].hp,
+                    (int)r->spawn_x * 2, (int)r->spawn_y, g_obj[slot].hp,
                     g_obj[slot].is_boss ? 1 : 0);
         if (dbg)
             fprintf(stderr, "spawn[%d]: f=%u type=%u sub=%u at=(%d,%d) hp=%d%s\n",
@@ -1542,6 +1620,7 @@ void ai_tick(u16 frame, u8 karnov_input)
     }
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
+        g_obj[i].cur_h = obj_height(&g_obj[i]);
         pick_handler(g_obj[i].type)(&g_obj[i], frame, karnov_input);
     }
 

@@ -232,6 +232,28 @@ bool level_blocks_walk_h_at(int wx, int wy)
     return (props & KARNOV_WALK_H_MASK) != props;
 }
 
+/* Первая строка карты (>= start_row), тайл которой в колонке wx имеет
+ * бит «standable floor» (props & 1). Порт хелпера постановки на землю
+ * KARNOV.EXE cs:0xD4B:0x19F (file 0xEE4F → 0xEDFC): тот сканирует строки
+ * вниз, начиная с row(y_world)−1, до первого тайла, у которого
+ * props & props_of(attr_category=0) != 0, и ставит
+ *   y_world = row*10 − sprite_h[sprite_id]
+ * (т.е. НОГИ объекта на верхнюю кромку этой строки).
+ * Возвращает −1, если пола в колонке нет. */
+int level_ground_row_below(int wx, int start_row)
+{
+    if (wx < 0) return -1;
+    int col = wx / TILE_W;
+    if (col >= (int)level_num_map_cols) return -1;
+    if (start_row < 0) start_row = 0;
+    for (int r = start_row; r < (int)level_num_map_rows; ++r) {
+        u8 attr = level_tile_attr[level_map[r][col]];
+        if (attr >= 10) return r;                  /* незнакомая категория — считаем полом */
+        if (LEVEL_ATTR_TO_PROPS[attr] & 0x0001) return r;
+    }
+    return -1;
+}
+
 bool level_is_water_at(int wx, int wy)
 {
     if (wx < 0 || wy < 0) return false;

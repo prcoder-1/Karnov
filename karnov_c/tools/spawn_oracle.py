@@ -109,12 +109,9 @@ def main():
             frame, px, py, left = map(int, f[1:5])
             for si in check_frame(recs, flags, px // 2, py, left // 2):
                 r = recs[si]
-                sx, sy = r[6] * 2, r[7]
-                # LEVEL0-заставку оригинал собирает кодом splash.cpp, а не
-                # записями: метатель стоит ногами на y=113 (DOSBox-verified),
-                # порт держит эту позицию в верхней привязке (113 − h(#86)).
-                if level == 0 and r[0] == 13: sy = 113 - 27
-                oracle_spawns.append((frame, si, sx, sy))
+                # Позиция из записи: порт логирует её ДО постановки на
+                # землю в INIT (снап проверяется скриншотами, не оракулом).
+                oracle_spawns.append((frame, si, r[6] * 2, r[7]))
         elif f[0] == "S":
             frame, si, typ, sub, x, y, hp, goal = map(int, f[1:9])
             port_spawns.append((frame, si, x, y))
