@@ -19,6 +19,10 @@ void ai_init_from_level(u16 level_num);
  * в окне [camera_left, player_x + 320px] по sorted-таблице записей.
  * flags записи — one-shot защёлка; отставшие враги снимаются отдельно,
  * в ai_despawn_behind (порт off-screen despawn'а из THINKCYCLE). */
+/* Pair-loop порта: касание враждебного объекта наносит Карнову удар
+ * (physics_hit). Бокс игрока задаётся центром/подошвой и размерами. */
+void ai_check_player_hit(int kx, int ky, int kw, int kh);
+
 void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
                        u16 frame);
 

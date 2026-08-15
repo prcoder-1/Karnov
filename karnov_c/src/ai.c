@@ -3617,6 +3617,39 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
     }
 }
 
+/* ─── Pair-loop: касание врага бьёт Карнова ───────────────────────────
+ *
+ * Порт ветки THINKCYCLE, где a.obj_type = 0 (маркер Карнова), а
+ * b.obj_type = 1 (враг): file 0xFB7A —
+ *     if (player_state != 9) player.state_byte = 4;   // Карнов ранен
+ *     if (god_mode) { b.hit_flag = 0; }               // чит ZEEK
+ * Сами пары оригинал собирает отдельным проходом по боксам (file
+ * 0x2CB0/0x2D18) в список DS:0x2722; здесь пары перебираются напрямую —
+ * Карнов против каждого живого враждебного объекта.
+ *
+ * Урон засчитывается только объектам, которые в оригинале имеют
+ * box0.hitflag = 1 (is_damageable_obj) или являются снарядами врага. */
+void ai_check_player_hit(int kx, int ky, int kw, int kh)
+{
+    int px0 = kx - kw / 2, px1 = kx + kw / 2;
+    int py0 = ky - kh,     py1 = ky;
+    for (int i = 0; i < g_num; ++i) {
+        ai_obj_t *o = &g_obj[i];
+        if (!o->alive || o->invisible) continue;
+        if (o->type == TYPE_PLAYER_FIREBALL || o->type == TYPE_BOMB_BLAST) continue;
+        if (o->is_scroll || o->type == 4 || o->type == 5 || o->type == 6) continue;
+        bool hostile = (o->type == TYPE_ENEMY_SHOT) || is_damageable_obj(o) || o->is_boss;
+        if (!hostile) continue;
+        int h = (o->cur_h > 0) ? o->cur_h : obj_height(o);
+        const sprite_t *es = sprite_find(sprite_for_type(o->type, o->anim_phase));
+        int w = es ? (int)es->art_w : 16;
+        if (px1 < o->x || px0 > o->x + w) continue;
+        if (py1 < o->y || py0 > o->y + h) continue;
+        physics_hit();
+        return;
+    }
+}
+
 /* ─── Off-screen despawn (THINKCYCLE фаза B, file 0xFD6A..0xFD98) ──────
  *
  * Оригинал обходит активный список ДВУМЯ проходами (внешний si = 0,1;

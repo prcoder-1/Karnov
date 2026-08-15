@@ -485,6 +485,8 @@ int splash_run(const splash_options_t *opt)
             if (was_dying && !physics_is_dying())
                 ai_respawn_rearm(physics_get_x());
             ai_try_pickup(physics_get_x(), physics_get_y());
+            /* Pair-loop: касание врага ранит Карнова (file 0xFB7A). */
+            ai_check_player_hit(physics_get_x(), physics_get_y(), 16, 26);
             update_scroll(physics_get_x(), physics_get_y());
             if (physics_get_x() / 2 > s_max_progress_units)
                 s_max_progress_units = physics_get_x() / 2;
@@ -630,6 +632,8 @@ int splash_run(const splash_options_t *opt)
                 }
             }
             ai_try_pickup(physics_get_x(), physics_get_y());
+            /* Pair-loop: касание врага ранит Карнова (file 0xFB7A). */
+            ai_check_player_hit(physics_get_x(), physics_get_y(), 16, 26);
 
             /* Boss death → взят свиток → level-end секвенция (KARNOV.EXE
              * type56): jingle + Karnov садится, затем переход на след. уровень. */

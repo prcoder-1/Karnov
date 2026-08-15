@@ -10,6 +10,7 @@
 #include "inventory.h"
 #include "ai.h"
 #include "level.h"
+#include "audio.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -152,6 +153,12 @@ static bool s_just_died_pulse     = false;
 /* Неуязвимость: включается на время victory-секвенции (boss убит, Karnov
  * авто-идёт к свитку), чтобы вода/опасности не убили его во время прохода. */
 static bool s_invuln              = false;
+/* Два попадания до потери жизни (KARNOV.md §5.3, мануал): первое —
+ * Карнов «синеет», второе — минус жизнь. s_blue держится до смерти или
+ * до конца уровня; s_hit_iframes — короткая неуязвимость после удара,
+ * иначе один и тот же враг снимает обе стадии за пару кадров. */
+static bool s_blue                = false;
+static int  s_hit_iframes         = 0;
 /* Level-end: Karnov сидит со свитком (front-facing поза #0x60-0x62), а не
  * обычный crouch. Включается на время s_level_end. */
 static bool s_sit_scroll          = false;
@@ -358,6 +365,8 @@ void physics_reset(int x, int y)
     s_dying_frame = 0;
     s_just_died_pulse = false;
     s_invuln = false;
+    s_blue = false;
+    s_hit_iframes = 0;
     inv_reset();                 /* пустой инвентарь — pickup обязателен */
     /* для отладки можно зафиксировать позицию через env: */
     const char *e = getenv("KARNOV_FIX_POS");
@@ -687,6 +696,8 @@ void physics_tick(u8 input)
      * (s_y — base/feet); если это вода (attr=08), стартуем dying-state.
      * В полёте контакт с водой тоже убивает — это совпадает с поведением
      * оригинала. */
+    if (s_hit_iframes > 0) --s_hit_iframes;
+
     if (!s_invuln && !s_dying && level_is_water_at(s_x, s_y)) {
         s_dying = true;
         s_dying_frame = 0;
@@ -701,6 +712,31 @@ void physics_tick(u8 input)
      * (центр, подошва) → (левый край, верх), см. physics_get_top_y. */
     s_render_sid = pick_sprite_id(input, s_cur_frame);
 }
+
+/* Попадание по Карнову (порт ветки pair-loop obj_type 0 × 1,
+ * file 0xFB7A: `if (player_state != 9) player.state_byte = 4`).
+ * Первое попадание — «синий» Карнов, второе — смерть. Пока идут
+ * i-frames или включена неуязвимость (victory-секвенция, чит) — удар
+ * игнорируется, как и при уже начавшейся анимации гибели. */
+void physics_hit(void)
+{
+    if (s_invuln || s_dying || s_hit_iframes > 0) return;
+    if (!s_blue) {
+        s_blue = true;
+        s_hit_iframes = 45;
+        audio_play_sfx(2);           /* play_sound(2) в оригинале */
+        return;
+    }
+    s_dying = true;
+    s_dying_frame = 0;
+    s_just_died_pulse = true;
+    s_on_ladder = false;
+    s_flying = false;
+    s_vy_q4 = 0;
+    s_in_jump = false;
+}
+
+bool physics_is_blue(void) { return s_blue; }
 
 bool physics_just_died(void) { return s_just_died_pulse; }
 bool physics_is_dying(void)  { return s_dying; }
