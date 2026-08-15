@@ -200,6 +200,7 @@ static int  g_camera_left = 0;   /* Y boss'а на момент смерти —
  * простоя (DS:0xD8A4). */
 static bool s_sky_enabled = false;
 static int  s_sky_last_x_units = 0;
+static int  s_ice_ctr = 0;   /* [0xD8A4] — счётчик sky-цепи */
 static int  s_sky_idle = 0;
 
 
@@ -3003,6 +3004,32 @@ static void ai_sky_tick(u16 frame)
         int n = (int)(rng_next() & 1) + 1;
         for (int i = 0; i < n; ++i) spawn_sky_bird(frame, i);
         s_sky_idle = 0;
+    }
+
+    /* Настоящая sky-цепь (драйвер cs:0xFFA:0x163D): счётчик [0xD8A4]
+     * растёт каждый кадр, КРОМЕ player_state == 3; когда он перевалил
+     * 0x186 = 390 кадров и живой цепи нет ([0xD880] пуст), спаунер
+     * cs:0xFFA:0x1585 создаёт (rand & 1) + 1 объектов типа 8 и связывает
+     * их в цепочку. Тип 8 — это падающие ЛЬДИНКИ (кадры #72..74, всплеск
+     * #75), а не орлы: орлы (#147/148) остаются отдельной механикой
+     * начала LEVEL1 выше. */
+    ++s_ice_ctr;
+    if (s_ice_ctr > 0x186) {
+        bool chain_alive = false;
+        for (int i = 0; i < g_num; ++i)
+            if (g_obj[i].alive && g_obj[i].type == 8) { chain_alive = true; break; }
+        if (!chain_alive) {
+            int n = (int)(rng_next() & 1) + 1;
+            for (int i = 0; i < n; ++i) {
+                int slot = alloc_obj_slot();
+                if (slot < 0) break;
+                g_obj[slot] = (ai_obj_t){
+                    .alive = true, .type = 8, .subtype = 1, .hp = 10,
+                    .level_idx = -1, .facing = 1, .spawn_frame = frame,
+                };
+            }
+        }
+        s_ice_ctr = 0;
     }
 }
 
