@@ -1085,6 +1085,50 @@ static int obj_bounce_region(ai_obj_t *o)
     return bits;
 }
 
+/* ── Тип 31 — лев (handler cs:0x1348:0x1B1A, file 0x1679A) ────────────
+ *
+ * INIT: tick_period = 4, подфаза (+0xE9) = 0, постановка на землю со
+ * спрайтом 0xDD (#221), state_list = DS:0x1BC4.
+ * THINK (si = +0xE9, затем +0xE9 |= 1):
+ *   0/1 — лежит: аним-состояние 0, кадр выбирается случайно
+ *         (rand & 0xF) < 4 ? 0 : 1 — «дыхание». Пока лев цел
+ *         (hp >= 0x1F) и случайный порог (rand & 0x3F) + 0x64 (100…163)
+ *         не меньше счётчика кадров — остаётся лежать; иначе (или сразу
+ *         после ранения) → подфаза 2;
+ *   2   — бросок: аним-состояние 1, vx = −1.5 (бежит влево, на игрока).
+ * Очки за смерть 0x7000 — как у самой хозяйки. */
+static void ai_type31(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 0);
+        obj_phys_begin(o);
+        o->st_misc = 0;                     /* +0xE9 */
+        obj_snap_ground(o);
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        o->frame_index = ((rng_next() & 0xF) < 4) ? 0 : 1;
+        /* fallthrough */
+    case 1:
+        if (o->hp >= 0x1F) {
+            int t = (int)((rng_next() & 0x3F) + 0x64);
+            if (t >= o->st_ctr) break;      /* ещё лежим */
+        }
+        o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = 1;
+        o->vxq = (s32)0xFFFE8000;           /* −1.5 — бросок влево */
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 32 — босс LEVEL2 (handler cs:0x1348:0x1C34, file 0x168B4) ─────
  *
  * INIT: tick_period = 4, постановка на землю со спрайтом 0xDE (#222),
@@ -2520,7 +2564,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [28] = ai_type28,
     [29] = ai_simple,          /* multi-phase хелпер */
     [30] = ai_grow_chain,
-    [31] = ai_simple,
+    [31] = ai_type31,          /* лев */
     [32] = ai_type32,          /* босс LEVEL2 */
     [33] = ai_multipart,
     [34] = ai_multipart,            /* червь с HP-индикатором */
