@@ -245,6 +245,8 @@ static bool is_damageable_obj(const struct ai_obj *o)
     if (o->type == 53) return o->custom != 0;
     /* Тип 55 неуязвим на «отдыхе» (file 0x196E8). */
     if (o->type == 55) return o->custom != 0;
+    /* Тип 37 неуязвим, пока дремлет (file 0x175D1). */
+    if (o->type == 37) return o->custom != 0;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -1120,6 +1122,75 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
     int cat = level_tile_attr_at(o->x, o->y);
     if (cat != 2) o->alive = false;
+}
+
+/* ── Тип 37 — стреляющий ползун (cs:0x151A:0x0C31, file 0x175D1) ──────
+ *
+ * INIT: tick_period = 7, подфаза (+0xE9) = 0, +0xEB = 0,
+ * phase(+0xED) = СНИМОК hp, state_list = DS:0x1C86, постановка на землю
+ * по центру спрайта 0xFB (#251).
+ * Живучесть, как у типа 38, задана порогом: если снимок минус текущий hp
+ * превысил 0x46, hp принудительно ставится в −20.
+ * Подфазы:
+ *   0/1 — дремлет: аним 0, box0.hitflag = 0 (НЕУЯЗВИМ); просыпается,
+ *         когда расстояние до игрока меньше 0x55;
+ *   2/3 — бой: аним 1, hitflag = 1, vx = −0.5. Каждый 4-й кадр
+ *         (`test [0xCDEA], 4`), пока счётчик очереди < 6: выстрел через
+ *         cs:0x151A:0xB18 (play_sound(2) + снаряд), ++счётчик, сброс
+ *         frame_ctr и, если hp < 0xFA, hp += 0x0A — то есть за каждый
+ *         выстрел враг ЛЕЧИТСЯ на 10. Отстреляв шесть, ждёт 0x14 кадров
+ *         и обнуляет счётчик. Догнав игрока (self.x <= player.x),
+ *         останавливается и замирает (active = 0). */
+static void ai_type37(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 7, 0);
+        obj_phys_begin(o);
+        o->st_misc  = 0;
+        o->st_aux   = 0;                     /* +0xEB — счётчик очереди */
+        o->st_phase = o->hp;                 /* +0xED — снимок hp */
+        o->custom   = 0;                     /* box0.hitflag */
+        obj_snap_ground(o);
+        return;
+    }
+    if (o->st_phase - o->hp > 0x46) o->hp = -20;
+
+    int dxp = player_units() - obj_units(o);
+    int dyp = physics_get_top_y() - o->y;
+    int d = (dxp < 0 ? -dxp : dxp) + (dyp < 0 ? -dyp : dyp);
+
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        o->custom = 0;                       /* неуязвим, пока дремлет */
+        /* fallthrough */
+    case 1:
+        if (d < 0x55) o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = 1;
+        o->custom = 1;                       /* теперь уязвим */
+        o->vxq = (s32)0xFFFF8000;            /* −0.5 */
+        /* fallthrough */
+    case 3:
+        if ((frame & 4) && o->st_aux < 6) {
+            spawn_enemy_shot(o->x, o->y + obj_height(o), (dxp > 0), Q_2_0, 1);
+            audio_play_sfx(2);
+            ++o->st_aux;
+            o->st_ctr = 0;
+            if (o->hp < 0xFA) o->hp += 0x0A;  /* +10 hp за выстрел */
+        }
+        if (o->st_aux == 6 && o->st_ctr > 0x14) o->st_aux = 0;
+        if (obj_units(o) <= player_units()) {
+            o->vxq = 0;
+            o->st_aux = -0x19;
+        }
+        break;
+    default: break;
+    }
 }
 
 /* ── Тип 49 — «щит» босса (handler cs:0x170C:0x03C5, file 0x18C85) ────
@@ -3129,7 +3200,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [34] = ai_multipart,            /* червь с HP-индикатором */
     [35] = ai_type35,          /* прыгающий голем */
     [36] = ai_ryu,             /* ★ Рю */
-    [37] = ai_simple,          /* slow boss */
+    [37] = ai_type37,          /* стреляющий ползун */
     [38] = ai_type38,          /* босс LEVEL3 */
     [39] = ai_multipart,
     [40] = ai_type40,          /* босс LEVEL4 */
