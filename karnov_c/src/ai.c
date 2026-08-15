@@ -241,6 +241,8 @@ static bool is_damageable_obj(const struct ai_obj *o)
     if (o->type == 38) return o->custom != 0;
     /* Тип 46 уязвим только «высунувшись» (file 0x1878B). */
     if (o->type == 46) return o->custom != 0;
+    /* Тип 53 неуязвим, пока падает (file 0x193DD). */
+    if (o->type == 53) return o->custom != 0;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -375,8 +377,11 @@ static int obj_feet(const ai_obj_t *o)
  *
  *   PLACE_SNAP_LEFT   — хелпер cs:0xD4B:0x19F (file 0xEE4F): колонка по
  *     ЛЕВОМУ краю объекта, маска props[attr 0] = 0x0001. Типы 8, 11, 14,
- *     17, 24, 28, 29, 31, 32, 46, 48, 53, 54, 55 (8 — sky-спаунер, в
+ *     17, 24, 28, 29, 31, 32, 46, 48, 54, 55 (8 — sky-спаунер, в
  *     порту не материализуется) + тип 26, который зовёт ядро 0x14C сам.
+ *     Тип 53 из списка ИСКЛЮЧЁН: его INIT землю не трогает, постановка
+ *     происходит в фазе приземления, а при спавне он должен падать
+ *     сверху (иначе проба «пол на 10 px ниже ног» промахивается).
  *   PLACE_SNAP_CENTER — хелпер cs:0xD4B:0x1DE (file 0xEE8E): колонка по
  *     ЦЕНТРУ спрайта (x + sprite_w/2), маска 0x0089 (пол | стена |
  *     категория 7). Типы 15, 35, 36, 37, 38, 40.
@@ -397,7 +402,7 @@ static place_mode_t type_place_mode(u16 type)
 {
     switch (type) {
         case 11: case 14: case 17: case 24: case 26: case 28: case 29:
-        case 31: case 32: case 46: case 48: case 53: case 54: case 55:
+        case 31: case 32: case 46: case 48: case 54: case 55:
             return PLACE_SNAP_LEFT;
         case 15: case 35: case 36: case 37: case 38: case 40:
             return PLACE_SNAP_CENTER;
@@ -1113,6 +1118,63 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
     int cat = level_tile_attr_at(o->x, o->y);
     if (cat != 2) o->alive = false;
+}
+
+/* ── Тип 53 — падающий ползун (cs:0x17B6:0x007D, file 0x193DD) ────────
+ *
+ * INIT: подфаза (+0xE9) = 0, phase(+0xED) = 0, tick_period = 2.
+ * Подфазы (si = +0xE9, затем +0xE9 |= 1):
+ *   0/1 — падение: аним 0, vy = +5.0, box0.hitflag = 0 (НЕУЯЗВИМ);
+ *         как только тайл в точке (x, нижняя кромка + 2*vy) имеет
+ *         категорию 0 (пол) — подфаза 2;
+ *   2/3 — ползёт: аним 1, vy = 0, vx = −2.0, постановка на землю со
+ *         спрайтом 0x13F (#319), box0.hitflag = 1 (уязвим). Когда
+ *         расстояние до игрока меньше 0x1E и phase ещё 0 — ОДИН раз
+ *         зовётся cs:0x17B6:0x000C (горизонтальный снаряд в игрока со
+ *         скоростью 2.0) и phase ставится в 1. Очки 0x1000. */
+static void ai_type53(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 2, 0);
+        obj_phys_begin(o);
+        o->st_misc  = 0;
+        o->st_phase = 0;
+        o->custom   = 0;                 /* box0.hitflag */
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        o->vyq = QV(5, 0);
+        o->custom = 0;                   /* неуязвим в полёте */
+        /* fallthrough */
+    case 1: {
+        int probe = o->y + obj_height(o) + 2 * (int)(o->vyq >> 16);
+        if (level_tile_attr_at(o->x, probe) != 0) break;
+        o->st_misc = 2;
+        break;
+    }
+    case 2:
+        o->pending_state = 1;
+        o->vyq = 0;
+        o->vxq = -Q_2_0;
+        obj_snap_ground(o);
+        o->custom = 1;                   /* теперь уязвим */
+        /* fallthrough */
+    case 3: {
+        int dxp = player_units() - obj_units(o);
+        int dyp = physics_get_top_y() - o->y;
+        int d = (dxp < 0 ? -dxp : dxp) + (dyp < 0 ? -dyp : dyp);
+        if (d >= 0x1E || o->st_phase != 0) break;
+        spawn_enemy_shot(o->x, o->y, (dxp > 0), Q_2_0, 1);
+        o->st_phase = 1;                 /* выстрел одноразовый */
+        break;
+    }
+    default: break;
+    }
 }
 
 /* ── Тип 46 — «ныряющая» турель (cs:0x1692:0x066B, file 0x1878B) ──────
@@ -3011,7 +3073,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [50] = ai_multipart,
     [51] = ai_arena_static,
     [52] = ai_simple,
-    [53] = ai_simple,
+    [53] = ai_type53,          /* падающий ползун */
     [54] = ai_simple,
     [55] = ai_simple,
     [56] = ai_stub,            /* level-end триггер — секвенция в game.c */
