@@ -229,6 +229,9 @@ static bool is_damageable_obj(const struct ai_obj *o)
     /* «Золотой человек» уязвим только собранным (флаг +0x2E ставится
      * при входе в фазу 6, снимается в остальных — file 0x1508D). */
     if (o->type == 24) return o->custom != 0;
+    /* Босс LEVEL4 неуязвим, пока дремлет и падает: box0.hitflag = 1
+     * ставится только при входе в боевую подфазу 6 (file 0x17E37). */
+    if (o->type == 40) return o->custom != 0;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -1079,6 +1082,88 @@ static int obj_bounce_region(ai_obj_t *o)
     if (obj_units(o) > r[2] || obj_units(o) < r[0]) { o->vxq = -o->vxq; bits |= 1; }
     if (o->y > r[3] || o->y < r[1])                 { o->vyq = -o->vyq; bits |= 2; }
     return bits;
+}
+
+/* ── Тип 40 — босс LEVEL4 «гусеница» (cs:0x161F:0x0447, file 0x17E37) ──
+ *
+ * INIT: tick_period = 2, подфаза (+0xE9) = 0, state_list = DS:0x1D22.
+ * dir = (игрок правее) считается каждый тик и служит аним-состоянием.
+ * Подфазы (+0xE9, чётная — одноразовый вход):
+ *   0/1 — дремлет: кадр 0, active = 0, box0.hitflag = 0 (НЕУЯЗВИМ);
+ *         ждёт, пока игрок не подойдёт ближе 0x78 либо не пройдёт 200
+ *         кадров, затем подфаза 2;
+ *   2/3 — падение: active = 1, vy = +1.5; пока тайл под нижней кромкой
+ *         пуст (категория 2) — летит, иначе подфаза 4;
+ *   4/5 — посадка: кадр 0, active = 0, счётчик кадров = 0, установка на
+ *         землю по центру (спрайт 0x107), set_motion(0); ждёт, пока
+ *         игрок не ближе 0x3C (или уже был бой), и ещё 0x4B кадров,
+ *         затем подфаза 6;
+ *   6/7 — бой: active = 1, phase = 1, vx = ±0.75 к игроку, счётчик
+ *         кадров = 0 и box0.hitflag = 1 — только теперь босса можно
+ *         ранить; далее раз в 8 кадров подключается вертикальный рывок.
+ * Порт хранит hitflag в поле custom и учитывает его в is_damageable_obj. */
+static void ai_type40(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    int dx  = player_units() - obj_units(o);
+    int adx = dx < 0 ? -dx : dx;
+    int dir = (dx > 0);
+
+    if (!o->use_anim) {
+        anim_begin(o, 2, dir);
+        obj_phys_begin(o);
+        o->st_misc = 0;                 /* +0xE9 */
+        o->custom  = 0;                 /* box0.hitflag — неуязвим */
+        return;
+    }
+    int ph = o->st_misc;
+    o->st_misc |= 1;
+    switch (ph) {
+    case 0:
+        o->pending_state = dir;
+        o->frame_index = 0;
+        o->custom = 0;                  /* неуязвим */
+        /* fallthrough */
+    case 1:
+        if (adx >= 0x78 && o->st_ctr <= 0xC8) break;
+        o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = dir;
+        o->vyq = Q_1_5;
+        /* fallthrough */
+    case 3: {
+        int cat = level_tile_attr_at(o->x, o->y + obj_height(o));
+        if (cat == 2) break;            /* ещё падает */
+        o->st_misc = 4;
+        break;
+    }
+    case 4:
+        o->pending_state = dir;
+        o->frame_index = 0;
+        o->st_ctr = 0;
+        obj_snap_ground(o);
+        o->vxq = o->vyq = 0; o->axq = o->ayq = 0;   /* set_motion(0) */
+        /* fallthrough */
+    case 5:
+        if (adx >= 0x3C && o->st_phase == 0) break;
+        if (o->st_ctr <= 0x4B) break;
+        o->st_misc = 6;
+        break;
+    case 6:
+        o->pending_state = dir;
+        o->st_phase = 1;
+        o->vxq = dir ? QV(0, 0xC000) : (s32)0xFFFF4000;   /* ±0.75 */
+        o->st_ctr = 0;
+        o->custom = 1;                  /* теперь уязвим */
+        /* fallthrough */
+    case 7:
+        /* Раз в 8 кадров — вертикальный рывок (frame_ctr >> 3, бит 0). */
+        if ((((o->st_ctr >> 3) & 1) == 0)) o->vyq = Q_1_5;
+        else                               o->vyq = 0;
+        break;
+    default: break;
+    }
 }
 
 /* ── Тип 15 — каменный страж (handler cs:0x11D6:0x0ACB, file 0x1402B) ──
@@ -2665,7 +2750,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [37] = ai_simple,          /* slow boss */
     [38] = ai_simple,          /* delayed 75 кадров */
     [39] = ai_multipart,
-    [40] = ai_simple,
+    [40] = ai_type40,          /* босс LEVEL4 */
     [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
     [42] = ai_particle42,
     [43] = ai_type43,          /* «крестовый» летун */
