@@ -143,6 +143,12 @@ typedef struct ai_obj {
     /* Гибнет: показываем вспышку и снимаем объект по её окончании.
      * В оригинале это состояние 4 → die_puff → пуф-обработчик → 6. */
     bool   is_dying;
+    /* Порт полей pair-loop: +0xDD (задели в этом кадре) и +0xDF (индекс
+     * объекта, с которым пересеклись боксы). Оригинал заполняет их
+     * проходом по боксам, file 0x2CB0/0x2D72. */
+    bool   hit_flag;      /* коснулись в ЭТОМ кадре */
+    bool   has_partner;   /* +0xDF когда-либо заполнялось */
+    int    hit_idx;
     /* Projectile Q16.16 sub-pixel state (TYPE_ROCK_PROJECTILE).
      * Соответствуют полям object'а +0x0E/+0x10 (vx) и +0x12/+0x14 (vy)
      * из KARNOV.EXE handler cs:0x11D6:0x08B3 (sprites #21-23).
@@ -1389,6 +1395,9 @@ static void ai_type52(ai_obj_t *o, u16 frame, u8 in)
     case 0:
         o->pending_state = 0;
         o->custom = 1;                       /* уязвим в покое */
+        /* Пробуждение приходит извне — через state 4, который читает
+         * +0xDF. В порту эквивалент: нас коснулись (hit_flag). */
+        if (o->hit_flag) o->st_misc = 2;
         break;
     case 2:
         o->pending_state = (player_units() > obj_units(o) + 8) ? 2 : 1;
@@ -1552,7 +1561,16 @@ static void ai_type49(ai_obj_t *o, u16 frame, u8 in)
         return;
     }
     o->hp = o->st_aux;                            /* hp восстанавливается */
-    if (ai_boss_dead()) o->alive = false;         /* родитель погиб */
+    /* Оригинал смотрит на +0xDF — того, с кем пересеклись боксы, — и
+     * гибнет, когда у того обнулился obj_type. Теперь у порта есть эти
+     * пары, поэтому проверка настоящая; ai_boss_dead() остаётся
+     * подстраховкой, если щит ещё никого не коснулся. */
+    if (o->has_partner && o->hit_idx >= 0 && o->hit_idx < g_num) {
+        const ai_obj_t *p = &g_obj[o->hit_idx];
+        if (!p->alive || p->is_dying) { o->alive = false; return; }
+    } else if (ai_boss_dead()) {
+        o->alive = false;
+    }
 }
 
 /* ── Тип 55 — патрульный (handler cs:0x17EC:0x0028, file 0x196E8) ─────
@@ -3807,6 +3825,33 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
     }
 }
 
+/* ─── Пары «объект-объект» (проход по боксам, file 0x2CB0/0x2D72) ─────
+ *
+ * Оригинал сравнивает боксы всех активных объектов, пропуская те, у
+ * которых flag(+0x2E) == 0, и при пересечении пишет в ОБА объекта
+ * +0xDD = 1 и +0xDF = индекс партнёра. На это опираются типы 49 (щит
+ * гибнет вслед за тем, кого коснулся) и 52 (просыпается от касания).
+ * Здесь тот же результат прямым перебором: живых объектов на кадр
+ * немного (десятки), поэтому квадратичный проход недорог. */
+static void ai_collect_pairs(void)
+{
+    for (int i = 0; i < g_num; ++i) g_obj[i].hit_flag = false;
+    for (int i = 0; i < g_num; ++i) {
+        ai_obj_t *a = &g_obj[i];
+        if (!a->alive || a->invisible || a->is_dying) continue;
+        int aw = obj_width(a), ah = (a->cur_h > 0) ? a->cur_h : obj_height(a);
+        for (int j = i + 1; j < g_num; ++j) {
+            ai_obj_t *b = &g_obj[j];
+            if (!b->alive || b->invisible || b->is_dying) continue;
+            int bw = obj_width(b), bh = (b->cur_h > 0) ? b->cur_h : obj_height(b);
+            if (a->x + aw < b->x || b->x + bw < a->x) continue;
+            if (a->y + ah < b->y || b->y + bh < a->y) continue;
+            a->hit_flag = true; a->has_partner = true; a->hit_idx = j;
+            b->hit_flag = true; b->has_partner = true; b->hit_idx = i;
+        }
+    }
+}
+
 /* ─── Pair-loop: касание врага бьёт Карнова ───────────────────────────
  *
  * Порт ветки THINKCYCLE, где a.obj_type = 0 (маркер Карнова), а
@@ -3954,6 +3999,8 @@ void ai_tick(u16 frame, u8 karnov_input)
             pick_handler(o->type)(o, frame, karnov_input);
         }
     }
+
+    ai_collect_pairs();          /* +0xDD/+0xDF для типов 49 и 52 */
 
     /* Sky-spawner — драйвер вне объектной системы (file 0x12DB5). */
     ai_sky_tick(frame);
