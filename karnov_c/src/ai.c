@@ -1029,6 +1029,111 @@ static void ai_type16(ai_obj_t *o, u16 frame, u8 in)
     }
 }
 
+/* Поставить объект НОГАМИ на ближайшую поверхность снизу — порт
+ * place_on_ground_core (cs:0xD4B:0x14C): ищет первую строку карты с
+ * подходящим тайлом и пишет y_world = row*10 − высота спрайта. */
+static void obj_snap_ground(ai_obj_t *o)
+{
+    int h   = obj_height(o);
+    int row = level_ground_row_below(o->x + 6, o->y / TILE_H, 0x0001);
+    if (row >= 0) {
+        o->y = row * TILE_H - h;
+        if (o->phys) o->yq = (s32)o->y << 16;
+    }
+}
+
+/* ── Тип 26 — прыгающий воин (handler cs:0x1348:0x0E46, file 0x15AC6) ──
+ *
+ * INIT: tick_period = 2, state_list = DS:0x1AA4, подфаза (+0xE9) = 2
+ * («приземление»), направление (+0xED) = игрок правее, vx = ±0.75.
+ *
+ * THINK каждый тик:
+ *   гистерезис разворота: смотрит вправо и (−10 − rand&7) > dx → влево;
+ *   смотрит влево и (10 + rand&7) < dx → вправо; затем ЦЕЛАЯ часть vx
+ *   переписывается на ±1.0 (дробная сохраняется);
+ *   подфазы (si = +0xE9, потом +0xE9 |= 1 — чётная срабатывает один раз):
+ *     0/1 — включить гравитацию ay = 0.3125 и ждать vy > 0; тайл под
+ *           следующей позицией (хелпер cs:0x1348:0xE0B) категории 0/4 →
+ *           подфаза 2 (посадка), категории 6 → подфаза 4 (склон);
+ *     2/3 — посадка: vy = 0, ay = 0, встать на землю; затем 2 из 16 —
+ *           прыжок vy = −2.0 и снова подфаза 0, иначе по категории тайла
+ *           впереди: 2 → подфаза 0 (шагнуть в пустоту), 6 → подфаза 4;
+ *     4/5 — склон: vy = 16 / (vx/10), ay = 0, встать на землю.
+ *   аним-состояние = ((+0xE9 & 0xFE) ? 0 : 2) + направление
+ *   (0/1 — ходьба влево/вправо, 2/3 — прыжок), очки за смерть 0x400. */
+static int t26_tile_ahead(const ai_obj_t *o)
+{
+    /* cs:0x1348:0xE0B — категория тайла под НОГАМИ в следующей позиции:
+     * (x + vx_int + 3, y + vy_int + sprite_h + 1). */
+    int nx = o->x + ((int)(o->vxq >> 16)) * 2 + 6;
+    int ny = o->y + (int)(o->vyq >> 16) + obj_height(o) + 1;
+    int a  = level_tile_attr_at(nx, ny);
+    return (a < 0) ? 2 : a;                  /* вне карты — «пусто» */
+}
+
+static void ai_type26(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 2, 0);
+        obj_phys_begin(o);
+        o->st_misc  = 2;                                   /* +0xE9 подфаза */
+        o->st_phase = (player_units() > obj_units(o));      /* +0xED вправо? */
+        o->vxq = o->st_phase ? QV(0, 0xC000) : (s32)0xFFFF4000;   /* ±0.75 */
+        return;
+    }
+
+    int pdx = player_units() - obj_units(o);
+    if (o->st_phase) { if (-10 - (int)(rng_next() & 7) > pdx) o->st_phase = 0; }
+    else             { if ( 10 + (int)(rng_next() & 7) < pdx) o->st_phase = 1; }
+    /* Пишется только ЦЕЛАЯ часть vx (как `mov [+0x10], ±1`). */
+    o->vxq = ((s32)(o->st_phase ? 1 : -1) << 16) | (o->vxq & 0xFFFF);
+
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->ayq = QV(0, 0x5000);                 /* гравитация 0.3125 */
+        /* fallthrough */
+    case 1:
+        if (o->vyq <= 0) break;
+        { int cat = t26_tile_ahead(o);
+          if (cat == 0 || cat == 4) o->st_misc = 2;
+          else if (cat == 6)        o->st_misc = 4; }
+        break;
+    case 2:
+        o->vyq = 0; o->ayq = 0;
+        obj_snap_ground(o);
+        /* fallthrough */
+    case 3:
+        if ((rng_next() & 0xF) < 2) {           /* 2 из 16 — подпрыгнуть */
+            o->vyq = -QV(2, 0);
+            o->st_misc = 0;
+        } else {
+            int cat = t26_tile_ahead(o);
+            if (cat == 2)      o->st_misc = 0;  /* впереди пусто — падать */
+            else if (cat == 6) o->st_misc = 4;  /* склон */
+        }
+        break;
+    case 4: {
+        s32 vx = o->vxq / 10;
+        o->vyq = vx ? (s32)((QV(16, 0)) / vx) : 0;
+        o->ayq = 0;
+        obj_snap_ground(o);
+        /* fallthrough */
+    }
+    case 5: {
+        int cat = t26_tile_ahead(o);
+        if (cat == 0 || cat == 4 || cat == 7) o->st_misc = 2;
+        else if (cat == 2)                    o->st_misc = 0;
+        else if (cat == 6)                    o->st_misc = 4;
+        break;
+    }
+    default: break;
+    }
+    o->pending_state = ((o->st_misc & 0xFE) ? 0 : 2) + (o->st_phase ? 1 : 0);
+}
+
 /* ── Тип 25 — PRNG-lurker (handler cs:0x1348:0xA20, file 0x156A0) ──────
  * INIT: tick_period=4, set_motion(4) → vy = +2.0 px/кадр.
  * TICK: когда счётчик КАДРОВ превысил 30 + (rand&15), выбирается новое
@@ -1374,9 +1479,30 @@ static void ai_world_item(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
     if (o->type == 4) {
-        /* frame-gated мерцание раз в 16 кадров (ai_type04:
-         * `if ((current_frame & 8) == 0) return`). */
-        o->invisible = ((frame >> 3) & 1) != 0;
+        /* Тип 4 (handler cs:0xFFA:0x0CF6, file 0x12496) — предмет,
+         * который виден ТОЛЬКО пока идёт таймер Glasses, и при этом
+         * мигает по биту 3 счётчика кадров:
+         *     visible = ([0xD8B8] != 0) && ([0xCDEA] & 8)
+         *     box0.sprite = visible ? 0x27 + item_id : 0   (0 = бокс выкл.)
+         *     box0.hitflag = visible                        (иначе не берётся)
+         * Подбор (state 4) — play_sound(5) + option_pickup(item_id). */
+        o->invisible = !(inv_glasses_active() && ((frame >> 3) & 1));
+        return;
+    }
+    /* Тип 6 (handler cs:0xFFA:0x0EB8, file 0x12658). INIT: item_id =
+     * (init_arg == 99) ? rand()%11 : init_arg, tick_period = 100;
+     * item_id >= 11 — СКРЫТЫЙ предмет: num_bboxes = 0, phase(+0xED) = 1.
+     * THINK скрытого: расстояние до игрока d = |dx| + |dy| (хелпер
+     * cs:0xD4B:0x105); d < 40 → показать (aux = 1), d > 40 → снова
+     * спрятать. Обычный предмет (phase = 0) в THINK ничего не делает. */
+    if (o->init_arg >= 11 && o->init_arg != 99) {   /* СКРЫТЫЙ предмет */
+        int d  = player_units() - obj_units(o);
+        int dy = physics_get_top_y() - o->y;
+        if (d < 0)  d = -d;
+        if (dy < 0) dy = -dy;
+        int dist = d + dy;
+        if (!o->invisible) { if (dist > 0x28) o->invisible = true;  }
+        else               { if (dist < 0x28) o->invisible = false; }
     }
 }
 
@@ -1905,7 +2031,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [23] = ai_homing_shot,     /* самонаводящийся шар */
     [24] = ai_gold_man,        /* «золотой человек» + 7 шаров */
     [25] = ai_type25,
-    [26] = ai_simple,          /* быстрый воин */
+    [26] = ai_type26,          /* прыгающий воин */
     [27] = ai_type27,
     [28] = ai_type28,
     [29] = ai_simple,          /* multi-phase хелпер */
@@ -2047,7 +2173,7 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
     if (e->type == 4 || e->type == 5 || e->type == 6) {
         u16 item_id;
         if (arg == 99)      item_id = (u16)(rng_next() % (u16)ITEM_NUM);   /* file 0x12477: rand() % 11 */
-        else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden_item = true; }
+        else if (arg >= 11) { item_id = (u16)(arg % 11u); hidden_item = true; }  /* см. ниже: custom = arg */
         else                item_id = arg;
         item_sprite = (u16)(39 + item_id);
     }
