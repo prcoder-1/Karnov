@@ -902,6 +902,20 @@ static void spawn_enemy_shot(int x, int y, int dir, s32 speed_units, int kind)
     g_obj[slot].vxq = dir ? speed_units : -speed_units;
 }
 
+/* Снаряд врага — порт cs:0x11D6:0x02A3 (его ставит spawn_projectile).
+ *
+ * INIT: state_list = DS:0x1784, tick_period = 2, obj_type = 3, hp = 10,
+ * num_bboxes = 1, box0.hitflag = 1, а АНИМ-СОСТОЯНИЕ берётся из +0xE9 —
+ * то есть «kind», переданный стрелявшим. Дальше по этому же kind:
+ *   kind 10 — вертикальная скорость принудительно вниз (vy = |vy|);
+ *   kind 8/9 — obj_type меняется на 1, т.е. снаряд становится «врагом»
+ *              для pair-loop и может ранить.
+ * THINK — правила гибели тоже по kind:
+ *   kind 8 — жив, пока тайл в его точке пустой (категория 2); иначе
+ *            зовётся cs:0x11D6:0x021A (разрыв о препятствие);
+ *   kind 9 — жив, только пока тайл категории 9 (вода);
+ *   прочие — живут до frame_ctr > 0x28 (40 кадров).
+ * Прежняя реализация просто летела до края карты. */
 static void ai_enemy_shot(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)in;
@@ -911,6 +925,20 @@ static void ai_enemy_shot(ai_obj_t *o, u16 frame, u8 in)
     o->anim_phase = (u16)((frame >> 1) & 3);
     if (o->custom == 1) o->item_sprite = K1[o->anim_phase];
     else o->item_sprite = (u16)((o->vxq < 0 ? 14 : 16) + ((frame >> 2) & 1));
+
+    int cat = level_tile_attr_at(o->x, o->y);
+    switch (o->custom) {
+    case 8:                                  /* разрывается о препятствие */
+        if (cat != 2) { o->alive = false; return; }
+        break;
+    case 9:                                  /* живёт только в воде */
+        if (cat != 9) { o->alive = false; return; }
+        break;
+    default:
+        if (o->st_ctr > 0x28) { o->alive = false; return; }   /* 40 кадров */
+        break;
+    }
+
     int world_w = (int)level_num_map_cols * TILE_W;
     if (o->x < -16 || o->x > world_w + 16) o->alive = false;
 }
