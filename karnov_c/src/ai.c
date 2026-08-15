@@ -1124,6 +1124,57 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     if (cat != 2) o->alive = false;
 }
 
+/* ── Тип 54 — стационарный плевун (cs:0x17B6:0x01DB, file 0x1953B) ────
+ *
+ * INIT: tick_period = 4, подфаза (+0xE9) = 0, state_list = DS:0x1EB0,
+ * постановка на землю со спрайтом 0x140 (#320).
+ * Подфазы:
+ *   0/1 — покой: аним 0, счётчик кадров сброшен; выстрел разрешён, лишь
+ *         когда прошло больше 0x6E кадров И расстояние до игрока меньше
+ *         0x78 — тогда подфаза 2;
+ *   2/3 — выстрел: аним 1, счётчик сброшен, горизонтальный снаряд
+ *         влево из (x, y + 0x0F) со скоростью 3.0; через 0x19 кадров
+ *         возврат в покой;
+ *   4   — получил урон: аним 2, obj_type = 9, box0.hitflag = 0 —
+ *         объект превращается в неуязвимую декорацию.
+ * Сам плевун неподвижен. */
+static void ai_type54(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 0);
+        o->st_misc = 0;
+        obj_snap_ground(o);
+        return;
+    }
+    int dxp = player_units() - obj_units(o);
+    int dyp = physics_get_top_y() - o->y;
+    int d = (dxp < 0 ? -dxp : dxp) + (dyp < 0 ? -dyp : dyp);
+
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        o->st_ctr = 0;
+        /* fallthrough */
+    case 1:
+        if (o->st_ctr <= 0x6E) break;
+        if (d >= 0x78) break;
+        o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = 1;
+        o->st_ctr = 0;
+        spawn_enemy_shot(o->x, o->y + 0x0F, 0, QV(3, 0), 1);   /* влево, 3.0 */
+        /* fallthrough */
+    case 3:
+        if (o->st_ctr > 0x19) o->st_misc = 0;
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 37 — стреляющий ползун (cs:0x151A:0x0C31, file 0x175D1) ──────
  *
  * INIT: tick_period = 7, подфаза (+0xE9) = 0, +0xEB = 0,
@@ -3217,7 +3268,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [51] = ai_arena_static,
     [52] = ai_simple,
     [53] = ai_type53,          /* падающий ползун */
-    [54] = ai_simple,
+    [54] = ai_type54,          /* стационарный плевун */
     [55] = ai_type55,          /* патрульный */
     [56] = ai_stub,            /* level-end триггер — секвенция в game.c */
     [57] = ai_stub,            /* статическая декорация */
