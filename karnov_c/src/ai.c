@@ -1085,6 +1085,33 @@ static int obj_bounce_region(ai_obj_t *o)
     return bits;
 }
 
+/* ── Тип 32 — босс LEVEL2 (handler cs:0x1348:0x1C34, file 0x168B4) ─────
+ *
+ * INIT: tick_period = 4, постановка на землю со спрайтом 0xDE (#222),
+ * state_list = DS:0x1BE0, аним-состояние 0.
+ * THINK: пока frame_ctr(+0xC7) <= 0x5A — стоит в состоянии 0. Как только
+ * счётчик перевалил 90, стреляет: spawn_projectile из
+ * (x, y + 3 + (rand & 8)) в игрока со скоростью 2.0 и флагом
+ * «горизонтально», после чего frame_ctr = 0x5A − ((rand & 0xF) + 0x46),
+ * т.е. следующий выстрел через 70…85 кадров, и переключается в
+ * состояние 1. Очки за смерть 0x7000. Сам босс НЕ ходит. */
+static void ai_type32(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 0);
+        obj_snap_ground(o);
+        return;
+    }
+    if (o->st_ctr <= 0x5A) { o->pending_state = 0; return; }
+
+    /* Горизонтальный снаряд в сторону игрока. */
+    int si = (player_units() > obj_units(o));
+    spawn_enemy_shot(o->x, o->y + 3 + (int)(rng_next() & 8), si, Q_2_0, 1);
+    o->st_ctr = 0x5A - (int)((rng_next() & 0xF) + 0x46);
+    o->pending_state = 1;
+}
+
 /* ── Тип 22 — статичный страж (handler cs:0x1348:0x0C82, file 0x15902) ─
  *
  * Вопреки прежней реконструкции («tile-aware патруль») тип НЕ двигается:
@@ -2494,7 +2521,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [29] = ai_simple,          /* multi-phase хелпер */
     [30] = ai_grow_chain,
     [31] = ai_simple,
-    [32] = ai_simple,
+    [32] = ai_type32,          /* босс LEVEL2 */
     [33] = ai_multipart,
     [34] = ai_multipart,            /* червь с HP-индикатором */
     [35] = ai_type35,          /* прыгающий голем */
