@@ -239,6 +239,8 @@ static bool is_damageable_obj(const struct ai_obj *o)
     if (o->type == 40) return o->custom != 0;
     /* Босс LEVEL3 так же неуязвим, пока стоит (file 0x17867). */
     if (o->type == 38) return o->custom != 0;
+    /* Тип 46 уязвим только «высунувшись» (file 0x1878B). */
+    if (o->type == 46) return o->custom != 0;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -1111,6 +1113,74 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
     int cat = level_tile_attr_at(o->x, o->y);
     if (cat != 2) o->alive = false;
+}
+
+/* ── Тип 46 — «ныряющая» турель (cs:0x1692:0x066B, file 0x1878B) ──────
+ *
+ * INIT: постановка на землю со спрайтом 0x124 (#292), подфаза (+0xE9) = 0,
+ * tick_period = 9, state_list = DS:0x1DE4.
+ * THINK (dir = игрок правее; si = +0xE9, затем +0xE9 |= 1):
+ *   0/1 — «спрятан»: аним-состояние dir, счётчик кадров = 0,
+ *         box0.hitflag = 0 (НЕУЯЗВИМ); через 0x46 кадров — подфаза 2;
+ *   2/3 — «высунулся»: аним dir + 2, box0.hitflag = 1 (уязвим), а
+ *         счётчик кадров заводится ОТРИЦАТЕЛЬНЫМ: −((d >> 2) + 5), где
+ *         d — расстояние до игрока, то есть чем дальше игрок, тем дольше
+ *         фаза. Пока счётчик отрицательный, каждый тик зовётся
+ *         cs:0x1692:0x0634 — тот же выстрел, что у типа 47: наведённый
+ *         снаряд в (player.x, player.y + 10) со скоростью 0.75.
+ *         Как только счётчик дошёл до нуля — снова подфаза 0.
+ * Очки за смерть 0x1000. */
+static void ai_type46(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 9, 0);
+        obj_snap_ground(o);
+        o->st_misc = 0;
+        o->custom  = 0;                 /* box0.hitflag */
+        return;
+    }
+    int dir = (player_units() > obj_units(o));
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = dir;
+        o->st_ctr = 0;
+        o->custom = 0;                  /* неуязвим */
+        /* fallthrough */
+    case 1:
+        if (o->st_ctr > 0x46) o->st_misc = 2;
+        break;
+    case 2: {
+        o->pending_state = dir + 2;
+        int dxp = player_units() - obj_units(o);
+        int dyp = physics_get_top_y() - o->y;
+        int d = (dxp < 0 ? -dxp : dxp) + (dyp < 0 ? -dyp : dyp);
+        o->st_ctr = -((d >> 2) + 5);
+        o->custom = 1;                  /* уязвим */
+    }
+        /* fallthrough */
+    case 3:
+        if (o->st_ctr >= 0) { o->st_misc = 0; break; }
+        {   /* cs:0x1692:0x634 — наведённый выстрел, как у типа 47 */
+            int slot = alloc_obj_slot();
+            if (slot < 0) break;
+            ai_obj_t *b = &g_obj[slot];
+            *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
+                             .x = o->x, .y = o->y, .hp = 10, .level_idx = -1,
+                             .facing = dir ? 1 : -1 };
+            obj_phys_begin(b);
+            int tx = physics_get_left_x() / 2 - obj_units(o);
+            int ty = physics_get_top_y() + 10 - o->y;
+            int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+            if (len < 1) len = 1;
+            b->vxq = ((s32)tx * QV(0, 0xC000)) / len;
+            b->vyq = ((s32)ty * QV(0, 0xC000)) / len;
+        }
+        break;
+    default: break;
+    }
 }
 
 /* ── Тип 47 — турель (handler cs:0x1692:0x0479, file 0x18599) ─────────
@@ -2934,7 +3004,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [43] = ai_type43,          /* «крестовый» летун */
     [44] = ai_type44,          /* дрейфующий летун */
     [45] = ai_type45,          /* дрейфующая искра */
-    [46] = ai_simple,
+    [46] = ai_type46,          /* ныряющая турель */
     [47] = ai_type47,          /* турель */
     [48] = ai_type48,
     [49] = ai_ryu_helper,
