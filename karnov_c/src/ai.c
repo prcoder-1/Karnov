@@ -1085,6 +1085,31 @@ static int obj_bounce_region(ai_obj_t *o)
     return bits;
 }
 
+/* ── Тип 22 — статичный страж (handler cs:0x1348:0x0C82, file 0x15902) ─
+ *
+ * Вопреки прежней реконструкции («tile-aware патруль») тип НЕ двигается:
+ * его THINK (state 2 = 0x0D1B) состоит ровно из `ai_result |= 4`, то есть
+ * только просит применить текущий кадр анимации.
+ *
+ * INIT: phase(+0xED) = init_arg и он же — номер аним-состояния
+ * (state_list = DS:0x1A78); затем вниз по колонке ищется первая строка
+ * карты с тайлом props & 1 (пол), и её пиксельный Y (row * 10) кладётся
+ * в +0xEB — объект запоминает уровень земли под собой.
+ * Смерть (state 4): очки 0x500, затем spawn_projectile из
+ * (box0.x0 + 2, box0.y0 + 0x19) и рождение ещё одного объекта. */
+static void ai_type22(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 1, (int)o->init_arg);
+        o->st_phase = (int)o->init_arg;             /* +0xED */
+        int row = level_ground_row_below(o->x, o->y / TILE_H, 0x0001);
+        o->st_aux = (row >= 0) ? row * TILE_H : o->y;   /* +0xEB — земля */
+        return;
+    }
+    /* THINK пуст — объект статичен. */
+}
+
 /* ── Тип 12 — скачущий валун (handler cs:0x11D6:0x08B3, file 0x13E13) ──
  *
  * INIT: phase(+0xED) = init_arg, misc(+0xE9) = 0, obj_type = 1, hp = 20,
@@ -2459,7 +2484,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [19] = ai_slow_helper,
     [20] = ai_head_column,     /* колонна голов LEVEL2 (multi-bbox, статична) */
     [21] = ai_multipart,            /* 7-сегментная цепь */
-    [22] = ai_simple,          /* tile-aware патруль */
+    [22] = ai_type22,          /* статичный страж */
     [23] = ai_type23,          /* летящий шар #185 */
     [24] = ai_gold_man,        /* «золотой человек» + 7 шаров */
     [25] = ai_type25,
