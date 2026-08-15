@@ -61,6 +61,7 @@ struct ai_obj;
 static bool is_damageable_obj(const struct ai_obj *o);
 static int  player_shots_alive(void);
 static void obj_snap_ground(struct ai_obj *o);
+static void arm_real_scroll(void);
 static int  obj_width(const struct ai_obj *o);
 
 /* Многосегментные враги (типы 20, 21, 30, 33, 34, 36, 39, 50, 51):
@@ -272,7 +273,7 @@ static bool is_damageable_obj(const struct ai_obj *o)
     if (obj_is_item(o)) return false;                     /* предметы: subtype 5,
                                                            * default-ветка jump-table
                                                            * cs:0xFCEC → нет урона */
-    if (o->type == 7 || o->type == 8) return false;       /* триггер / спаунер */
+    if (o->type == 7 || o->type == 8) return false;       /* свиток / спаунер */
     if (o->type == 56 || o->type == 57) return false;     /* level-end / декор */
     if (o->subtype == 5 || o->subtype == 0) return false;
     /* type 9 в LEVEL1 — декоративный дракон-платформа (hp=0, subtype=4):
@@ -1163,6 +1164,51 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
     int cat = level_tile_attr_at(o->x, o->y);
     if (cat != 2) o->alive = false;
+}
+
+/* ── Тип 7 — СВИТОК конца уровня (cs:0xFFA:0x1032, file 0x127D2) ──────
+ *
+ * Это не «невидимый триггер», как значилось в порту: INIT ставит
+ * num_bboxes = 0 (не рисуется), box0.sprite = 0x90 (#144 — тот самый
+ * свиток), hitflag = 0 и запоминает объект в [DS:0xD94F/0xD951], чтобы
+ * до него могли дотянуться извне.
+ *
+ * THINK: пока phase(+0xED) == 0 — ничего (свиток «не взведён»; взводит
+ * его гибель goal-объекта). Взведённый ждёт, пока игрок не подойдёт
+ * ближе 0x50, и тогда: play/state 9 через cs:0xE62:0x1E7(9) — то самое
+ * состояние, при котором функция урона (file 0xF81E) перестаёт бить
+ * игрока, — num_bboxes = 1 (свиток ПОЯВЛЯЕТСЯ), vy = +2.0 (падает) и
+ * подмена обработчика игрока на cs:0xE62:0x0CF6 (авто-секвенция конца
+ * уровня). Порт до этого спавнил вместо него выдуманный свиток «с неба».
+ */
+static void ai_type07(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 1, 0);
+        o->invisible   = true;          /* num_bboxes = 0 */
+        o->item_sprite = 0x90;          /* #144 — свиток */
+        o->st_phase    = 0;             /* +0xED — «взведён» */
+        return;
+    }
+    if (!o->st_phase) return;           /* boss ещё жив */
+    int dx = player_units() - obj_units(o);
+    if ((dx < 0 ? -dx : dx) >= 0x50) return;
+    if (o->invisible) {                 /* появление */
+        o->invisible = false;
+        o->is_scroll = true;
+        o->vy = 2;                      /* vy = +2.0 — падает */
+        physics_set_invuln(true);       /* player_state = 9 */
+    }
+    /* Падение до поверхности — как у падающего бонуса. */
+    if (o->custom != 1) {
+        o->y += 2;
+        int h = (o->cur_h > 0) ? o->cur_h : obj_height(o);
+        if (level_solid_at(o->x, o->y + h + 1)) {
+            o->y = ((o->y + h) / TILE_H) * TILE_H - h;
+            o->custom = 1;
+        }
+    }
 }
 
 /* ── Тип 29 — прыгающий стрелок (cs:0x1348:0x1531, file 0x161B1) ──────
@@ -3343,7 +3389,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [4]  = ai_world_item,      /* трансформирующийся предмет (мерцает) */
     [5]  = ai_falling_bonus,   /* падающий бонус */
     [6]  = ai_world_item,      /* предмет в мире (init_arg≥11 → скрыт) */
-    [7]  = ai_stub,            /* невидимый триггер */
+    [7]  = ai_type07,          /* свиток конца уровня */
     [8]  = ai_stub,            /* sky-spawner — драйвер ai_sky_tick вне объектов;
                                 * запись type 8 (range=0) не спавнится вовсе */
     [9]  = ai_walking_minion,  /* 2-bbox boss-like (L1: декор-дракон) */
@@ -3842,12 +3888,18 @@ void ai_tick(u16 frame, u8 karnov_input)
             g_boss_dead = true; g_boss_dead_frame = frame;
             g_boss_x = g_obj[i].x; g_boss_y = g_obj[i].y;
             kb_armed = false;
+            arm_real_scroll();
             fprintf(stderr, "DBG: boss убит на (%d,%d), кадр %u\n", g_boss_x, g_boss_y, frame);
             break;
         }
       } }
 
-    if (g_boss_dead && !g_scroll_picked) {
+    /* Синтетический свиток нужен лишь там, где в данных нет записи
+     * типа 7 (настоящего свитка) — иначе работает он сам. */
+    bool real_scroll = false;
+    for (int i = 0; i < g_num; ++i)
+        if (g_obj[i].alive && g_obj[i].type == 7) { real_scroll = true; break; }
+    if (g_boss_dead && !g_scroll_picked && !real_scroll) {
         bool scroll_exists = false;
         int  scroll_slot   = -1;
         for (int i = 0; i < g_num; ++i) {
@@ -3972,6 +4024,8 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
             return (u16)(185 + (anim_phase & 1));
         case TYPE_TRAP_SEGMENT:                    /* сегмент ловушки type 42 */
             return (u16)(271 + (anim_phase & 3));
+        case   7:                                  /* свиток конца уровня #144 */
+            return 0x90;
         case  23:                                  /* летящий шар: INIT ставит
                                                     * box0.sprite = 0xB9 (#185)
                                                     * и больше не меняет */
@@ -4127,7 +4181,7 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         if (g_obj[i].invisible &&
             !((g_obj[i].type == 4 || g_obj[i].type == 6) && inv_glasses_active()))
             continue;
-        if (g_obj[i].type == 7) continue;  /* невидимый триггер-«призрак» (num_bboxes=0) */
+        /* Тип 7 — свиток: до появления он невидим (флаг invisible). */
         if (g_obj[i].type == 9) continue;  /* стартовый дракон — рисуется draw_level1_dragon() */
         if (g_obj[i].type == TYPE_BOMB_BLAST) continue;  /* вспышка — поверх Karnov'а (ai_render_overlay) */
         /* Пасс 0 — только фоновые летуны; пасс 1 — все остальные поверх. */
@@ -4380,6 +4434,14 @@ static void award_score(u16 type)
     g_score += bcd_to_dec(bcd);
 }
 
+/* Взвести настоящий свиток (тип 7): в оригинале его phase(+0xED)
+ * поднимает гибель goal-объекта, после чего свиток ждёт подхода игрока. */
+static void arm_real_scroll(void)
+{
+    for (int k = 0; k < g_num; ++k)
+        if (g_obj[k].alive && g_obj[k].type == 7) g_obj[k].st_phase = 1;
+}
+
 void ai_notify_enemy_hit(int slot, u16 frame)
 {
     if (slot < 0 || slot >= g_num) return;
@@ -4427,6 +4489,7 @@ void ai_notify_enemy_hit(int slot, u16 frame)
         g_boss_dead_frame = frame;
         g_boss_x          = o->x;
         g_boss_y          = o->y;
+        arm_real_scroll();
     }
 }
 
@@ -4447,6 +4510,7 @@ void ai_clear_enemies(bool exclude_boss)
             g_boss_dead_frame = 0;
             g_boss_x          = o->x;
             g_boss_y          = o->y;
+            arm_real_scroll();
         }
     }
     audio_play_sfx(1);   /* enemy-kill sfx */
