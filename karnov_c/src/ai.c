@@ -1093,6 +1093,62 @@ static int obj_bounce_region(ai_obj_t *o)
     return bits;
 }
 
+/* ── Тип 42 — периодическая ловушка (cs:0x161F:0x029F, file 0x17C8F) ───
+ *
+ * INIT: tick_period = 3, подфаза (+0xE9) = 0, счётчик (+0xEB) =
+ * init_arg * 10, при phase(+0xED) != 0 объект поднимается на 20 px,
+ * num_bboxes = 1, state_list = DS:0x1CF2.
+ * THINK: подфазы 0/1 — покой: аним-состояние = phase, кадр 0, счётчик
+ * уменьшается на tick_period за тик; когда он вышел в ноль (или раньше
+ * с шансом 1/128) — подфаза 2. Подфазы 2/3 — срабатывание: аним
+ * phase + 2, и на ПОСЛЕДНЕМ кадре анимации вызывается cs:0x161F:0x00FC,
+ * после чего счётчик = 500 и возврат в покой.
+ *
+ * НЕ ПЕРЕНЕСЕНО: сам cs:0x161F:0x00FC — он рождает ВЕРТИКАЛЬНЫЙ ряд из
+ * 5 объектов (x + 12 ед., y + (i − 2) * 18) с обработчиком
+ * cs:0x161F:0x020A (obj_type = 3, hp = 100, hitflag = 1). Этот дочерний
+ * обработчик пока не декомпилирован, и выдумывать его поведение я не
+ * стал — ловушка тикает и анимируется, но пока не выпускает «детей». */
+static void ai_type42(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, 0);
+        o->st_misc = 0;                          /* +0xE9 */
+        o->st_aux  = (int)o->init_arg * 10;      /* +0xEB */
+        if (o->st_phase != 0) o->y -= 20;
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = o->st_phase;
+        o->frame_index = 0;
+        /* fallthrough */
+    case 1:
+        o->st_aux -= o->tick_period;
+        if (o->st_aux > 0 && (rng_next() & 0x7F)) break;
+        o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = o->st_phase + 2;
+        o->frame_index = 0;
+        /* fallthrough */
+    case 3: {
+        const anim_list_t *al = (o->type < 58) ? &ANIM_LISTS[o->type] : NULL;
+        int n = (al && al->count && o->anim_state < al->count)
+                    ? al->states[o->anim_state].n : 1;
+        if (o->frame_index != n - 1) break;
+        /* здесь оригинал зовёт cs:0x161F:0x00FC (см. комментарий выше) */
+        o->st_aux  = 0x1F4;                      /* 500 */
+        o->st_misc = 0;
+        break;
+    }
+    default: break;
+    }
+}
+
 /* ── Тип 38 — босс LEVEL3 «динозавр» (cs:0x151A:0x0EC7, file 0x17867) ──
  *
  * INIT: tick_period = 7, подфаза (+0xE9) = 0, phase(+0xED) = СНИМОК
@@ -2718,20 +2774,6 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
 }
 
 
-/* Type 42 — частица/искра (ai_type42, UNIQUE 3-state): короткоживущий
- * объект; behavior_phase = init_arg & 1 (если 1 — y −= 20); живёт
- * ~init_arg*10 тиков. */
-static void ai_particle42(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    if (o->custom == 0) {
-        o->custom = (int)(o->init_arg * 10);
-        if (o->custom < 30) o->custom = 30;
-        if (o->init_arg & 1) o->y -= 20;
-    }
-    o->anim_phase = (frame >> 2) & 7;
-    if (--o->custom <= 1) o->alive = false;
-}
 
 /* Type 47 — Y-snap + PRNG (ai_type47): очень медленный (sub_timer_max=10),
  * случайные вертикальные подскоки. */
@@ -2836,7 +2878,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [39] = ai_multipart,
     [40] = ai_type40,          /* босс LEVEL4 */
     [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
-    [42] = ai_particle42,
+    [42] = ai_type42,          /* периодическая ловушка */
     [43] = ai_type43,          /* «крестовый» летун */
     [44] = ai_type44,          /* дрейфующий летун */
     [45] = ai_type45,          /* дрейфующая искра */
