@@ -170,7 +170,10 @@ static bool g_boss_dead = false;
 static u16  g_boss_dead_frame = 0;
 static bool g_scroll_picked = false;
 static int  g_boss_x = 0;   /* X boss'а на момент смерти — фикс. точка падения свитка */
-static int  g_boss_y = 0;   /* Y boss'а на момент смерти — с этой высоты падает свиток */
+static int  g_boss_y = 0;
+/* Левый край камеры — сохраняется каждый кадр из ai_check_triggers;
+ * нужен типам, которые живут «пока видны» (23). */
+static int  g_camera_left = 0;   /* Y boss'а на момент смерти — с этой высоты падает свиток */
 
 /* Sky-spawner (драйвер file 0x12DB5) — работает ВНЕ объектной системы.
  * Запись type 8 cur=(0,0) range=(0,0) в BIN никогда не спавнится сама
@@ -1031,6 +1034,96 @@ static void ai_type10(ai_obj_t *o, u16 frame, u8 in)
     if ((o->st_ctr & 0xF) == 0) o->ayq = -o->ayq;
 }
 
+/* ── Тип 23 — летящий шар (handler cs:0x11D6:0x0008, file 0x13508) ────
+ *
+ * INIT: tick_period = 2, box0.hitflag = 1, box0.sprite = 0xB9 (#185),
+ * vx = ±3.0 ед./кадр (= 6 px) в сторону игрока, phase(+0xED) = 0.
+ * THINK: пока шар НЕ побывал в кадре (phase 0) — ждём попадания в окно
+ * камеры (хелпер cs:0x6E:0x7A5 по box0), тогда phase = 1; после этого,
+ * как только он выходит за окно — ai_result |= 1, объект удаляется.
+ * Никакой коллизии с тайлами и наведения у типа НЕТ (в порту были). */
+static void ai_type23(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    /* Аним-машина не используется: INIT пишет box0.sprite напрямую и
+     * state_list не ставит, поэтому кадр статичен (#185). */
+    if (o->custom == 0) {
+        int si = (player_units() > obj_units(o));
+        o->custom = 1;
+        obj_phys_begin(o);
+        o->vxq = si ? QV(3, 0) : -QV(3, 0);
+        o->st_phase = 0;
+        o->facing = si ? 1 : -1;
+        return;
+    }
+    bool on = (o->x + 16 > g_camera_left) && (o->x < g_camera_left + VIEW_W);
+    if (o->st_phase) { if (!on) o->alive = false; }
+    else             { if (on)  o->st_phase = 1; }
+}
+
+/* ── Тип 14 — ныряющая птица (handler cs:0x11D6:0x0E0A, file 0x13D6A) ──
+ *
+ * Преамбула каждого тика: dy = (player_y + h_p) − (self.y + h_s);
+ * если |dx| > 30, направление si = (игрок правее), иначе берётся
+ * сохранённое в +0xEB.
+ * INIT: state_list = DS:0x1958, подфаза (+0xE9) = 2, +0xEB = si,
+ * vx = ±1.0, vy = +2.0, y_world = player_y − 20, аним-состояние = si.
+ * THINK — две дуги (parabola) через ускорение ±0.25 за тик:
+ *   0/1 — «дуга вверх»: vy += −0.25 каждый тик; когда dy >= 40 (птица
+ *         высоко над игроком) → подфаза 2, vx = ±1.0, vy = −2.0;
+ *   2   — «дуга вниз»: пока dy >= 5 — vy += +0.25; когда dy < 5 (дошла
+ *         до уровня игрока) — ВЫСТРЕЛ по горизонтали из (x, y+20) со
+ *         скоростью 2.125, затем vy = +2.0, подфаза 0, аним si+2.
+ * Аним: 0/1 — полёт влево/вправо (#149/#151), 2/3 — после выстрела
+ * (#150/#152). Очки за смерть 0x2600. */
+static void ai_type14(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    int dx = player_units() - obj_units(o);
+    int adx = dx < 0 ? -dx : dx;
+    int si  = (adx > 30) ? (dx > 0) : o->st_aux;      /* +0xEB */
+    int dy  = physics_get_top_y() - o->y;
+
+    if (!o->use_anim) {
+        o->y = physics_get_top_y() - 20;
+        anim_begin(o, 1, si);
+        obj_phys_begin(o);
+        o->st_misc = 2;                    /* +0xE9 — дуга вниз */
+        o->st_aux  = si;                   /* +0xEB — направление */
+        o->vxq = si ? Q_1_0 : -Q_1_0;
+        o->vyq = Q_2_0;
+        return;
+    }
+
+    switch (o->st_misc) {
+    case 0:
+        o->pending_state = o->st_aux;
+        /* fallthrough */
+    case 1:
+        if (dy >= 0x28) {
+            o->st_misc = 2;
+            o->vxq = o->st_aux ? Q_1_0 : -Q_1_0;
+            o->vyq = -Q_2_0;
+        }
+        o->vyq -= QV(0, 0x4000);           /* −0.25 за тик */
+        break;
+    case 2:
+        if (dy < 5) {
+            o->st_aux = si;
+            o->vxq = o->st_aux ? Q_1_0 : -Q_1_0;
+            o->vyq = Q_2_0;
+            o->st_misc = 0;
+            o->pending_state = o->st_aux + 2;
+            /* Горизонтальный снаряд из (x, y+20), скорость 2.125. */
+            spawn_enemy_shot(o->x, o->y + 20, o->st_aux, QV(2, 0x2000), 1);
+        } else {
+            o->vyq += QV(0, 0x4000);       /* +0.25 за тик */
+        }
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 18 — ныряющий чёрт (handler cs:0xFFA:0x127D, file 0x12A1D) ────
  *
  * INIT: si = (игрок правее), aux(+0xEF) = 0, phase(+0xED) = init_arg,
@@ -1647,23 +1740,6 @@ static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 3) & 1;
 }
 
-/* Type 23 — самонаводящийся снаряд (ai_type23, file 0x14C87): при init
- * vx = ±3 file (=±6 мир) в сторону игрока, sprite 0xB9 (185), прямой
- * полёт до столкновения с тайлом. */
-static void ai_homing_shot(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    if (o->custom == 0) {
-        int kx = physics_get_left_x();
-        o->facing = (kx >= o->x) ? 1 : -1;
-        o->custom = 1;
-    }
-    o->anim_phase = (frame >> 1) & 1;
-    o->x += 6 * o->facing;
-    if (level_solid_at(o->x, o->y + (o->cur_h > 0 ? o->cur_h / 2 : 4))) { o->alive = false; return; }
-    int world_w = (int)level_num_map_cols * TILE_W;
-    if (o->x < -16 || o->x > world_w + 16) o->alive = false;
-}
 
 /* ─── Тип 24 — «ЗОЛОТОЙ ЧЕЛОВЕК» и его шары ────────────────────────────
  *
@@ -2122,7 +2198,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [11] = ai_type11,
     [12] = ai_simple,          /* наземный патруль (HP=20) */
     [13] = ai_type13,   /* Y-snap метатель */
-    [14] = ai_flying_bird,     /* летун / Селёдка-босс */
+    [14] = ai_type14,          /* ныряющая птица (босс L1) */
     [15] = ai_stone_golem,
     [16] = ai_type16,
     [17] = ai_type17,   /* скелет на страусе */
@@ -2131,7 +2207,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [20] = ai_head_column,     /* колонна голов LEVEL2 (multi-bbox, статична) */
     [21] = ai_multipart,            /* 7-сегментная цепь */
     [22] = ai_simple,          /* tile-aware патруль */
-    [23] = ai_homing_shot,     /* самонаводящийся шар */
+    [23] = ai_type23,          /* летящий шар #185 */
     [24] = ai_gold_man,        /* «золотой человек» + 7 шаров */
     [25] = ai_type25,
     [26] = ai_type26,          /* прыгающий воин */
@@ -2385,6 +2461,7 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
         fprintf(spawn_log(), "P %u %d %d %d\n",
                 frame, player_x_px, player_y_px, camera_left_px);
 
+    g_camera_left = camera_left_px;
     int px   = player_x_px / 2;     /* X движка — в 2px-единицах */
     int py   = player_y_px;
     int left = camera_left_px / 2;
@@ -2687,6 +2764,10 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
     switch (type) {
         case TYPE_GOLD_BALL:                       /* шар «золотого человека» */
             return (u16)(185 + (anim_phase & 1));
+        case  23:                                  /* летящий шар: INIT ставит
+                                                    * box0.sprite = 0xB9 (#185)
+                                                    * и больше не меняет */
+            return 185;
         case   5: {                                /* падающий бонус — option icon */
             /* User-verified 2026-05-29 (project_inventory_items.md):
              *   #39 ladder, #40 boots, #41 bomb, #42 fireballs(30),
