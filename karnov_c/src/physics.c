@@ -583,9 +583,20 @@ void physics_tick(u8 input)
                 int half_w = ks ? (int)ks->art_w / 2 : 8;
                 int body_h = ks ? (int)ks->h : 26;
                 int lead_x = probe_x + (step > 0 ? +half_w : -half_w);
-                bool blocked =
-                    level_tile_blocks(lead_x, s_y - KARNOV_FEET_PROBE_UP, KARNOV_MASK_FEET) ||
-                    level_tile_blocks(lead_x, s_y - body_h,               KARNOV_MASK_HEAD);
+                bool feet_hit =
+                    level_tile_blocks(lead_x, s_y - KARNOV_FEET_PROBE_UP, KARNOV_MASK_FEET);
+                /* НИЖНЯЯ СТУПЕНЬКА ПРОХОДИМА (user-req 2026-08-15): если
+                 * препятствие у ног высотой ровно в одну строку тайлов —
+                 * т.е. строкой выше свободно, — Карнов проходит сквозь неё.
+                 * Так он входит в основание лестницы-пирамиды LEVEL1, а не
+                 * упирается в невидимую стену за 48 px до неё; ступени в
+                 * две строки и выше по-прежнему останавливают. */
+                if (feet_hit &&
+                    !level_tile_blocks(lead_x, s_y - KARNOV_FEET_PROBE_UP - TILE_H,
+                                       KARNOV_MASK_FEET))
+                    feet_hit = false;
+                bool blocked = feet_hit ||
+                    level_tile_blocks(lead_x, s_y - body_h, KARNOV_MASK_HEAD);
                 if (blocked) break;
                 s_x = probe_x;
             }
