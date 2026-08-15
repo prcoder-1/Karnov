@@ -4551,6 +4551,27 @@ void ai_notify_enemy_hit(int slot, u16 frame)
         o->puff_frames = 8;
         return;
     }
+    /* Тип 22 в состоянии 4 (file 0x15902, 0x0D24) не просто гибнет:
+     * помимо очков он выпускает НАВЕДЁННЫЙ снаряд из своей верхней
+     * кромки (box0.x0 + 2, box0.y0 + 0x19) в точку (player.x,
+     * player.y + 10) со скоростью 8.0 и рождает ещё один объект. */
+    if (o->type == 22) {
+        int slot = alloc_obj_slot();
+        if (slot >= 0) {
+            ai_obj_t *b = &g_obj[slot];
+            *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
+                             .x = o->x + 4, .y = o->y + 0x19, .hp = 10,
+                             .level_idx = -1,
+                             .facing = (player_units() > obj_units(o)) ? 1 : -1 };
+            obj_phys_begin(b);
+            int tx = player_units() - obj_units(o);
+            int ty = physics_get_top_y() + 10 - o->y;
+            int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+            if (len < 1) len = 1;
+            b->vxq = ((s32)tx * QV(8, 0)) / len;
+            b->vyq = ((s32)ty * QV(8, 0)) / len;
+        }
+    }
     /* Состояние 4 у части типов не убивает объект: тип 54 переходит в
      * obj_type = 9, box0.hitflag = 0 и аним-состояние 2, то есть
      * остаётся на карте неуязвимой декорацией (file 0x1953B, 0x030B). */
