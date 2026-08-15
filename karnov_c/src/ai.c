@@ -1124,6 +1124,87 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     if (cat != 2) o->alive = false;
 }
 
+/* ── Тип 29 — прыгающий стрелок (cs:0x1348:0x1531, file 0x161B1) ──────
+ *
+ * INIT: tick_period = 8, подфаза (+0xE9) = 0, state_list = DS:0x1AF0,
+ * постановка на землю со спрайтом 0xD3 (#211).
+ * Подфазы:
+ *   0/1 — дремлет (аним 0), пока расстояние до игрока не меньше 0x32;
+ *   2/3 — прыжок: аним 1, vx = +1.0, vy = −2.5, ay = +0.129 (0x2100);
+ *         ждём, пока vy не станет положительной, и смотрим тайл под
+ *         ногами — по его категории идёт разбор посадки;
+ *   4/5 — приземлился: аним 2 и НАВЕДЁННЫЙ выстрел в игрока со
+ *         скоростью 2.0, затем подфаза 6;
+ *   6/7 — снова подскок: аним 3, vy = −2.5. */
+static void ai_type29(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 8, 0);
+        obj_phys_begin(o);
+        o->st_misc = 0;
+        obj_snap_ground(o);
+        return;
+    }
+    int dxp = player_units() - obj_units(o);
+    int dyp = physics_get_top_y() - o->y;
+    int d = (dxp < 0 ? -dxp : dxp) + (dyp < 0 ? -dyp : dyp);
+
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        /* fallthrough */
+    case 1:
+        if (d < 0x32) o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = 1;
+        o->vxq = Q_1_0;
+        o->vyq = (s32)0xFFFD8000;            /* −2.5 */
+        o->ayq = QV(0, 0x2100);
+        /* fallthrough */
+    case 3:
+        if (o->vyq <= 0) break;
+        if (level_tile_attr_at(o->x, o->y + obj_height(o)) == 2) break;
+        o->st_misc = 4;
+        break;
+    case 4:
+        o->pending_state = 2;
+        o->vyq = 0; o->ayq = 0;
+        obj_snap_ground(o);
+        {   /* наведённый снаряд со скоростью 2.0 */
+            int slot = alloc_obj_slot();
+            if (slot >= 0) {
+                ai_obj_t *b = &g_obj[slot];
+                *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                 .subtype = 3, .x = o->x, .y = o->y, .hp = 10,
+                                 .level_idx = -1, .facing = (dxp > 0) ? 1 : -1 };
+                obj_phys_begin(b);
+                int tx = player_units() - obj_units(o);
+                int ty = physics_get_top_y() - o->y;
+                int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+                if (len < 1) len = 1;
+                b->vxq = ((s32)tx * Q_2_0) / len;
+                b->vyq = ((s32)ty * Q_2_0) / len;
+            }
+        }
+        o->st_misc = 6;
+        break;
+    case 6:
+        o->pending_state = 3;
+        o->vyq = (s32)0xFFFD8000;            /* снова подскок */
+        o->ayq = QV(0, 0x2100);
+        /* fallthrough */
+    case 7:
+        if (o->vyq > 0 &&
+            level_tile_attr_at(o->x, o->y + obj_height(o)) != 2) o->st_misc = 4;
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 52 — «пробуждающийся» блок (cs:0x175E:0x0203, file 0x18FE3) ──
  *
  * INIT: подфаза (+0xE9) = 0, tick_period = 3, y_world выравнивается по
@@ -2690,67 +2771,6 @@ static const simple_ai_t SIMPLE_AI[58] = {
     [55] = { 322, 7, 2, 2, SK_CHASER },   /* хелпер финального босса 0x142 */
 };
 
-/* Generic chaser/patrol/flyer. */
-static void ai_simple(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    const simple_ai_t *s = &SIMPLE_AI[o->type <= 57 ? o->type : 0];
-    if (s->nframes == 0) return;
-
-    /* Type 38 — delayed appearance: invisible первые 75 кадров
-     * (INIT: flag_2E=0, state_ext=75). */
-    if (o->type == 38) {
-        u16 age = (u16)(frame - o->spawn_frame);
-        o->invisible = (age < 75);
-        if (o->invisible) return;
-    }
-
-    o->anim_phase = (u16)((frame >> s->shift) % s->nframes);
-
-    u8 kind = s->kind;
-    /* Type 35 — dual-mode: init_arg > 10 → агрессивный chaser
-     * (ai_type35: behavior_phase = sub_timer_start > 10). */
-    if (o->type == 35 && o->init_arg > 10) kind = SK_CHASER;
-
-    int kx = physics_get_left_x();
-    int dx = kx - o->x;
-    int abs_dx = dx < 0 ? -dx : dx;
-
-    switch (kind) {
-    case SK_CHASER:
-        o->facing = (dx >= 0) ? 1 : -1;
-        if (abs_dx > 10) o->x += s->speed * o->facing;
-        break;
-    case SK_PATROL: {
-        /* Патруль home ± range_x; type 22 — tile-aware: разворот на краю
-         * платформы (проверка тайла под ногами впереди). */
-        if (o->custom == 0) o->custom = (o->facing < 0) ? -1 : 1;
-        int nx = o->x + s->speed * o->custom;
-        bool turn = false;
-        if (o->half_range_x > 0 &&
-            (nx < o->home_x - o->half_range_x || nx > o->home_x + o->half_range_x))
-            turn = true;
-        if (o->type == 22 && !level_solid_at(nx + 4 * o->custom, obj_feet(o) + 1))
-            turn = true;
-        if (turn) o->custom = -o->custom;
-        else      o->x = nx;
-        o->facing = o->custom;
-        break;
-    }
-    case SK_FLYER:
-        o->facing = (dx >= 0) ? 1 : -1;
-        o->x += s->speed * o->facing;
-        if ((frame & 3) == 0) {
-            int ky = physics_get_top_y();
-            int feet = obj_feet(o);
-            if (ky < feet - 2)      o->y -= 1;
-            else if (ky > feet + 2) o->y += 1;
-        }
-        break;
-    default:
-        break;
-    }
-}
 
 /* ─── Sky-spawner (тип 8) ──────────────────────────────────────────────
  * Драйвер cs:0xFFA:0x1615 (file 0x12DB5), работает ВНЕ объектной системы:
@@ -3293,7 +3313,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [26] = ai_type26,          /* прыгающий воин */
     [27] = ai_type27,
     [28] = ai_type28,
-    [29] = ai_simple,          /* multi-phase хелпер */
+    [29] = ai_type29,          /* прыгающий стрелок */
     [30] = ai_grow_chain,
     [31] = ai_type31,          /* лев */
     [32] = ai_type32,          /* босс LEVEL2 */
