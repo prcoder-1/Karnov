@@ -30,6 +30,10 @@ int  sprite_cache_count(void);
 const sprite_t *sprite_find(u16 id);   /* NULL если не найден */
 bool sprite_is_cga(void);
 
+/* true, если спрайт b — точное горизонтальное зеркало a. Оба разворота
+ * врага в архиве хранятся отдельными спрайтами, движок арт не отражает. */
+bool sprite_is_mirror(u16 a, u16 b);
+
 /* Манифест из директории архива: спрайты AI-типа ai_type — непрерывный
  * диапазон id (base..base+count-1). false = типа нет в кэше / кэш v3. */
 bool sprite_manifest(u16 ai_type, u16 *base, u16 *count);

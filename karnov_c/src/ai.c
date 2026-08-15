@@ -40,6 +40,9 @@
                                       /* анимированная вспышка Bomb-предмета
                                        * (#25→#26→#27→#28, ~50 кадров). */
 #define TYPE_ENEMY_SHOT        1006  /* снаряд врага (порт cs:0x11D6:0x2A3) */
+#define TYPE_GOLD_BALL         1007  /* шар «золотого человека» (type 24):
+                                      * ребёнок cs:0x1348:0x00D7, спрайты
+                                      * #185/#186, hp 10, очки 0x500. */
 
 /* Sprite IDs для player-fireball — мелкие круглые «шарики» (7x7).
  * #0x0A/#0x0B — маленькие round energy-ball'ы (4-кадровый набор 0x0A-0x0D).
@@ -166,6 +169,7 @@ static bool g_boss_dead = false;
 static u16  g_boss_dead_frame = 0;
 static bool g_scroll_picked = false;
 static int  g_boss_x = 0;   /* X boss'а на момент смерти — фикс. точка падения свитка */
+static int  g_boss_y = 0;   /* Y boss'а на момент смерти — с этой высоты падает свиток */
 
 /* Sky-spawner (драйвер file 0x12DB5) — работает ВНЕ объектной системы.
  * Запись type 8 cur=(0,0) range=(0,0) в BIN никогда не спавнится сама
@@ -211,6 +215,16 @@ static bool is_damageable_obj(const struct ai_obj *o)
         case TYPE_ROCK_PROJECTILE:
         case TYPE_FLYING_BIRD:
             return true;
+        case TYPE_GOLD_BALL:
+            /* Флаг коллизии bbox (+0x2E) шар ставит только на разлёте:
+             * висящий и возвращающийся шар неуязвим (file 0x14E93). */
+            return o->st_phase < 2;
+        default: break;
+    }
+    /* «Золотой человек» уязвим только собранным (флаг +0x2E ставится
+     * при входе в фазу 6, снимается в остальных — file 0x1508D). */
+    if (o->type == 24) return o->custom != 0;
+    switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
             return false;
@@ -706,14 +720,14 @@ static void ai_falling_bonus(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->y = (feet / 10) * 10 - h;   /* ноги на верхнюю кромку строки */
         o->custom = 1;
     }
-    /* Страховка от проваливания сквозь карту: пол уровня из скана карты
-     * (level_compute_ground_y через physics_get_ground_y). Прежний вариант
-     * «feet >= 300 → y = 290 − h» был захардкожен под LEVEL1 и, работая по
-     * УЖЕ устаревшему feet, перекрывал корректное приземление на тайл:
-     * на уровнях с полом ниже 300 (L3 390, L7 450, L9 580) предметы
-     * зависали в воздухе и становились недосягаемы. */
-    else if (o->y + h >= physics_get_ground_y()) {
-        o->y = physics_get_ground_y() - h;
+    /* Страховка ТОЛЬКО от вылета за нижний край карты. Раньше здесь
+     * стояло «feet >= physics_get_ground_y() → положить на этот пол», и на
+     * многоярусных уровнях предмет, летящий мимо площадок, ПОДТЯГИВАЛСЯ
+     * ВВЕРХ к расчётному «основному» полу: на LEVEL4 это y=373, выше
+     * Карнова (его ноги на 480), из-за чего свиток за боссом-«гусеницей»
+     * оказывался недосягаем и уровень нельзя было закончить. */
+    else if (o->y + h >= (int)level_num_map_rows * TILE_H) {
+        o->y = (int)level_num_map_rows * TILE_H - h;
         o->custom = 1;
     }
 }
@@ -1423,35 +1437,184 @@ static void ai_homing_shot(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (o->x < -16 || o->x > world_w + 16) o->alive = false;
 }
 
-/* Type 24 — спаунер стаи (ai_type24, file 0x15029): INIT рождает РОВНО 7
- * детей (spawn_child cs:0x1348:0xF57) в формации; спрайты 0xBB/0xBC. */
-static void ai_flock_spawner(ai_obj_t *o, u16 frame, u8 karnov_input)
+/* ─── Тип 24 — «ЗОЛОТОЙ ЧЕЛОВЕК» и его шары ────────────────────────────
+ *
+ * Декомпилировано целиком (2026-08-15): человек — handler cs:0x1348:0x3A9
+ * (file 0x15029), шар — cs:0x1348:0x0D7 (file 0x14D57), спавн ребёнка —
+ * cs:0x1348:0x2D7 (file 0x14F57), таблица смещений — DS:0x19F4.
+ *
+ * Это НЕ «спаунер стаи»: объект живёт бесконечным циклом
+ *   человек (#187 ↔ #188, жёлтый/белый — мерцание) 38 тиков
+ *     → рассыпается на 7 шаров (#185/#186), на его месте остаётся
+ *       КОЛЬЦО из точек (спрайт #6, аним-состояние 0)
+ *     → шары за 10 тиков разлетаются в полукруг радиусом 50 ед.
+ *       (DS:0x19F4 — 7 точек через 30°), висят 15 тиков,
+ *       за 10 тиков слетаются обратно в центр и гаснут
+ *     → пока шаров нет — человек собирается снова.
+ * Между рассыпанием и сбором кольцо ещё и ИДЁТ к игроку (±2.0 ед./кадр,
+ * 15 тиков), останавливаясь на краю площадки (тайл категории 2 под ним).
+ *
+ * Прежняя реализация («спаунер 7 зелёных орлов, слот сразу освобождается»)
+ * была выдумкой: отсюда жалоба «появляется и мгновенно рассыпается». */
+
+/* Живых шаров — глобальный счётчик [DS:0xD97C]: человек ждёт, пока он
+ * обнулится, и только тогда собирается. */
+static int g_gold_balls = 0;
+
+/* DS:0x19F4 — 7 точек полукруга R=50 (dx в единицах движка, dy в строках). */
+static const s16 GOLD_RING[7][2] = {
+    { -50,   0 }, { -43, -25 }, { -25, -43 }, { 0, -50 },
+    {  25, -43 }, {  43, -25 }, {  50,   0 },
+};
+
+/* Центр человека: x + width(#187)/2, y + height(#187)/2 — оригинал берёт
+ * полуметрики спрайта 0xBB из таблиц DS:0x0D08/0x0FAC. */
+static void gold_man_center(const ai_obj_t *m, int *cx, int *cy)
+{
+    const sprite_t *s = sprite_find(187);
+    *cx = m->x + (s ? (int)s->art_w / 2 : 16);
+    *cy = m->y + (s ? (int)s->h    / 2 : 17);
+}
+
+/* Скорость «долететь из (x0,y0) в (x1,y1) ровно за n тиков» — порт
+ * cs:0x11D6:0x00DD: vx = (x1−x0)/n, vy = (y1−y0)/n в Q16.16. */
+static void obj_aim(ai_obj_t *o, int from_x, int from_y, int to_x, int to_y, int n)
+{
+    o->vxq = (((s32)(to_x / 2 - from_x / 2)) << 16) / n;
+    o->vyq = (((s32)(to_y - from_y)) << 16) / n;
+}
+
+static void gold_spawn_ball(int man_slot, int idx, int kind, u16 frame)
+{
+    int slot = alloc_obj_slot();
+    if (slot < 0) return;
+    ai_obj_t *m = &g_obj[man_slot];
+    int cx, cy;
+    gold_man_center(m, &cx, &cy);
+    ai_obj_t *b = &g_obj[slot];
+    *b = (ai_obj_t){
+        .alive = true, .type = TYPE_GOLD_BALL, .subtype = 1, .hp = 10,
+        .level_idx = -1, .facing = 1, .spawn_frame = frame,
+        .x = cx, .y = cy,
+        .custom = idx,          /* номер точки на окружности (+0xED) */
+        .st_phase = kind,       /* стартовая фаза (+0xE9): 4 = сразу сбор */
+        .st_aux = man_slot,     /* родитель (+0xF1) */
+    };
+    if (kind == 4) {            /* kind 4 — сразу в точке круга */
+        b->x += GOLD_RING[idx][0] * 2;
+        b->y += GOLD_RING[idx][1];
+    }
+    obj_phys_begin(b);
+    ++g_gold_balls;             /* ++[0xD97C] в INIT ребёнка */
+}
+
+static void ai_gold_ball(ai_obj_t *o, u16 frame, u8 karnov_input)
+{
+    (void)frame; (void)karnov_input;
+    ai_obj_t *p = (o->st_aux >= 0 && o->st_aux < g_num) ? &g_obj[o->st_aux] : NULL;
+    if (!p || !p->alive || p->type != 24) {      /* человека убили — гаснем */
+        o->alive = false; if (g_gold_balls > 0) --g_gold_balls;
+        return;
+    }
+    obj_integrate(o);
+    o->anim_phase ^= 1;                          /* #185 ↔ #186 каждый кадр */
+
+    ++o->st_misc;                                /* +0xEB */
+    int si = o->st_phase;                        /* +0xE9 */
+    o->st_phase |= 1;                            /* чётная фаза — одноразовый вход */
+    if (!(si & 1)) o->st_misc = 0;
+
+    int cx, cy;
+    gold_man_center(p, &cx, &cy);
+    switch (si) {
+    case 0:                                      /* разлёт к своей точке круга */
+        obj_aim(o, o->x, o->y,
+                cx + GOLD_RING[o->custom][0] * 2, cy + GOLD_RING[o->custom][1], 10);
+        o->invisible = false;
+        /* fallthrough — оригинал проваливается в проверку фазы 1 */
+    case 1:
+        if (o->st_misc >= 10) o->st_phase = 2;
+        break;
+    case 2:                                      /* set_motion(0) + спрятаться */
+        o->vxq = o->vyq = 0;
+        o->invisible = true;
+        /* fallthrough */
+    case 3:
+        if (o->st_misc >= 15) o->st_phase = 4;
+        break;
+    case 4:                                      /* сбор обратно в человека */
+        obj_aim(o, o->x, o->y, cx, cy, 10);
+        o->invisible = false;
+        /* fallthrough */
+    case 5:
+        if (o->st_misc >= 10) {                  /* state 6: --[0xD97C], удалить */
+            o->alive = false;
+            if (g_gold_balls > 0) --g_gold_balls;
+        }
+        break;
+    default: break;
+    }
+}
+
+static void ai_gold_man(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
-    if (o->custom == 0) {
-        o->custom = 1;
-        o->invisible = true;
-        for (int i = 0; i < 7; ++i) {
-            int slot = alloc_obj_slot();
-            if (slot < 0) break;
-            g_obj[slot] = (ai_obj_t){
-                .alive       = true,
-                .type        = TYPE_FLYING_BIRD,
-                .subtype     = 1,
-                .x           = o->x + i * 14,
-                .y           = o->y - (i % 3) * 8,
-                .facing      = -1,
-                .hp          = 10,
-                .level_idx   = -1,
-                .home_x      = o->x + i * 14,
-                .home_y      = o->y - (i % 3) * 8,
-                .custom      = i & 1,
-                .spawn_frame = frame,
-            };
-        }
+    int slot = (int)(o - g_obj);
+    if (!o->use_anim) {                          /* state 1 — INIT */
+        anim_begin(o, 1, 0);                     /* +0xC9 не задан → 1 кадр/тик */
+        obj_phys_begin(o);
+        g_gold_balls = 0;                        /* [0xD97C] = 0 */
+        for (int i = 0; i < 7; ++i) gold_spawn_ball(slot, i, 4, frame);
+        o->st_misc  = 4;                         /* +0xE9 = 4: ждать сбора шаров */
+        o->st_aux   = 0;                         /* +0xEB */
+        o->hp       = 0x5A;                      /* 90 */
+        return;
     }
-    /* Спаунер отработал — освобождаем слот (одноразовый). */
-    o->alive = false;
+
+    ++o->st_aux;                                 /* +0xEB — тики в фазе */
+    int si = o->st_misc;                         /* +0xE9 — фаза */
+    o->st_misc |= 1;
+    if (!(si & 1)) {
+        o->st_aux = 0;
+        /* +0x2E — флаг КОЛЛИЗИИ bbox (не видимости): человек уязвим
+         * только собранным. Кольцо и разлёт неуязвимы. */
+        o->custom = (si == 6);
+    }
+    switch (si) {
+    case 0:
+        o->pending_state = 0;                    /* кольцо из точек (#6) */
+        /* fallthrough */
+    case 1:
+        if (o->st_aux >= 10) o->st_misc = 2;
+        break;
+    case 2:                                      /* идти к игроку ±2.0 ед./кадр */
+        o->vxq = (player_units() > obj_units(o)) ? Q_2_0 : -Q_2_0;
+        /* fallthrough */
+    case 3:
+        if (o->st_aux >= 15) o->st_misc = 4;
+        /* Край площадки: тайл под нижней кромкой категории 2 → стоп. */
+        if (level_tile_attr_at(o->x, o->y + obj_height(o) + 2) == 2)
+            o->vxq = 0;
+        break;
+    case 4:
+        o->vxq = o->vyq = 0;                     /* set_motion(0) */
+        /* fallthrough */
+    case 5:
+        if (g_gold_balls == 0 && o->st_aux > 2) o->st_misc = 6;
+        break;
+    case 6:
+        o->pending_state = 1;                    /* сам человек: #187 ↔ #188 */
+        /* fallthrough */
+    case 7:
+        if (o->st_aux >= 38) {                   /* пожил собранным — снова врозь */
+            o->custom = 0;
+            o->hp = 0x5A;
+            for (int i = 0; i < 7; ++i) gold_spawn_ball(slot, i, 0, frame);
+            o->st_misc = 0;
+        }
+        break;
+    default: break;
+    }
 }
 
 /* ─── Многосегментные объекты (типы 21/33/34/39/50) ────────────────────
@@ -1740,7 +1903,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [21] = ai_multipart,            /* 7-сегментная цепь */
     [22] = ai_simple,          /* tile-aware патруль */
     [23] = ai_homing_shot,     /* самонаводящийся шар */
-    [24] = ai_flock_spawner,   /* стая из 7 */
+    [24] = ai_gold_man,        /* «золотой человек» + 7 шаров */
     [25] = ai_type25,
     [26] = ai_simple,          /* быстрый воин */
     [27] = ai_type27,
@@ -1789,6 +1952,7 @@ static ai_handler_fn pick_handler(u16 type)
         case TYPE_STONE_THROWER:   return ai_stone_thrower;
         case TYPE_ROCK_PROJECTILE: return ai_rock_projectile;
         case TYPE_PLAYER_FIREBALL: return ai_player_fireball;
+        case TYPE_GOLD_BALL:       return ai_gold_ball;
         case TYPE_BOMB_BLAST:      return ai_bomb_blast;
         case TYPE_ENEMY_SHOT:      return ai_enemy_shot;
         default:  return ai_stub;
@@ -2113,9 +2277,11 @@ void ai_tick(u16 frame, u8 karnov_input)
       if (dt) { int want = atoi(dt);
         for (int i = 0; i < g_num; ++i) {
             if (!g_obj[i].alive || g_obj[i].type != (u16)want) continue;
-            fprintf(stderr, "f=%u t%d x=%d y=%d h=%d ph=%d | karnov left=%d top=%d feet=%d\n",
+            fprintf(stderr, "f=%u t%d x=%d y=%d h=%d ph=%d misc=%d aux=%d st=%d "
+                    "| karnov left=%d top=%d feet=%d\n",
                     frame, want, g_obj[i].x, g_obj[i].y, obj_height(&g_obj[i]),
-                    g_obj[i].st_phase, physics_get_left_x(), physics_get_top_y(),
+                    g_obj[i].st_phase, g_obj[i].st_misc, g_obj[i].st_aux,
+                    g_obj[i].anim_state, physics_get_left_x(), physics_get_top_y(),
                     physics_get_y());
         } } }
     for (int i = 0; i < g_num; ++i) {
@@ -2154,21 +2320,70 @@ void ai_tick(u16 frame, u8 karnov_input)
      * берёт и садится со свитком. Прежняя заглушка #0x32 (Treasure) была
      * неверной — #329-333 из ai_type56 вообще не рисуются как обычные спрайты
      * (это extended-data, не блиттятся), а реальный свиток = обычный #0x90. */
+    /* KARNOV_DBG_KILLBOSS=1 — убить goal-объект сразу, как он появится
+     * (проверка выпадения свитка и level-end без прохождения уровня). */
+    { static bool kb_armed = true;
+      if (kb_armed && getenv("KARNOV_DBG_KILLBOSS")) {
+        for (int i = 0; i < g_num; ++i) {
+            if (!g_obj[i].alive || !g_obj[i].is_boss) continue;
+            g_obj[i].alive = false;
+            g_boss_dead = true; g_boss_dead_frame = frame;
+            g_boss_x = g_obj[i].x; g_boss_y = g_obj[i].y;
+            kb_armed = false;
+            fprintf(stderr, "DBG: boss убит на (%d,%d), кадр %u\n", g_boss_x, g_boss_y, frame);
+            break;
+        }
+      } }
+
     if (g_boss_dead && !g_scroll_picked) {
         bool scroll_exists = false;
+        int  scroll_slot   = -1;
         for (int i = 0; i < g_num; ++i) {
             if (g_obj[i].alive && g_obj[i].is_scroll) {
-                scroll_exists = true; break;
+                scroll_exists = true; scroll_slot = i; break;
+            }
+        }
+        /* Страховка проходимости: если свиток лежит там, куда Карнов не
+         * может дойти (на LEVEL4 «гусеница» висит на 126 px выше него,
+         * и свиток ложился на верхний ярус — уровень было не закончить),
+         * через 400 кадров переносим свиток к самому Карнову. */
+        if (scroll_exists && (u16)(frame - g_boss_dead_frame) > 400) {
+            ai_obj_t *sc = &g_obj[scroll_slot];
+            int h = sc->cur_h > 0 ? sc->cur_h : obj_height(sc);
+            if (sc->y + h < physics_get_y() - 20) {
+                sc->x = physics_get_left_x();
+                sc->y = physics_get_y() - h;
+                sc->custom = 1;                 /* уже «приземлился» */
             }
         }
         if (!scroll_exists && (frame - g_boss_dead_frame) >= 30) {
             int slot = alloc_obj_slot();
+            /* X падения: место гибели boss'а, но только если под ним есть
+             * на что упасть. Если там пропасть (LEVEL4 — boss висит над
+             * ямой), роняем свиток на площадку самого Карнова: иначе он
+             * улетает вниз и до него не дойти. */
+            /* X падения — место гибели boss'а. Ниже под ним площадка
+             * может быть на другом ярусе (LEVEL4 — на 90 px ниже); это
+             * нормально: Карнов доходит до свитка авто-ходьбой и просто
+             * спрыгивает к нему. Важно лишь не уронить свиток ВЫШЕ него. */
+            int sx = g_boss_x;
+            if (level_ground_row_below(sx, physics_get_y() / TILE_H, 0x0001) < 0)
+                sx = physics_get_left_x();      /* совсем нет опоры — к Карнову */
             if (slot >= 0) {
                 g_obj[slot] = (ai_obj_t){
                     .alive       = true,
                     .type        = 5,             /* падающий бонус */
-                    .x           = g_boss_x,      /* фикс. X boss'а (не над Karnov-ом) */
-                    .y           = 50,            /* высоко над землёй */
+                    .x           = sx,            /* X boss'а, если туда можно дойти */
+                    /* Падает с НЕБОЛЬШОЙ высоты над местом гибели boss'а, а
+                     * не с y=50: на уровнях с ярусами (LEVEL4 — «гусеница»)
+                     * свиток, падавший с самого верха, ложился на площадку
+                     * ВЫШЕ Карнова и уровень нельзя было закончить. Теперь
+                     * он приземляется ровно на ту поверхность, где стоял
+                     * boss, — туда, где Карнов с ним и дрался. */
+                    /* Стартовая высота — НЕ выше Карнова: иначе свиток
+                     * ложится на ярус над его головой (LEVEL4). */
+                    .y           = (g_boss_y - 40 > physics_get_top_y())
+                                       ? g_boss_y - 40 : physics_get_top_y(),
                     .vy          = 1,
                     .facing      = 1,
                     .is_scroll   = true,
@@ -2197,9 +2412,52 @@ void ai_tick(u16 frame, u8 karnov_input)
  *
  * Type 6 (OPTIONS) — намеренно НЕТ записи: invisible-флаг отсекает рендер
  * раньше; даже если просочится, sprite_id 0xFFFF / NULL даст fallback-плейсхолдер. */
+/* ─── Разворот врага = ДРУГОЙ СПРАЙТ, а не отражение ──────────────────
+ *
+ * Движок оригинала арт не зеркалит: в архиве оба разворота лежат
+ * отдельными спрайтами (75 зеркальных пар, Карнов 98..105 ↔ 106..113), а
+ * направление выбирается НОМЕРОМ СОСТОЯНИЯ анимации. Конвенция —
+ * state 0 = влево, state 1 = вправо — подтверждена двумя декомпили-
+ * рованными INIT'ами: type 16 ставит state = (игрок правее) и type 25
+ * ставит state = (vx > 0).
+ *
+ * У 16 типов состояния 0/1 действительно зеркальная пара; у остальных
+ * (в т.ч. боссов 32 «девушка со львами», 38 «динозавр», 40 «гусеница»)
+ * второго разворота в архиве НЕТ — в оригинале они всегда нарисованы
+ * мордой влево. Порт же отражал их при facing < 0 и показывал спиной к
+ * Карнову; отражение убрано, вместо него — эта подмена спрайта. */
+static signed char g_dir_states[58] = { 0 };   /* 0 не проверено, 1 да, -1 нет */
+
+static bool type_has_dir_states(u16 type)
+{
+    if (type >= 58) return false;
+    if (g_dir_states[type] == 0) {
+        const anim_list_t *al = &ANIM_LISTS[type];
+        g_dir_states[type] =
+            (al->count >= 2 && al->states[0].n && al->states[1].n &&
+             sprite_is_mirror(al->states[0].spr[0], al->states[1].spr[0])) ? 1 : -1;
+    }
+    return g_dir_states[type] > 0;
+}
+
+/* Перевести кадр в набор нужного разворота, сохранив НОМЕР кадра. */
+static u16 sprite_face(u16 type, u16 sid, int facing)
+{
+    if (sid == 0xFFFF || !type_has_dir_states(type)) return sid;
+    const anim_state_t *s0 = &ANIM_LISTS[type].states[0];
+    const anim_state_t *s1 = &ANIM_LISTS[type].states[1];
+    for (int k = 0; k < s0->n; ++k)
+        if (s0->spr[k] == sid) return (facing > 0) ? s1->spr[k % s1->n] : sid;
+    for (int k = 0; k < s1->n; ++k)
+        if (s1->spr[k] == sid) return (facing > 0) ? sid : s0->spr[k % s0->n];
+    return sid;
+}
+
 static u16 sprite_for_type(u16 type, u16 anim_phase)
 {
     switch (type) {
+        case TYPE_GOLD_BALL:                       /* шар «золотого человека» */
+            return (u16)(185 + (anim_phase & 1));
         case   5: {                                /* падающий бонус — option icon */
             /* User-verified 2026-05-29 (project_inventory_items.md):
              *   #39 ladder, #40 boots, #41 bomb, #42 fireballs(30),
@@ -2312,7 +2570,7 @@ static void blit_sprite_world(u16 sid, int wx, int wy, int facing,
 {
     const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
     if (!s) return;
-    bool flip = facing < 0;
+    (void)facing;      /* оригинал арт не зеркалит — разворот выбирается спрайтом */
     int x0 = wx - scroll_x;
     int y0 = wy - scroll_y;
     u8 ck = sprite_is_cga() ? 0xFF : 1;
@@ -2321,8 +2579,7 @@ static void blit_sprite_world(u16 sid, int wx, int wy, int facing,
         int yy = y0 + r;
         if (yy < 0 || yy >= WIN_H) continue;
         for (int c = 0; c < s->art_w; ++c) {
-            int sc = flip ? (s->art_w - 1 - c) : c;
-            u8 v = s->pixels[r * s->w + sc];
+            u8 v = s->pixels[r * s->w + c];
             if (v == 0xFF || v == ck) continue;
             int xx = x0 + c;
             if (xx < 0 || xx >= WIN_W) continue;
@@ -2399,10 +2656,11 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
              * (type6/type5 выше — это не координатные ветки, а сохранённый при
              * спавне sprite_id/item_id из записи уровня.) */
             sid = sprite_for_type(g_obj[i].type, g_obj[i].anim_phase);
+            /* Разворот — подменой спрайта (оригинал арт не зеркалит). */
+            sid = sprite_face(g_obj[i].type, sid, g_obj[i].facing);
         }
         const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
         if (s) {
-            bool flip = g_obj[i].facing < 0;
             /* Anchor: X — ЛЕВЫЙ край арта, Y — ВЕРХ спрайта
              * (box.x0 = x_world + dx, box.y0 = y_world + dy). */
             int x0 = g_obj[i].x - scroll_x;
@@ -2413,8 +2671,7 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
                 int yy = y0 + r;
                 if (yy < 0 || yy >= WIN_H) continue;
                 for (int c = 0; c < s->art_w; ++c) {
-                    int sc = flip ? (s->art_w - 1 - c) : c;
-                    u8 v = s->pixels[r * s->w + sc];
+                    u8 v = s->pixels[r * s->w + c];
                     if (v == 0xFF) continue;
                     if (v == ck) continue;
                     int xx = x0 + c;
@@ -2582,6 +2839,7 @@ void ai_notify_enemy_hit(int slot, u16 frame)
         g_boss_dead       = true;
         g_boss_dead_frame = frame;
         g_boss_x          = o->x;
+        g_boss_y          = o->y;
     }
 }
 
@@ -2601,6 +2859,7 @@ void ai_clear_enemies(bool exclude_boss)
             g_boss_dead       = true;
             g_boss_dead_frame = 0;
             g_boss_x          = o->x;
+            g_boss_y          = o->y;
         }
     }
     audio_play_sfx(1);   /* enemy-kill sfx */
@@ -2628,7 +2887,13 @@ void ai_bomb_explode(void)
 bool ai_boss_dead(void)        { return g_boss_dead;    }
 bool ai_scroll_picked(void)    { return g_scroll_picked; }
 u16  ai_boss_dead_frame(void)  { return g_boss_dead_frame; }
-int  ai_scroll_target_x(void)  { return g_boss_x;        }
+int  ai_scroll_target_x(void)
+{
+    /* Идти надо к САМОМУ свитку: он мог упасть не там, где погиб boss. */
+    for (int i = 0; i < g_num; ++i)
+        if (g_obj[i].alive && g_obj[i].is_scroll) return g_obj[i].x;
+    return g_boss_x;
+}
 
 /* Свиток (type5 custom=999) уже заспавнен и падает? Karnov должен начать
  * авто-подход к свитку ТОЛЬКО после того как свиток начал выпадать. */
