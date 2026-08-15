@@ -1122,6 +1122,35 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     if (cat != 2) o->alive = false;
 }
 
+/* ── Тип 49 — «щит» босса (handler cs:0x170C:0x03C5, file 0x18C85) ────
+ *
+ * INIT: подфаза (+0xE9) = 0, +0xEB = СНИМОК hp, active = 0,
+ * num_bboxes = 1, box0.dx = dy = 0, а спрайт зависит от НОМЕРА УРОВНЯ
+ * ([DS:0xD8AA]): 0x131 (#305) на LEVEL6, иначе 0x130 (#304); phase
+ * (+0xED) = 1 только на LEVEL9 и правее x = 0x44C.
+ * THINK: каждый тик hp ВОССТАНАВЛИВАЕТСЯ из снимка — то есть щит
+ * практически неуязвим; объект следит за другим объектом по индексу в
+ * +0xDF и, когда у того обнуляется obj_type (он умер), переходит в
+ * подфазу 2 и удаляет себя (ai_result |= 1).
+ *
+ * В порту связь «родитель по индексу +0xDF» не моделируется: щит
+ * исчезает, когда умирает goal-объект уровня. Это приближение, всё
+ * остальное — по листингу. */
+static void ai_type49(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 1, 0);
+        o->st_misc = 0;
+        o->st_aux  = o->hp;                       /* +0xEB — снимок hp */
+        o->st_phase = (g_ai_level_num == 9 && obj_units(o) > 0x44C);
+        o->item_sprite = (g_ai_level_num == 6) ? 305 : 304;
+        return;
+    }
+    o->hp = o->st_aux;                            /* hp восстанавливается */
+    if (ai_boss_dead()) o->alive = false;         /* родитель погиб */
+}
+
 /* ── Тип 55 — патрульный (handler cs:0x17EC:0x0028, file 0x196E8) ─────
  *
  * INIT: tick_period = 4, +0xEB = СНИМОК стартового hp, подфаза
@@ -3034,24 +3063,6 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
 
 
 
-/* Type 49 — хелпер Рю (ai_type49): агрессивен ТОЛЬКО на LEVEL9 при
- * x_world > 0x44C (file) = 2200 (мир); иначе пассивен. */
-static void ai_ryu_helper(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    o->anim_phase = (frame >> 3) & 1;
-    extern u16 g_ai_level_num;         /* ниже, ai_init_from_level */
-    bool arena = (g_ai_level_num == 9) && (o->x > 0x44C * 2);
-    if (!arena) return;
-    int kx = physics_get_left_x(), ky = physics_get_top_y();
-    o->facing = (kx >= o->x) ? 1 : -1;
-    if ((frame & 1) == 0) {
-        o->x += 2 * o->facing;
-        int feet = obj_feet(o);
-        if (ky < feet - 2)      o->y -= 1;
-        else if (ky > feet + 2) o->y += 1;
-    }
-}
 
 /* Type 51 — статический элемент арены (ai_type51): 8 частей, sprite 0x135
  * (309), y выровнен по 10, sub_timer_max=0xFF (вечный). */
@@ -3130,7 +3141,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [46] = ai_type46,          /* ныряющая турель */
     [47] = ai_type47,          /* турель */
     [48] = ai_type48,
-    [49] = ai_ryu_helper,
+    [49] = ai_type49,          /* «щит» босса */
     [50] = ai_multipart,
     [51] = ai_arena_static,
     [52] = ai_simple,
