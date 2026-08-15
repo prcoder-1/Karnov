@@ -107,6 +107,8 @@ static int g_scroll_y = 0;
  * садится в crouch-позу #103/#111) и держим сцену пока не доиграет jingle,
  * но не короче LEVEL_END_MIN_TICKS (чтобы посадка была видна). */
 static bool s_level_end       = false;
+/* Level select: нажата «L» при активном чите — ждём цифру (file 0x3DB0). */
+static bool s_level_select_armed = false;
 static u16  s_level_end_start = 0;
 /* Максимальный достигнутый прогресс игрока по X (в 2px-единицах) —
  * аналог DS:0xD8CC; участвует в выборе региона респауна после смерти. */
@@ -528,7 +530,37 @@ int splash_run(const splash_options_t *opt)
     while (!quit) {
         while (SDL_PollEvent(&evt)) {
             if (evt.type == SDL_QUIT) quit = true;
-            if (evt.type == SDL_KEYDOWN && evt.key.keysym.sym == SDLK_ESCAPE) quit = true;
+            if (evt.type == SDL_KEYDOWN) {
+                if (evt.key.keysym.sym == SDLK_ESCAPE) quit = true;
+                if (!evt.key.repeat) {
+                    /* Чит ZEEK: последовательность Ctrl+Z, Ctrl+E, Ctrl+E,
+                     * Ctrl+K (file 0x3F5E). Любая другая клавиша её
+                     * сбрасывает — поэтому вызываем на каждое нажатие. */
+                    bool ctrl = (evt.key.keysym.mod & KMOD_CTRL) != 0;
+                    input_cheat_key(evt.key.keysym.scancode, ctrl);
+                    /* Level select (L + цифра) доступен только с читом,
+                     * как в оригинале (file 0x3DB0). */
+                    if (input_god_mode() && s_level_select_armed &&
+                        evt.key.keysym.sym >= SDLK_0 && evt.key.keysym.sym <= SDLK_9) {
+                        u16 lv = (u16)(evt.key.keysym.sym - SDLK_0);
+                        if (prepare_level(lv, false) == 0) {
+                            current_level = lv;
+                            g_scroll_x = g_scroll_y = 0;
+                            frame = 0;
+                            s_demo_done_frame = 0;
+                            s_level_end = false;
+                            physics_set_invuln(false);
+                            physics_set_sit_scroll(false);
+                            printf("level select: LEVEL%u\n", lv);
+                        }
+                        s_level_select_armed = false;
+                    } else if (input_god_mode() && evt.key.keysym.sym == SDLK_l) {
+                        s_level_select_armed = true;
+                    } else {
+                        s_level_select_armed = false;
+                    }
+                }
+            }
         }
         u32 now = SDL_GetTicks();
         if (now - last_tick >= tick_ms) {

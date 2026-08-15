@@ -11,6 +11,7 @@
 #include "ai.h"
 #include "level.h"
 #include "audio.h"
+#include "input.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -683,7 +684,8 @@ void physics_tick(u8 input)
         int fy = physics_get_top_y() + 7;
         if (wants_d && s_on_ground) fy += 16;
         ai_spawn_player_fireball(fx, fy, s_facing, s_cur_frame);
-        s_fire_cooldown = FIRE_COOLDOWN_TICKS;
+        /* С читом перезарядка 1 тик вместо 3 (file 0x1302C). */
+        s_fire_cooldown = input_god_mode() ? 1 : FIRE_COOLDOWN_TICKS;
     }
 
     if (s_x < s_world_min_x) s_x = s_world_min_x;
@@ -725,6 +727,9 @@ void physics_tick(u8 input)
  * ZEEK) или уже играет анимация гибели — удар игнорируется. */
 void physics_hit(int enemy_hp)
 {
+    /* Чит ZEEK: pair-loop в оригинале гасит удар при взведённом
+     * [0xCCA6] (file 0xFB8A). */
+    if (input_god_mode()) return;
     if (s_invuln || s_dying || s_hit_iframes > 0) return;
     s_hit_iframes = 20;
     s_hp -= enemy_hp;
