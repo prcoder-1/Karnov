@@ -138,6 +138,9 @@ typedef struct ai_obj {
      * не удаляет объект, а переводит его в obj_type = 9 с hitflag = 0 —
      * он остаётся стоять неуязвимой декорацией (тип 54, file 0x1953B). */
     bool   is_decor;
+    /* Гибнет: показываем вспышку и снимаем объект по её окончании.
+     * В оригинале это состояние 4 → die_puff → пуф-обработчик → 6. */
+    bool   is_dying;
     /* Projectile Q16.16 sub-pixel state (TYPE_ROCK_PROJECTILE).
      * Соответствуют полям object'а +0x0E/+0x10 (vx) и +0x12/+0x14 (vy)
      * из KARNOV.EXE handler cs:0x11D6:0x08B3 (sprites #21-23).
@@ -224,7 +227,7 @@ static bool obj_is_item(const ai_obj_t *o)
 
 static bool is_damageable_obj(const struct ai_obj *o)
 {
-    if (o->is_decor) return false;        /* добитая декорация */
+    if (o->is_decor || o->is_dying) return false;   /* добитая/гаснущая */
     /* Псевдотипы порта. */
     switch (o->type) {
         case TYPE_STONE_THROWER:
@@ -3751,7 +3754,10 @@ void ai_tick(u16 frame, u8 karnov_input)
         if (!g_obj[i].alive) continue;
         ai_obj_t *o = &g_obj[i];
         o->cur_h = obj_height(o);
-        if (o->puff_frames > 0) --o->puff_frames;
+        if (o->puff_frames > 0 && --o->puff_frames == 0 && o->is_dying) {
+            o->alive = false;                 /* вспышка догорела */
+            continue;
+        }
         ++o->st_ctr;                              /* +0xC7: каждый кадр */
         if (o->phys) obj_integrate(o);            /* фаза 1 (UPDATELOCS) */
         if (o->use_anim) {
@@ -4327,7 +4333,12 @@ void ai_notify_enemy_hit(int slot, u16 frame)
         audio_play_sfx(1);
         return;
     }
-    o->alive = false;
+    /* Смерть тоже проходит через вспышку: оригинал ставит state 4,
+     * обработчик начисляет очки и зовёт die_puff, и только состояние 6
+     * снимает объект (ai_result |= 1). Полный автомат 4/5/6 в порту не
+     * реализован — здесь эквивалент по видимому эффекту. */
+    o->is_dying = true;
+    o->puff_frames = 8;
     audio_play_sfx(1);   /* враг убит — play_sound(1), KARNOV.EXE @ 0xFC5A */
     /* Запись врага остаётся flags=1 (one-shot): убитый не возвращается,
      * пока rearm-цикл после смерти игрока не перевзведёт его. */
