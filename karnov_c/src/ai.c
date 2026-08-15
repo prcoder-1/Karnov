@@ -131,6 +131,9 @@ typedef struct ai_obj {
     int    custom;        /* type-specific scratch (для thrower'а — throw timer) */
     u16    item_sprite;   /* type 5 (падающий предмет): sprite_id = 0x27+item_id (#39..49) */
     u16    spawn_frame;   /* кадр на котором обьект появился */
+    /* Вспышка попадания (порт puff-обработчика cs:0xD4B:0x3C0): пока
+     * счётчик > 0, вместо врага рисуется кадр вспышки #4..#6. */
+    int    puff_frames;
     /* Projectile Q16.16 sub-pixel state (TYPE_ROCK_PROJECTILE).
      * Соответствуют полям object'а +0x0E/+0x10 (vx) и +0x12/+0x14 (vy)
      * из KARNOV.EXE handler cs:0x11D6:0x08B3 (sprites #21-23).
@@ -3731,9 +3734,10 @@ void ai_tick(u16 frame, u8 karnov_input)
       if (dt) { int want = atoi(dt);
         for (int i = 0; i < g_num; ++i) {
             if (!g_obj[i].alive || g_obj[i].type != (u16)want) continue;
-            fprintf(stderr, "f=%u t%d x=%d y=%d h=%d ph=%d misc=%d aux=%d st=%d "
+            fprintf(stderr, "f=%u t%d x=%d y=%d hp=%d puff=%d ph=%d misc=%d aux=%d st=%d "
                     "| karnov left=%d top=%d feet=%d\n",
-                    frame, want, g_obj[i].x, g_obj[i].y, obj_height(&g_obj[i]),
+                    frame, want, g_obj[i].x, g_obj[i].y, g_obj[i].hp,
+                    g_obj[i].puff_frames,
                     g_obj[i].st_phase, g_obj[i].st_misc, g_obj[i].st_aux,
                     g_obj[i].anim_state, physics_get_left_x(), physics_get_top_y(),
                     physics_get_y());
@@ -3742,6 +3746,7 @@ void ai_tick(u16 frame, u8 karnov_input)
         if (!g_obj[i].alive) continue;
         ai_obj_t *o = &g_obj[i];
         o->cur_h = obj_height(o);
+        if (o->puff_frames > 0) --o->puff_frames;
         ++o->st_ctr;                              /* +0xC7: каждый кадр */
         if (o->phys) obj_integrate(o);            /* фаза 1 (UPDATELOCS) */
         if (o->use_anim) {
@@ -4119,6 +4124,10 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
             /* Разворот — подменой спрайта (оригинал арт не зеркалит). */
             sid = sprite_face(g_obj[i].type, sid, g_obj[i].facing);
         }
+        if (g_obj[i].puff_frames > 0) {
+            static const u16 PUFF[4] = { 4, 5, 6, 6 };
+            sid = PUFF[(8 - g_obj[i].puff_frames) >> 1];
+        }
         const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
         if (s) {
             /* Anchor: X — ЛЕВЫЙ край арта, Y — ВЕРХ спрайта
@@ -4290,7 +4299,16 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     /* Урон = PLAYER_FIREBALL_DAMAGE (пул HP врага уменьшается на урон
      * снаряда, как `b->hit_points -= a->hit_points` в оригинале). */
     o->hp -= PLAYER_FIREBALL_DAMAGE;
-    if (o->hp > 0) return;
+    if (o->hp > 0) {
+        /* Раненый, но живой враг в оригинале не продолжает как ни в чём
+         * не бывало: die_puff (cs:0xD4B:0x4A5) подменяет ему обработчик
+         * на «пуф» cs:0xD4B:0x3C0, тот проигрывает 4-кадровую вспышку
+         * (state_list DS:0x1440 = #4,#5,#6,#6 либо DS:0x1462 = #6,#7,#8,#8
+         * по флагу +0xED) и ВОЗВРАЩАЕТ исходный обработчик. В порту это
+         * короткая вспышка: 8 кадров рисуем кадры пуфа поверх врага. */
+        o->puff_frames = 8;
+        return;
+    }
     o->alive = false;
     audio_play_sfx(1);   /* враг убит — play_sound(1), KARNOV.EXE @ 0xFC5A */
     /* Запись врага остаётся flags=1 (one-shot): убитый не возвращается,
