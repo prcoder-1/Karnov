@@ -1085,6 +1085,53 @@ static int obj_bounce_region(ai_obj_t *o)
     return bits;
 }
 
+/* ── Тип 12 — скачущий валун (handler cs:0x11D6:0x08B3, file 0x13E13) ──
+ *
+ * INIT: phase(+0xED) = init_arg, misc(+0xE9) = 0, obj_type = 1, hp = 20,
+ * bbox активен. При init_arg == 0: y_world поднимается на высоту спрайта,
+ * vx = −3.0, vy = −2.5, ay = +0.6666 (0xAAAA) — заброс по параболе.
+ * Иначе: vx = +2.0, vy = +2.5, ay = 0. state_list = DS:0x18F4.
+ * THINK: тайл под нижней кромкой; если его props & 9 (категории 0, 3, 4 —
+ * пол/склон) и объект ЛЕТИТ ВНИЗ (vy > 0) — отскок: первые три раза
+ * play_sound(8); при phase != 0 разворачиваются обе скорости, ay
+ * становится +0.333 и phase обнуляется, иначе просто vy = −vy. */
+static void ai_type12(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 1, 0);
+        obj_phys_begin(o);
+        o->st_phase = (int)o->init_arg;         /* +0xED */
+        o->st_misc  = 0;                        /* +0xE9 — счётчик отскоков */
+        o->hp       = 20;
+        if (o->st_phase == 0) {
+            o->y  -= obj_height(o);
+            o->yq  = (s32)o->y << 16;
+            o->vxq = -QV(3, 0);
+            o->vyq = (s32)0xFFFE8000;           /* −2.5 */
+            o->ayq = QV(0, 0xAAAA);             /* +0.667 */
+        } else {
+            o->vxq = QV(2, 0);
+            o->vyq = QV(2, 0x8000);             /* +2.5 */
+            o->ayq = 0;
+        }
+        return;
+    }
+    int a = level_tile_attr_at(o->x, o->y + obj_height(o));
+    bool floor_here = (a == 0 || a == 3 || a == 4);   /* props & 9 */
+    if (!floor_here || o->vyq <= 0) return;
+
+    if (o->st_misc++ < 3) audio_play_sfx(8);          /* звук отскока */
+    if (o->st_phase != 0) {
+        o->vxq = -o->vxq;
+        o->vyq = -o->vyq;
+        o->ayq = QV(0, 0x5555);                       /* +0.333 */
+        o->st_phase = 0;
+    } else {
+        o->vyq = -o->vyq;
+    }
+}
+
 /* ── Тип 35 — прыгающий голем (handler cs:0x151A:0x08B0, file 0x17250)
  *
  * INIT: tick_period = 4, подфаза (+0xE9) = 0, +0xEB = 0,
@@ -2402,7 +2449,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [9]  = ai_walking_minion,  /* 2-bbox boss-like (L1: декор-дракон) */
     [10] = ai_type10,          /* демон на облаке — маятник */
     [11] = ai_type11,
-    [12] = ai_simple,          /* наземный патруль (HP=20) */
+    [12] = ai_type12,          /* скачущий валун */
     [13] = ai_type13,   /* Y-snap метатель */
     [14] = ai_type14,          /* ныряющая птица (босс L1) */
     [15] = ai_stone_golem,
