@@ -275,9 +275,8 @@ static void draw_hud(u16 frame, int karnov_x, u8 input_state)
     render_fill_rect(0, VIEW_H, WIN_W, HUD_H, 0xFF000000u);
     char line[80];
     snprintf(line, sizeof(line),
-             "FRAME:%-4u  REC:%u/%u    X:%-3d Y:%-3d",
-             frame, demo_current_index(), demo_record_count(),
-             karnov_x, physics_get_y());
+             "SCORE:%-7u F:%-4u X:%-4d Y:%-3d HP:%d",
+             ai_score(), frame, karnov_x, physics_get_y(), physics_hp());
     render_draw_text(4, VIEW_H + 2, line, 0xFFFFFF55u);
     /* OPTIONS item bar — иконки собранных предметов с подсветкой выбора. */
     draw_item_bar(frame);

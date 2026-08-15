@@ -68,6 +68,11 @@ bool ai_scroll_spawned(void);    /* свиток уже заспавнен и п
 bool ai_scroll_onscreen(int cam_x, int cam_y, int view_w, int view_h); /* свиток виден на экране */
 void ai_notify_enemy_hit(int slot, u16 frame);
 
+/* Счёт игрока. Оригинал хранит его 8-разрядной BCD-строкой в DS:0xD930
+ * и начисляет через add_score (cs:0x41D:0x04D7); значения в
+ * обработчиках — BCD, поэтому 0x2600 = 2600 очков. */
+u32 ai_score(void);
+
 /* Уничтожить всех живых damageable-врагов на экране (Clapper).
  * exclude_boss=true пропускает boss'а (Clapper); false убивает всех. */
 void ai_clear_enemies(bool exclude_boss);

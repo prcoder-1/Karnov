@@ -183,6 +183,8 @@ u16 g_ai_level_num = 0;
 static bool g_boss_dead = false;
 static u16  g_boss_dead_frame = 0;
 static bool g_scroll_picked = false;
+/* Счёт игрока (в оригинале — BCD-строка DS:0xD930). */
+static u32  g_score = 0;
 static int  g_boss_x = 0;   /* X boss'а на момент смерти — фикс. точка падения свитка */
 static int  g_boss_y = 0;
 /* Левый край камеры — сохраняется каждый кадр из ai_check_triggers;
@@ -3408,6 +3410,7 @@ void ai_init_from_level(u16 level_num)
     g_boss_dead = false;
     g_boss_dead_frame = 0;
     g_scroll_picked = false;
+    g_score = 0;
 
     g_rng_seed = 0x4B41u + level_num;   /* детерминизм демо: сид от уровня */
     g_ai_level_num = level_num;
@@ -4302,6 +4305,42 @@ static int alloc_obj_slot(void)
 /* Player hit detection: вызывается из game.c когда player-fireball
  * пересекает врага. Помечает врага killed (если HP→0). При смерти boss'а
  * запускает scroll-drop sequence. */
+/* ─── Очки за убийство (add_score, cs:0x41D:0x04D7) ────────────────────
+ *
+ * Оригинал держит счёт 8-разрядной BCD-строкой в DS:0xD930 и после
+ * начисления взводит флаг перерисовки [0xD938]. Константы в
+ * обработчиках — тоже BCD, то есть 0x2600 читается как 2600 очков.
+ * Таблица извлечена автоматическим сканом всех вызовов add_score с
+ * привязкой к владельцу-обработчику; 0 = тип очков не начисляет либо
+ * его ветка смерти не найдена. */
+static const u16 SCORE_BCD[58] = {
+    [8] = 0x110, [10] = 0x110, [11] = 0x1400, [12] = 0x1000, [13] = 0x400,
+    [14] = 0x2600, [15] = 0x1800, [16] = 0x110, [17] = 0x400, [18] = 0x1000,
+    [22] = 0x500, [23] = 0x500, [24] = 0x7000, [25] = 0x110, [26] = 0x400,
+    [27] = 0x400, [28] = 0x400, [29] = 0x400, [31] = 0x7000, [32] = 0x7000,
+    [34] = 0x110, [35] = 0x800, [37] = 0x12000 & 0xFFFF, [40] = 0x7000,
+    [43] = 0x1800, [44] = 0x1800, [45] = 0x100, [46] = 0x1000, [47] = 0x1000,
+    [48] = 0x1000, [53] = 0x1000, [54] = 0x1800,
+};
+
+/* BCD-константа → десятичное число очков (0x2600 → 2600). */
+static u32 bcd_to_dec(u32 v)
+{
+    u32 r = 0, mul = 1;
+    while (v) { r += (v & 0xF) * mul; mul *= 10; v >>= 4; }
+    return r;
+}
+
+u32 ai_score(void) { return g_score; }
+
+static void award_score(u16 type)
+{
+    u32 bcd = (type == 37) ? 0x12000u
+            : (type < 58)  ? SCORE_BCD[type] : 0u;
+    if (type == 38) bcd = 0x20000u;          /* босс LEVEL3 */
+    g_score += bcd_to_dec(bcd);
+}
+
 void ai_notify_enemy_hit(int slot, u16 frame)
 {
     if (slot < 0 || slot >= g_num) return;
@@ -4325,6 +4364,7 @@ void ai_notify_enemy_hit(int slot, u16 frame)
      * obj_type = 9, box0.hitflag = 0 и аним-состояние 2, то есть
      * остаётся на карте неуязвимой декорацией (file 0x1953B, 0x030B). */
     if (o->type == 54) {
+        award_score(o->type);
         o->is_decor = true;
         o->hp = 0;
         o->pending_state = 2;
@@ -4339,6 +4379,7 @@ void ai_notify_enemy_hit(int slot, u16 frame)
      * реализован — здесь эквивалент по видимому эффекту. */
     o->is_dying = true;
     o->puff_frames = 8;
+    award_score(o->type);
     audio_play_sfx(1);   /* враг убит — play_sound(1), KARNOV.EXE @ 0xFC5A */
     /* Запись врага остаётся flags=1 (one-shot): убитый не возвращается,
      * пока rearm-цикл после смерти игрока не перевзведёт его. */
