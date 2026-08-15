@@ -40,7 +40,10 @@
                                       /* анимированная вспышка Bomb-предмета
                                        * (#25→#26→#27→#28, ~50 кадров). */
 #define TYPE_ENEMY_SHOT        1006  /* снаряд врага (порт cs:0x11D6:0x2A3) */
-#define TYPE_GOLD_BALL         1007  /* шар «золотого человека» (type 24):
+#define TYPE_GOLD_BALL         1007
+#define TYPE_TRAP_SEGMENT      1008  /* сегмент ловушки типа 42:
+                                      * cs:0x161F:0x020A, спрайты
+                                      * #271..274, obj_type = 3, hp = 100 */  /* шар «золотого человека» (type 24):
                                       * ребёнок cs:0x1348:0x00D7, спрайты
                                       * #185/#186, hp 10, очки 0x500. */
 
@@ -220,6 +223,8 @@ static bool is_damageable_obj(const struct ai_obj *o)
         case TYPE_ROCK_PROJECTILE:
         case TYPE_FLYING_BIRD:
             return true;
+        case TYPE_TRAP_SEGMENT:
+            return false;                  /* states 4/5/6 возвращают в THINK */
         case TYPE_GOLD_BALL:
             /* Флаг коллизии bbox (+0x2E) шар ставит только на разлёте:
              * висящий и возвращающийся шар неуязвим (file 0x14E93). */
@@ -1093,6 +1098,21 @@ static int obj_bounce_region(ai_obj_t *o)
     return bits;
 }
 
+/* Сегмент ловушки (дочерний обработчик cs:0x161F:0x020A, file 0x17BFA).
+ * INIT: obj_type = 3, hp = 100, box0.hitflag = 1, tick_period = 2,
+ * state_list = DS:0x1CBE (кадры #271..274), аним-состояние 0.
+ * THINK: единственное условие — тайл В ТОЧКЕ сегмента; если он не пуст
+ * (категория != 2), объект удаляется (ai_result |= 1). Сегмент никуда
+ * не движется, а состояния 4/5/6 возвращают его в THINK, то есть
+ * выстрелом он не убивается. */
+static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)in;
+    o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
+    int cat = level_tile_attr_at(o->x, o->y);
+    if (cat != 2) o->alive = false;
+}
+
 /* ── Тип 42 — периодическая ловушка (cs:0x161F:0x029F, file 0x17C8F) ───
  *
  * INIT: tick_period = 3, подфаза (+0xE9) = 0, счётчик (+0xEB) =
@@ -1140,7 +1160,18 @@ static void ai_type42(ai_obj_t *o, u16 frame, u8 in)
         int n = (al && al->count && o->anim_state < al->count)
                     ? al->states[o->anim_state].n : 1;
         if (o->frame_index != n - 1) break;
-        /* здесь оригинал зовёт cs:0x161F:0x00FC (см. комментарий выше) */
+        /* cs:0x161F:0x00FC — вертикальный ряд из 5 сегментов:
+         * x + 12 ед. (= 24 px), y + (i − 2) * 18. */
+        for (int i = 0; i < 5; ++i) {
+            int slot = alloc_obj_slot();
+            if (slot < 0) break;
+            g_obj[slot] = (ai_obj_t){
+                .alive = true, .type = TYPE_TRAP_SEGMENT, .subtype = 3,
+                .hp = 100, .level_idx = -1, .facing = 1,
+                .x = o->x + 24, .y = o->y + (i - 2) * 18,
+                .spawn_frame = frame,
+            };
+        }
         o->st_aux  = 0x1F4;                      /* 500 */
         o->st_misc = 0;
         break;
@@ -2910,6 +2941,7 @@ static ai_handler_fn pick_handler(u16 type)
         case TYPE_ROCK_PROJECTILE: return ai_rock_projectile;
         case TYPE_PLAYER_FIREBALL: return ai_player_fireball;
         case TYPE_GOLD_BALL:       return ai_gold_ball;
+        case TYPE_TRAP_SEGMENT:    return ai_trap_segment;
         case TYPE_BOMB_BLAST:      return ai_bomb_blast;
         case TYPE_ENEMY_SHOT:      return ai_enemy_shot;
         default:  return ai_stub;
@@ -3423,6 +3455,8 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
     switch (type) {
         case TYPE_GOLD_BALL:                       /* шар «золотого человека» */
             return (u16)(185 + (anim_phase & 1));
+        case TYPE_TRAP_SEGMENT:                    /* сегмент ловушки type 42 */
+            return (u16)(271 + (anim_phase & 3));
         case  23:                                  /* летящий шар: INIT ставит
                                                     * box0.sprite = 0xB9 (#185)
                                                     * и больше не меняет */
