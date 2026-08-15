@@ -1166,6 +1166,62 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     if (cat != 2) o->alive = false;
 }
 
+/* ── Тип 8 — падающий «с неба» (cs:0xFFA:0x139F, file 0x12B3F) ────────
+ *
+ * Это не абстрактный «спаунер», а сам объект: INIT ставит obj_type = 1
+ * (враг), box0.hitflag = 0, num_bboxes = 1 и СРАЗУ размещает себя
+ * относительно игрока: x = player.x + (rand & 0x3F) − 10,
+ * y = player.y − 100 − (rand & 0x3F), state_list = DS:0x171C.
+ * Подфазы:
+ *   0/1 — падение: аним 0, vy = +1.0, tick_period = 3. Если тайл под
+ *         точкой (x, y + 5) имеет props & 1 (пол) — подфаза 2. Если
+ *         объект провалился ниже игрока больше чем на 0x82 — он
+ *         ПЕРЕЗАПУСКАЕТСЯ сверху: x += rand & 0x1F, y = player_y − 0x8C;
+ *   2/3 — приземлился: аним 1, vy = 0, счётчик кадров сброшен.
+ * ВАЖНО: запись типа 8 есть в КАЖДОМ уровне, но у всех она нулевая —
+ * cur = (0,0), range = (0,0), а условие спауна строгое (|dx| < range_x),
+ * поэтому по триггеру такой объект не рождается НИКОГДА. Значит, в
+ * оригинале его создаёт код (sky-цепь, которую порт эмулирует драйвером
+ * ai_sky_tick). Обработчик перенесён и корректен, но из данных уровней
+ * недостижим — драйвер спауна остаётся прежним до его декомпиляции. */
+static void ai_type08(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, 0);
+        obj_phys_begin(o);
+        o->x = physics_get_left_x() + (int)(rng_next() & 0x3F) * 2 - 20;
+        o->y = physics_get_top_y() - 100 - (int)(rng_next() & 0x3F);
+        obj_phys_begin(o);
+        o->st_misc = 0;
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        o->vyq = Q_1_0;
+        /* fallthrough */
+    case 1: {
+        int cat = level_tile_attr_at(o->x, o->y + 5);
+        if (cat == 0 || cat == 4) { o->st_misc = 2; break; }   /* props & 1 */
+        if (o->y > physics_get_top_y() + 0x82) {               /* улетел вниз */
+            o->x += (int)(rng_next() & 0x1F) * 2;
+            o->y  = physics_get_top_y() - 0x8C;
+            obj_phys_begin(o);
+        }
+        break;
+    }
+    case 2:
+        o->pending_state = 1;
+        o->vyq = 0;
+        o->st_ctr = 0;
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 7 — СВИТОК конца уровня (cs:0xFFA:0x1032, file 0x127D2) ──────
  *
  * Это не «невидимый триггер», как значилось в порту: INIT ставит
@@ -3390,7 +3446,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [5]  = ai_falling_bonus,   /* падающий бонус */
     [6]  = ai_world_item,      /* предмет в мире (init_arg≥11 → скрыт) */
     [7]  = ai_type07,          /* свиток конца уровня */
-    [8]  = ai_stub,            /* sky-spawner — драйвер ai_sky_tick вне объектов;
+    [8]  = ai_type08,          /* падающий «с неба» (см. выше);
                                 * запись type 8 (range=0) не спавнится вовсе */
     [9]  = ai_walking_minion,  /* 2-bbox boss-like (L1: декор-дракон) */
     [10] = ai_type10,          /* демон на облаке — маятник */
