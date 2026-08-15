@@ -271,6 +271,14 @@ static int obj_height(const ai_obj_t *o)
                   ? o->item_sprite
                   : sprite_for_type(o->type, o->anim_phase);
     const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
+    /* Если ручного маппинга типа нет, высоту берём из аним-таблиц EXE —
+     * иначе объект получает заглушечные 16 px и постановка на землю в
+     * ai_spawn_from_record сажает его НИЖЕ пола (так тонул тип 15). */
+    if (!s && o->type < 58) {
+        const anim_list_t *al = &ANIM_LISTS[o->type];
+        if (al->count && al->states[0].n)
+            s = sprite_find(al->states[0].spr[0]);
+    }
     return s ? (int)s->h : 16;
 }
 
@@ -808,18 +816,6 @@ static void ai_flying_bird(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
-/* Type 15 — каменный голем (anchor minion, sprite 0xB2=178 per
- * ai_scripts.cpp:1844 zone, ENEMY_GUIDE_CORRECTIONS).
- * Стоит на месте, периодически «стреляет» вращением — для нашего порта
- * просто статичная декорация с лёгкой анимацией. */
-static void ai_stone_golem(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    o->anim_phase = (frame >> 2) & 7;   /* 8-фазная анимация чёртика */
-    /* Facing к игроку, но не двигаемся. */
-    int kx = physics_get_left_x();
-    o->facing = (kx > o->x) ? 1 : -1;
-}
 
 /* Type 19 — медленный враг (ENEMY_GUIDE: sprite 0xAC=172, sub_timer_max=1000
  * — почти статичный). Использует helper 0x4B36, общий с type 9.
@@ -1083,6 +1079,102 @@ static int obj_bounce_region(ai_obj_t *o)
     if (obj_units(o) > r[2] || obj_units(o) < r[0]) { o->vxq = -o->vxq; bits |= 1; }
     if (o->y > r[3] || o->y < r[1])                 { o->vyq = -o->vyq; bits |= 2; }
     return bits;
+}
+
+/* ── Тип 15 — каменный страж (handler cs:0x11D6:0x0ACB, file 0x1402B) ──
+ *
+ * Преамбула: si = (игрок правее), аним-состояние = si.
+ * INIT: tick_period = 3, state_list = DS:0x1918, аним si + 2 (стойка),
+ * подфаза (+0xE9) = 0, +0xEB = x_world (дом).
+ * Подфазы (si2 = +0xE9, затем +0xE9 |= 1):
+ *   0/1 — спит, пока |dx| > 0x50; ближе — подфаза 2;
+ *   2   — прыжок к игроку: с шансом 1/2 vx = ±2.5 (иначе 0), vy = +3.0,
+ *         аним si;
+ *   3   — в полёте: тайл под (x+5, y+vy+h) категории 2 — ещё летим,
+ *         иначе подфаза 4;
+ *   4   — посадка: phase(+0xED) = 0, set_motion(0), встать на землю по
+ *         центру (спрайт 0x99), ВЫСТРЕЛ в игрока со скоростью 2.25,
+ *         аним ((rand&1) ? 2 : 4) + si;
+ *   5   — если phase уже 1 или выпал rand&1 → подфаза 6, иначе второй
+ *         выстрел (скорость 2.0) и phase = 1;
+ *   6   — подскок вверх: vx = 0, vy = −3.0, аним si. */
+static void ai_type15(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    int dx = player_units() - obj_units(o);
+    int si = (dx > 0);
+    int adx = dx < 0 ? -dx : dx;
+
+    if (!o->use_anim) {
+        anim_begin(o, 3, si + 2);
+        obj_phys_begin(o);
+        o->st_misc = 0;                        /* +0xE9 */
+        o->st_aux  = obj_units(o);             /* +0xEB — дом */
+        return;
+    }
+    int ph = o->st_misc;
+    o->st_misc |= 1;
+    switch (ph) {
+    case 0:
+    case 1:
+        if (adx > 0x50) break;                 /* спит, пока игрок далеко */
+        o->st_misc = 2;
+        break;
+    case 2:
+        o->vxq = (rng_next() & 1) ? (si ? QV(2, 0x8000) : (s32)0xFFFD8000) : 0;
+        o->vyq = QV(3, 0);
+        o->pending_state = si;
+        /* fallthrough */
+    case 3: {
+        /* Оригинал: тайл под будущей позицией ног категории 2 — значит
+         * ещё воздух. level_solid_at использует ту же маску ходьбы
+         * (проходимы только 1 и 2), поэтому проверка эквивалентна.
+         * ЗАЩИТА ПОРТА: у типа 15 постановка на землю при спавне даёт
+         * ноги на ~15 px ниже кромки пола, и первая же проба уходит в
+         * пустоту — тогда страж падал сквозь карту. Поэтому дополнительно
+         * ловим пересечение найденной строки земли. */
+        int feet = o->y + (int)(o->vyq >> 16) + obj_height(o);
+        int row  = level_ground_row_below(o->x + 10, o->y / TILE_H, 0x0001);
+        bool landed = level_solid_at(o->x + 10, feet) ||
+                      (row >= 0 && feet >= row * TILE_H);
+        if (!landed) break;
+        o->st_misc = 4;
+        break;
+    }
+    case 4:
+        o->st_phase = 0;                       /* +0xED */
+        o->vxq = o->vyq = 0; o->axq = o->ayq = 0;   /* set_motion(0) */
+        obj_snap_ground(o);
+        spawn_enemy_shot(o->x, o->y + 5, si, QV(2, 0x4000), 1);
+        o->pending_state = ((rng_next() & 1) ? 2 : 4) + si;
+        /* fallthrough */
+    case 5:
+        if (o->st_phase != 0 || (rng_next() & 1)) { o->st_misc = 6; break; }
+        spawn_enemy_shot(o->x, o->y + 5, si, Q_2_0, 1);
+        o->st_phase = 1;
+        break;
+    case 6:
+        o->vxq = 0;
+        o->vyq = -QV(3, 0);                    /* подскок вверх */
+        o->pending_state = si;
+        /* +0xE9 |= 1 уже перевёл подфазу в 7 */
+        /* fallthrough */
+    case 7: {
+        /* Пока игрок ниже больше чем на 0x1E — страж «подтягивается»
+         * вверх по 3 px за тик и снова уходит в прыжок (0xD55). */
+        int dyp = physics_get_top_y() - o->y;
+        if (dyp > 0x1E) {
+            o->y -= 3;
+            o->yq = (s32)o->y << 16;
+            o->st_misc = 2;
+        } else {
+            o->vyq = 0;
+            o->st_misc = 3;                    /* иначе — ждать посадки */
+        }
+        break;
+    }
+    default: break;
+    }
 }
 
 /* ── Тип 31 — лев (handler cs:0x1348:0x1B1A, file 0x1679A) ────────────
@@ -2548,7 +2640,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [12] = ai_type12,          /* скачущий валун */
     [13] = ai_type13,   /* Y-snap метатель */
     [14] = ai_type14,          /* ныряющая птица (босс L1) */
-    [15] = ai_stone_golem,
+    [15] = ai_type15,          /* каменный страж */
     [16] = ai_type16,
     [17] = ai_type17,   /* скелет на страусе */
     [18] = ai_type18,          /* ныряющий чёрт */
