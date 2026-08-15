@@ -430,17 +430,22 @@ int splash_run(const splash_options_t *opt)
     bool headless = (opt->ppm_path != NULL);
 
     u16 current_level = opt->level_num;
-    int rc = prepare_level(current_level,
-                            opt->with_demo || current_level == 0);
-    if (rc != 0) return rc;
 
-    /* Sprite cache */
+    /* Sprite cache — ДО загрузки уровня: prepare_level делает первый
+     * проход CHECKTRIGGERS, а постановка врагов на землю считает высоту
+     * их спрайта. Пока кэш не загружен, sprite_find возвращает NULL, все
+     * получают заглушечные 16 px и встают НИЖЕ пола (типы 15 и 38 из-за
+     * этого потом проваливались сквозь карту). */
     const char *sprite_file = mode_cga ? "karnov_sprites_cga.bin" : "karnov_sprites_ega.bin";
     if (try_load_sprites(sprite_file) != 0) {
         fprintf(stderr, "sprite_cache_load failed for %s\n", sprite_file);
         return 1;
     }
     printf("sprites: загружен data/%s (%d спрайтов)\n", sprite_file, sprite_cache_count());
+
+    int rc = prepare_level(current_level,
+                            opt->with_demo || current_level == 0);
+    if (rc != 0) return rc;
 
     /* Audio: loader-music (track 6) — играет во время загрузки/инициализации.
      * Переключаем на in-game (track 0) после minimum-один-цикл loader-а ниже. */

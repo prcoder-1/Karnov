@@ -272,18 +272,25 @@ static int obj_height(const ai_obj_t *o)
         }
         if (bottom > 0) return bottom;
     }
-    u16 sid = ((o->type == 4 || o->type == 5 || o->type == 6) && o->item_sprite > 0)
+    u16 sid = 0xFFFF;
+    /* Приоритет — аним-таблицы САМОГО EXE: ручной sprite_for_type у
+     * многих типов возвращал случайный кадр (у типа 15 — высотой 16 px),
+     * из-за чего постановка на землю в ai_spawn_from_record сажала врага
+     * НИЖЕ пола, и он потом проваливался сквозь карту. Предметы (4/5/6)
+     * рисуются своей иконкой и сюда не попадают. */
+    if (o->type != 4 && o->type != 5 && o->type != 6 && o->type < 58) {
+        const anim_list_t *al = &ANIM_LISTS[o->type];
+        if (al->count) {
+            int st = (o->anim_state < al->count) ? o->anim_state : 0;
+            const anim_state_t *as = &al->states[st];
+            if (as->n) sid = as->spr[(o->frame_index < as->n) ? o->frame_index : 0];
+        }
+    }
+    if (sid == 0xFFFF)
+        sid = ((o->type == 4 || o->type == 5 || o->type == 6) && o->item_sprite > 0)
                   ? o->item_sprite
                   : sprite_for_type(o->type, o->anim_phase);
     const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
-    /* Если ручного маппинга типа нет, высоту берём из аним-таблиц EXE —
-     * иначе объект получает заглушечные 16 px и постановка на землю в
-     * ai_spawn_from_record сажает его НИЖЕ пола (так тонул тип 15). */
-    if (!s && o->type < 58) {
-        const anim_list_t *al = &ANIM_LISTS[o->type];
-        if (al->count && al->states[0].n)
-            s = sprite_find(al->states[0].spr[0]);
-    }
     return s ? (int)s->h : 16;
 }
 
@@ -1155,12 +1162,7 @@ static void ai_type38(ai_obj_t *o, u16 frame, u8 in)
          * (x − 0x10 ед., y + высота спрайта) категорий 0, 4 или 7. */
         if (o->vyq > 0) {
             int cat = level_tile_attr_at(o->x - 32, o->y + obj_height(o));
-            /* ЗАЩИТА ПОРТА: если проба слева попала в пропасть, ловим
-             * пересечение строки земли под собственной колонкой —
-             * иначе босс проваливается сквозь карту. */
-            int row = level_ground_row_below(o->x, o->y / TILE_H, 0x0001);
-            bool past = (row >= 0 && o->y + obj_height(o) >= row * TILE_H);
-            if (cat == 0 || cat == 4 || cat == 7 || past) {
+            if (cat == 0 || cat == 4 || cat == 7) {
                 o->vyq = 0;
                 o->ayq = 0;
                 obj_snap_ground(o);
@@ -1301,15 +1303,10 @@ static void ai_type15(ai_obj_t *o, u16 frame, u8 in)
         /* Оригинал: тайл под будущей позицией ног категории 2 — значит
          * ещё воздух. level_solid_at использует ту же маску ходьбы
          * (проходимы только 1 и 2), поэтому проверка эквивалентна.
-         * ЗАЩИТА ПОРТА: у типа 15 постановка на землю при спавне даёт
-         * ноги на ~15 px ниже кромки пола, и первая же проба уходит в
-         * пустоту — тогда страж падал сквозь карту. Поэтому дополнительно
-         * ловим пересечение найденной строки земли. */
+         * level_solid_at использует ту же маску ходьбы (проходимы только
+         * 1 и 2), поэтому проверка эквивалентна оригинальной. */
         int feet = o->y + (int)(o->vyq >> 16) + obj_height(o);
-        int row  = level_ground_row_below(o->x + 10, o->y / TILE_H, 0x0001);
-        bool landed = level_solid_at(o->x + 10, feet) ||
-                      (row >= 0 && feet >= row * TILE_H);
-        if (!landed) break;
+        if (!level_solid_at(o->x + 10, feet)) break;
         o->st_misc = 4;
         break;
     }
@@ -3030,7 +3027,14 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
         g_obj[slot].home_y = g_obj[slot].y;
         g_obj[slot].spawn_y = (u16)g_obj[slot].y;
     } else if (pm != PLACE_NONE) {
-        const sprite_t *bs = sprite_find(sprite_for_type(type, 0));
+        /* Спрайт для метрик берём из аним-таблиц EXE (тот же кадр, что
+         * даст obj_height), иначе колонка пробы и высота считаются по
+         * РАЗНЫМ спрайтам и объект встаёт не на ту строку. */
+        u16 base_sid = 0xFFFF;
+        if (type < 58 && ANIM_LISTS[type].count && ANIM_LISTS[type].states[0].n)
+            base_sid = ANIM_LISTS[type].states[0].spr[0];
+        if (base_sid == 0xFFFF) base_sid = sprite_for_type(type, 0);
+        const sprite_t *bs = sprite_find(base_sid);
         int probe_x = (pm == PLACE_SNAP_CENTER && bs) ? sx + bs->art_w / 2 : sx;
         u16 mask = (pm == PLACE_SNAP_CENTER) ? 0x0089 : 0x0001;
         int row0 = sy / TILE_H - 1;
