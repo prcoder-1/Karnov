@@ -1061,6 +1061,60 @@ static void ai_type23(ai_obj_t *o, u16 frame, u8 in)
     else             { if (on)  o->st_phase = 1; }
 }
 
+/* «Выгул» в прямоугольнике (хелпер cs:0x1692:0x000D) — общий для типов
+ * 43/44/45. Прямоугольник выбирается по +0xEB (= init_arg) из таблицы
+ * DS:0x1D32 (по 8 байт: x0, y0, x1, y1; X — в единицах движка):
+ *     если x вне [x0, x1] → vx = −vx, бит 1;
+ *     если y вне [y0, y1] → vy = −vy, бит 2.
+ * Возвращает маску сработавших отражений. */
+static const s16 ROAM_RECT[3][4] = {
+    {  56, 240,  680, 390 },
+    { 696, 320,  928, 420 },
+    { 936, 240, 1384, 420 },
+};
+
+static int obj_bounce_region(ai_obj_t *o)
+{
+    int idx = o->st_aux;                       /* +0xEB */
+    if (idx < 0 || idx > 2) idx = 0;
+    const s16 *r = ROAM_RECT[idx];
+    int bits = 0;
+    if (obj_units(o) > r[2] || obj_units(o) < r[0]) { o->vxq = -o->vxq; bits |= 1; }
+    if (o->y > r[3] || o->y < r[1])                 { o->vyq = -o->vyq; bits |= 2; }
+    return bits;
+}
+
+/* ── Тип 45 — дрейфующая искра (handler cs:0x1692:0x00B4, file 0x181D4)
+ *
+ * INIT: +0xEB = init_arg (номер прямоугольника), vx = −0.5 + (rand &
+ * 0x1FFF)/65536 (т.е. чуть медленнее полупикселя влево), vy = +0.125,
+ * tick_period = 7, state_list = DS:0x1D56, аним-состояние 0.
+ * THINK: если (rand & 0x1F) < frame_ctr — сбросить счётчик и подтолкнуть
+ * vy на случайную величину (rand & 0x1FFF) в Q16.16 вверх или вниз (по
+ * биту 0 того же значения); затем отскок от границ прямоугольника, и
+ * при отражении по X — переключение аним-состояния 0 ⇄ 1.
+ * Очки за смерть 0x100. */
+static void ai_type45(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 7, 0);
+        obj_phys_begin(o);
+        o->st_aux = (int)o->init_arg;          /* +0xEB — номер региона */
+        o->vxq = (s32)0xFFFF8000 + (s32)(rng_next() & 0x1FFF);
+        o->vyq = QV(0, 0x2000);
+        return;
+    }
+    if ((int)(rng_next() & 0x1F) < o->st_ctr) {
+        o->st_ctr = 0;
+        s32 si = (s32)(rng_next() & 0x1FFF);
+        if (si & 1) o->vyq -= si;
+        else        o->vyq += si;
+    }
+    if (obj_bounce_region(o) & 1)
+        o->pending_state = (1 - o->anim_state) & 1;
+}
+
 /* ── Тип 43 — «крестовый» летун (handler cs:0x158C:0x0205, file 0x17085)
  *
  * INIT: подфаза (+0xE9) = 0, +0xEB = init_arg, tick_period = 3,
@@ -1090,6 +1144,7 @@ static void ai_type43(ai_obj_t *o, u16 frame, u8 in)
     if (si == 0)
         o->vxq = (rng_next() & 1) ? QV(0, 0xC000) : (s32)0xFFFF4000;
 
+    int di  = obj_bounce_region(o);     /* отскок от границ «выгула» */
     int dir = (o->vxq > 0);
     int dx  = player_units() - obj_units(o);
     int adx = dx < 0 ? -dx : dx;
@@ -1101,6 +1156,7 @@ static void ai_type43(ai_obj_t *o, u16 frame, u8 in)
     case 1:
         if (adx < 0x50 && (rng_next() & 0xF) == 0 && o->st_ctr > 20)
             o->st_misc = 2;
+        if (di & 1) o->pending_state = dir;      /* развернулся — сменить кадр */
         if (o->vxq != 0) {
             if (o->st_ctr <= 0x96) break;     /* 150 кадров по горизонтали */
             o->vyq = -o->vxq; o->vxq = 0; o->st_ctr = 0;
@@ -2303,7 +2359,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [42] = ai_particle42,
     [43] = ai_type43,          /* «крестовый» летун */
     [44] = ai_prng_spark,
-    [45] = ai_prng_spark,
+    [45] = ai_type45,          /* дрейфующая искра */
     [46] = ai_simple,
     [47] = ai_hopper47,
     [48] = ai_type48,
