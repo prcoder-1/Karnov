@@ -61,6 +61,7 @@ struct ai_obj;
 static bool is_damageable_obj(const struct ai_obj *o);
 static int  player_shots_alive(void);
 static void obj_snap_ground(struct ai_obj *o);
+static int  obj_width(const struct ai_obj *o);
 
 /* Многосегментные враги (типы 20, 21, 30, 33, 34, 36, 39, 50, 51):
  * до 8 частей-«bbox» как в оригинальном ActiveObject (+0x1E num_bboxes,
@@ -670,8 +671,7 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (!is_damageable_obj(e) && !e->is_boss) continue;
         /* bbox врага в объектной конвенции: (x, y) — левый-верх,
          * размеры — из спрайта (в оригинале это box.x0..x1/y0..y1). */
-        const sprite_t *es = sprite_find(sprite_for_type(e->type, e->anim_phase));
-        int ew = es ? (int)es->art_w : 16;
+        int ew = obj_width(e);
         int ex0 = e->x, ex1 = e->x + ew;
         int ey0 = e->y, ey1 = e->y + (e->cur_h > 0 ? e->cur_h : 24);
         if (fx1 < ex0 || fx0 > ex1) continue;
@@ -2477,6 +2477,19 @@ static void ai_type18(ai_obj_t *o, u16 frame, u8 in)
     }
 }
 
+/* Ширина хитбокса объекта. У типов, идущих через аним-машину, кадр
+ * лежит в parts[0] — ручной sprite_for_type для них возвращает не тот
+ * спрайт (а часто и вовсе 0xFFFF), и бокс схлопывался в дефолтные
+ * 16 px. Оригинал берёт размеры из box0.x0..x1, то есть из ТЕКУЩЕГО
+ * кадра, что и повторяет эта функция. */
+static int obj_width(const ai_obj_t *o)
+{
+    u16 sid = (o->num_parts > 0) ? o->parts[0].sprite
+                                 : sprite_for_type(o->type, o->anim_phase);
+    const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
+    return s ? (int)s->art_w : 16;
+}
+
 /* Поставить объект НОГАМИ на ближайшую поверхность снизу — порт
  * place_on_ground_core (cs:0xD4B:0x14C): ищет первую строку карты с
  * подходящим тайлом и пишет y_world = row*10 − высота спрайта. */
@@ -3656,8 +3669,7 @@ void ai_check_player_hit(int kx, int ky, int kw, int kh)
         /* (враждебность = наличие активного бокса, как +0x2E в оригинале) */
         if (!hostile) continue;
         int h = (o->cur_h > 0) ? o->cur_h : obj_height(o);
-        const sprite_t *es = sprite_find(sprite_for_type(o->type, o->anim_phase));
-        int w = es ? (int)es->art_w : 16;
+        int w = obj_width(o);
         if (px1 < o->x || px0 > o->x + w) continue;
         if (py1 < o->y || py0 > o->y + h) continue;
         /* Симметричный обмен уроном (file 0xF81E): игрок теряет HP врага,
