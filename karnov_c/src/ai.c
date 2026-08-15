@@ -56,6 +56,7 @@
  * в pair-loop THINKCYCLE оригинала, а не по списку primary-типов. */
 struct ai_obj;
 static bool is_damageable_obj(const struct ai_obj *o);
+static int  player_shots_alive(void);
 
 /* Многосегментные враги (типы 20, 21, 30, 33, 34, 36, 39, 50, 51):
  * до 8 частей-«bbox» как в оригинальном ActiveObject (+0x1E num_bboxes,
@@ -825,27 +826,6 @@ static void ai_slow_helper(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 6) & 1;       /* очень медленная флипа */
 }
 
-/* Type 10 — ГОРИЗОНТАЛЬНЫЙ маятник (декомпиляция cs:0x11D6:0x0413
- * → ai_type10). Документация: «Движется горизонтально по фиксированной
- * траектории, при достижении предельной точки flip'ит направление
- * (через NEG двойной точности)». vx_lo = 0x1000 (≈ slow), target = 0x6000
- * или 0xA000 (зависит от obj.sub_timer ≥ 0x0A).
- *
- * Упрощение: ±range_x px swing вокруг spawn_x (range_x в LEVEL1 = 5),
- * период ~32 кадра. ОРИГИНАЛ ВЕРТИКАЛЬНО НЕ ДВИГАЕТСЯ — поправлена ошибка
- * предыдущей реализации (был vertical). */
-static void ai_pendulum(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    /* Амплитуда swing'а = half_range_x (LEVEL1 enemy[4]: range_x=5 → ±2).
-     * Если range нулевой, fallback на ±5. */
-    int amp = (o->half_range_x > 0) ? o->half_range_x : 5;
-    int phase = (frame >> 1) & 7;   /* быстрее качание (было >>2) — 2026-07-06 */
-    static const s8 sin8[8] = { 0, +1, +2, +2, 0, -1, -2, -2 };
-    o->x = o->home_x + (sin8[phase] * amp + 1) / 2;
-    /* «Демон на облаке» — 8 фаз (#164..171), стрида ≈ 8 ticks/кадр. */
-    o->anim_phase = (frame >> 3) & 7;
-}
 
 
 /* ═══ Портированные TICK'и (декомпиляция KARNOV.EXE, 2026-08-14) ═══════
@@ -1029,6 +1009,128 @@ static void ai_type16(ai_obj_t *o, u16 frame, u8 in)
     }
 }
 
+/* ── Тип 10 — демон на облаке (handler cs:0x11D6:0x0413, file 0x140F3) ─
+ *
+ * Маятник: INIT ставит state_list = DS:0x180A, аним-состояние 0,
+ * vx = −0.9375 (0xFFFF:0x1000), frame_ctr(+0xC7) = 8 и вертикальное
+ * УСКОРЕНИЕ ay = ±0.625 по init_arg (>= 10 → вверх, иначе вниз).
+ * THINK: раз в 16 кадров (`test frame_ctr, 0xF`) знак ay меняется —
+ * отсюда синусоидальный «полёт по волне». Очки за смерть 0x110.
+ * Никакого преследования игрока у типа нет. */
+static void ai_type10(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 1, 0);
+        obj_phys_begin(o);
+        o->ayq   = (o->init_arg >= 10) ? -QV(0, 0xA000) : QV(0, 0xA000);
+        o->vxq   = (s32)0xFFFF1000;          /* −0.9375 ед./кадр */
+        o->st_ctr = 8;                        /* +0xC7 */
+        return;
+    }
+    if ((o->st_ctr & 0xF) == 0) o->ayq = -o->ayq;
+}
+
+/* ── Тип 18 — ныряющий чёрт (handler cs:0xFFA:0x127D, file 0x12A1D) ────
+ *
+ * INIT: si = (игрок правее), aux(+0xEF) = 0, phase(+0xED) = init_arg,
+ * phase_ctr(+0xEB) = СНИМОК player.y_world, tick_period = 3,
+ * подфаза (+0xE9) = 2, vx = ±1.5, vy = +1.5, y_world = player_y − 20,
+ * state_list = DS:0x19B4, аним-состояние = si.
+ *
+ * THINK (si пересчитывается каждый тик):
+ *   tgt = phase ? (player_y − снимок + 40) : 0;  dy = (player_y − tgt) − self.y
+ *   0   — подфаза 1, аним si+6
+ *   1   — dy >= 40 → подфаза 5, vx = ±1.5, vy = 0, аним si
+ *   2   — dy < 0 (или phase и frame_ctr > 30) → vx = ±1.5, vy = 0,
+ *         подфаза 4, frame_ctr = 0
+ *   4   — атака, если у игрока есть живые снаряды и |dx| > 10, либо
+ *         (phase и rand&1): подфаза 0, аним si+4, vx = ±1.5, vy = −1.5;
+ *         при phase — ++aux, на 5-м разе phase = 0, и с шансом 1/2
+ *         spawn_projectile(self → (self.x ± 8, player_y), скорость 2.0)
+ *   5   — |dx| < 10 → подфаза 2, vx = 0, vy = +1.5
+ * Аним-состояния: 0/1 полёт, 2/3 запас, 4/5 атака, 6/7 разворот. */
+static void ai_type18(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    int si = (player_units() > obj_units(o));
+    if (!o->use_anim) {
+        o->y = physics_get_top_y() - 20;
+        anim_begin(o, 3, si);
+        obj_phys_begin(o);
+        o->custom   = 0;                        /* +0xEF */
+        o->st_phase = (int)o->init_arg;         /* +0xED */
+        o->st_aux   = physics_get_top_y();      /* +0xEB — снимок Y игрока */
+        o->st_misc  = 2;                        /* +0xE9 — подфаза */
+        o->vxq = si ? Q_1_5 : -Q_1_5;
+        o->vyq = Q_1_5;
+        return;
+    }
+    int tgt = o->st_phase ? (physics_get_top_y() - o->st_aux + 0x28) : 0;
+    int dy  = (physics_get_top_y() - tgt) - o->y;
+    int dx  = player_units() - obj_units(o);
+    int adx = dx < 0 ? -dx : dx;
+
+    switch (o->st_misc) {
+    case 0:
+        o->st_misc = 1;
+        o->pending_state = si + 6;
+        /* fallthrough */
+    case 1:
+        if (dy < 0x28) break;
+        o->st_misc = 5;
+        o->vxq = si ? Q_1_5 : -Q_1_5;
+        o->vyq = 0;
+        o->pending_state = si;
+        break;
+    case 2:
+        if (dy >= 0 && (!o->st_phase || o->st_ctr <= 30)) break;
+        o->vxq = si ? Q_1_5 : -Q_1_5;
+        o->vyq = 0;
+        o->st_misc = 4;
+        o->st_ctr  = 0;
+        break;
+    case 4:
+        if (!((player_shots_alive() != 0 && adx > 10) ||
+              (o->st_phase && (rng_next() & 1))))
+            break;
+        o->st_misc = 0;
+        o->pending_state = si + 4;
+        o->vxq = si ? Q_1_5 : -Q_1_5;
+        o->vyq = -Q_1_5;
+        if (o->st_phase) {
+            if (++o->custom > 4) o->st_phase = 0;
+            if (rng_next() & 1) {               /* сброс снаряда в игрока */
+                int sx = o->x + ((rng_next() & 1) ? 16 : -16);
+                int sy = physics_get_top_y();
+                int slot = alloc_obj_slot();
+                if (slot >= 0) {
+                    ai_obj_t *b = &g_obj[slot];
+                    *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                     .subtype = 3, .x = o->x, .y = o->y,
+                                     .hp = 10, .level_idx = -1,
+                                     .facing = si ? 1 : -1, .custom = 2 };
+                    obj_phys_begin(b);
+                    /* Единичный вектор к цели со скоростью 2.0 ед./кадр. */
+                    int vx = (sx - o->x) / 2, vy = sy - o->y;
+                    int len = (vx < 0 ? -vx : vx) + (vy < 0 ? -vy : vy);
+                    if (len < 1) len = 1;
+                    b->vxq = ((s32)vx << 17) / len;
+                    b->vyq = ((s32)vy << 17) / len;
+                }
+            }
+        }
+        break;
+    case 5:
+        if (adx >= 10) break;
+        o->st_misc = 2;
+        o->vxq = 0;
+        o->vyq = Q_1_5;
+        break;
+    default: break;
+    }
+}
+
 /* Поставить объект НОГАМИ на ближайшую поверхность снизу — порт
  * place_on_ground_core (cs:0xD4B:0x14C): ищет первую строку карты с
  * подходящим тайлом и пишет y_world = row*10 − высота спрайта. */
@@ -1120,8 +1222,8 @@ static void ai_type26(ai_obj_t *o, u16 frame, u8 in)
         o->vyq = vx ? (s32)((QV(16, 0)) / vx) : 0;
         o->ayq = 0;
         obj_snap_ground(o);
-        /* fallthrough */
     }
+        /* fallthrough */
     case 5: {
         int cat = t26_tile_ahead(o);
         if (cat == 0 || cat == 4 || cat == 7) o->st_misc = 2;
@@ -1657,7 +1759,8 @@ static void ai_gold_ball(ai_obj_t *o, u16 frame, u8 karnov_input)
         obj_aim(o, o->x, o->y,
                 cx + GOLD_RING[o->custom][0] * 2, cy + GOLD_RING[o->custom][1], 10);
         o->invisible = false;
-        /* fallthrough — оригинал проваливается в проверку фазы 1 */
+        /* оригинал проваливается в проверку фазы 1 */
+        /* fallthrough */
     case 1:
         if (o->st_misc >= 10) o->st_phase = 2;
         break;
@@ -2015,7 +2118,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [8]  = ai_stub,            /* sky-spawner — драйвер ai_sky_tick вне объектов;
                                 * запись type 8 (range=0) не спавнится вовсе */
     [9]  = ai_walking_minion,  /* 2-bbox boss-like (L1: декор-дракон) */
-    [10] = ai_pendulum,
+    [10] = ai_type10,          /* демон на облаке — маятник */
     [11] = ai_type11,
     [12] = ai_simple,          /* наземный патруль (HP=20) */
     [13] = ai_type13,   /* Y-snap метатель */
@@ -2023,7 +2126,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [15] = ai_stone_golem,
     [16] = ai_type16,
     [17] = ai_type17,   /* скелет на страусе */
-    [18] = ai_walking_minion,
+    [18] = ai_type18,          /* ныряющий чёрт */
     [19] = ai_slow_helper,
     [20] = ai_head_column,     /* колонна голов LEVEL2 (multi-bbox, статична) */
     [21] = ai_multipart,            /* 7-сегментная цепь */
