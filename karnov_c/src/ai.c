@@ -1124,6 +1124,52 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     if (cat != 2) o->alive = false;
 }
 
+/* ── Тип 52 — «пробуждающийся» блок (cs:0x175E:0x0203, file 0x18FE3) ──
+ *
+ * INIT: подфаза (+0xE9) = 0, tick_period = 3, y_world выравнивается по
+ * строке тайлов (y -= y % 10), state_list = DS:0x1E70, вызов
+ * cs:0x175E:0x01A3(1).
+ * Подфазы:
+ *   0/1 — покой: аним-состояние 0, box0.hitflag = 1 (уязвим);
+ *   2/3 — «пробуждён»: аним-состояние 1 или 2 в зависимости от того, с
+ *         какой стороны игрок (сравнение с x + 8), box0.hitflag = 0
+ *         (неуязвим), кадр ставится в 1, а счётчик +0xEB увеличивается
+ *         каждый раз, когда индекс кадра обнуляется; после трёх таких
+ *         оборотов анимации — возврат в подфазу 0.
+ *
+ * НЕ ПЕРЕНЕСЕНО: что именно переводит объект из покоя в «пробуждён».
+ * В обработчике этого перехода нет — он приходит извне (state 4 следит
+ * за другим объектом по индексу +0xDF), и додумывать я не стал. */
+static void ai_type52(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, 0);
+        o->st_misc = 0;
+        o->y -= o->y % TILE_H;
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = 0;
+        o->custom = 1;                       /* уязвим в покое */
+        break;
+    case 2:
+        o->pending_state = (player_units() > obj_units(o) + 8) ? 2 : 1;
+        o->st_aux = 0;                       /* +0xEB */
+        o->custom = 0;                       /* неуязвим «пробуждённым» */
+        o->frame_index = 1;
+        /* fallthrough */
+    case 3:
+        if (o->frame_index == 0) ++o->st_aux;
+        if (o->st_aux > 2) o->st_misc = 0;   /* три оборота — назад в покой */
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 54 — стационарный плевун (cs:0x17B6:0x01DB, file 0x1953B) ────
  *
  * INIT: tick_period = 4, подфаза (+0xE9) = 0, state_list = DS:0x1EB0,
@@ -3266,7 +3312,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [49] = ai_type49,          /* «щит» босса */
     [50] = ai_multipart,
     [51] = ai_arena_static,
-    [52] = ai_simple,
+    [52] = ai_type52,          /* «пробуждающийся» блок */
     [53] = ai_type53,          /* падающий ползун */
     [54] = ai_type54,          /* стационарный плевун */
     [55] = ai_type55,          /* патрульный */
