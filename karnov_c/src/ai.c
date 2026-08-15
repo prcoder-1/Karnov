@@ -1113,6 +1113,40 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     if (cat != 2) o->alive = false;
 }
 
+/* ── Тип 47 — турель (handler cs:0x1692:0x0479, file 0x18599) ─────────
+ *
+ * INIT: +0xEB = init_arg, tick_period = 10, y_world поднимается на
+ * [DS:0x10D4] = 16 px, state_list = DS:0x1DA4, аним-состояние 0.
+ * THINK: объект НЕ движется (прежняя реализация «прыгуна» была
+ * выдумкой). Раз в тик (а тик — раз в 10 кадров) с шансом 1 из 16
+ * стреляет НАВЕДЁННЫМ снарядом из своей точки в (player.x,
+ * player.y + 10) со скоростью 0.75. Очки за смерть 0x1000. */
+static void ai_type47(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 10, 0);
+        obj_phys_begin(o);
+        o->st_aux = (int)o->init_arg;
+        return;
+    }
+    if ((rng_next() & 0xF) != 0) return;
+    int slot = alloc_obj_slot();
+    if (slot < 0) return;
+    ai_obj_t *b = &g_obj[slot];
+    *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
+                     .x = o->x, .y = o->y, .hp = 10, .level_idx = -1,
+                     .facing = (player_units() > obj_units(o)) ? 1 : -1 };
+    obj_phys_begin(b);
+    /* Единичный вектор к цели со скоростью 0.75 ед./кадр. */
+    int tx = physics_get_left_x() / 2 - obj_units(o);
+    int ty = physics_get_top_y() + 10 - o->y;
+    int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+    if (len < 1) len = 1;
+    b->vxq = ((s32)tx * QV(0, 0xC000)) / len;
+    b->vyq = ((s32)ty * QV(0, 0xC000)) / len;
+}
+
 /* ── Тип 42 — периодическая ловушка (cs:0x161F:0x029F, file 0x17C8F) ───
  *
  * INIT: tick_period = 3, подфаза (+0xE9) = 0, счётчик (+0xEB) =
@@ -2806,19 +2840,6 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
 
 
 
-/* Type 47 — Y-snap + PRNG (ai_type47): очень медленный (sub_timer_max=10),
- * случайные вертикальные подскоки. */
-static void ai_hopper47(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    o->anim_phase = (frame >> 3) & 1;
-    if ((frame % 10) != 0) return;
-    if ((rng_next() & 3) == 0) o->y -= 4;
-    else if (o->y < o->home_y) o->y += 2;
-    int kx = physics_get_left_x();
-    o->facing = (kx >= o->x) ? 1 : -1;
-    o->x += o->facing;
-}
 
 /* Type 49 — хелпер Рю (ai_type49): агрессивен ТОЛЬКО на LEVEL9 при
  * x_world > 0x44C (file) = 2200 (мир); иначе пассивен. */
@@ -2914,7 +2935,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [44] = ai_type44,          /* дрейфующий летун */
     [45] = ai_type45,          /* дрейфующая искра */
     [46] = ai_simple,
-    [47] = ai_hopper47,
+    [47] = ai_type47,          /* турель */
     [48] = ai_type48,
     [49] = ai_ryu_helper,
     [50] = ai_multipart,
