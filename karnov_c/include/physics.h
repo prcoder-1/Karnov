@@ -66,11 +66,11 @@ void physics_set_current_frame(u16 frame);
 bool physics_just_died(void);
 bool physics_is_dying(void);
 void physics_set_invuln(bool on);   /* victory-секвенция: Karnov неуязвим */
-/* Попадание врага по Карнову (pair-loop, file 0xFB7A). Первое — Карнов
- * «синеет» (мануал, KARNOV.md §5.3), второе — потеря жизни. Игнорируется
- * во время i-frames, неуязвимости и анимации гибели. */
-void physics_hit(void);
-bool physics_is_blue(void);
+/* Урон Карнову от касания врага (pair-loop, file 0xF81E): у игрока 5 HP
+ * (file 0x101CE), при контакте вычитается HP врага; ноль — смерть.
+ * Игнорируется во время i-frames, неуязвимости и анимации гибели. */
+void physics_hit(int enemy_hp);
+int  physics_hp(void);
 void physics_set_sit_scroll(bool on); /* level-end: поза «сидит со свитком» #0x60-0x62 */
 
 /* Рендер Karnov-спрайта в текущей позе. M3+: использует sprite cache,

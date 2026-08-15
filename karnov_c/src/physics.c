@@ -153,11 +153,15 @@ static bool s_just_died_pulse     = false;
 /* Неуязвимость: включается на время victory-секвенции (boss убит, Karnov
  * авто-идёт к свитку), чтобы вода/опасности не убили его во время прохода. */
 static bool s_invuln              = false;
-/* Два попадания до потери жизни (KARNOV.md §5.3, мануал): первое —
- * Карнов «синеет», второе — минус жизнь. s_blue держится до смерти или
- * до конца уровня; s_hit_iframes — короткая неуязвимость после удара,
- * иначе один и тот же враг снимает обе стадии за пару кадров. */
-static bool s_blue                = false;
+/* HP Карнова. Оригинал при (ре)спавне пишет player.hit_points = 5
+ * (file 0x101CE, рядом со сбросом таймеров ботинок/крыльев/очков и
+ * счётчика снарядов). Урон считает pair-loop (file 0xF81E): при касании
+ * ОБЕ стороны вычитают HP друг друга с клампом в ноль, и если у игрока
+ * стало 0 — он гибнет. У врагов HP от 10, так что касание практически
+ * всегда смертельно; «синий Карнов» из мануала кодом не подтверждается.
+ * s_hit_iframes — защита порта от повторного срабатывания на соседних
+ * кадрах (в оригинале эту роль играет state 4 + сброс hit-флага). */
+static int  s_hp                  = 5;
 static int  s_hit_iframes         = 0;
 /* Level-end: Karnov сидит со свитком (front-facing поза #0x60-0x62), а не
  * обычный crouch. Включается на время s_level_end. */
@@ -365,7 +369,7 @@ void physics_reset(int x, int y)
     s_dying_frame = 0;
     s_just_died_pulse = false;
     s_invuln = false;
-    s_blue = false;
+    s_hp = 5;                 /* file 0x101CE: hit_points = 5 при респавне */
     s_hit_iframes = 0;
     inv_reset();                 /* пустой инвентарь — pickup обязателен */
     /* для отладки можно зафиксировать позицию через env: */
@@ -713,20 +717,19 @@ void physics_tick(u8 input)
     s_render_sid = pick_sprite_id(input, s_cur_frame);
 }
 
-/* Попадание по Карнову (порт ветки pair-loop obj_type 0 × 1,
- * file 0xFB7A: `if (player_state != 9) player.state_byte = 4`).
- * Первое попадание — «синий» Карнов, второе — смерть. Пока идут
- * i-frames или включена неуязвимость (victory-секвенция, чит) — удар
- * игнорируется, как и при уже начавшейся анимации гибели. */
-void physics_hit(void)
+/* Урон Карнову от касания (pair-loop, file 0xF81E):
+ *     player.hp -= enemy_hp;  если < 0 → 0
+ *     enemy.hp  -= player.hp; (вычитание симметрично, делает вызывающий)
+ *     погиб, если player.hp == 0
+ * Пока идут i-frames, включена неуязвимость (victory-секвенция, чит
+ * ZEEK) или уже играет анимация гибели — удар игнорируется. */
+void physics_hit(int enemy_hp)
 {
     if (s_invuln || s_dying || s_hit_iframes > 0) return;
-    if (!s_blue) {
-        s_blue = true;
-        s_hit_iframes = 45;
-        audio_play_sfx(2);           /* play_sound(2) в оригинале */
-        return;
-    }
+    s_hit_iframes = 20;
+    s_hp -= enemy_hp;
+    if (s_hp > 0) { audio_play_sfx(2); return; }   /* ранен, но жив */
+    s_hp = 0;
     s_dying = true;
     s_dying_frame = 0;
     s_just_died_pulse = true;
@@ -736,7 +739,7 @@ void physics_hit(void)
     s_in_jump = false;
 }
 
-bool physics_is_blue(void) { return s_blue; }
+int physics_hp(void) { return s_hp; }
 
 bool physics_just_died(void) { return s_just_died_pulse; }
 bool physics_is_dying(void)  { return s_dying; }

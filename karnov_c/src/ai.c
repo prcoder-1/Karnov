@@ -3639,13 +3639,20 @@ void ai_check_player_hit(int kx, int ky, int kw, int kh)
         if (o->type == TYPE_PLAYER_FIREBALL || o->type == TYPE_BOMB_BLAST) continue;
         if (o->is_scroll || o->type == 4 || o->type == 5 || o->type == 6) continue;
         bool hostile = (o->type == TYPE_ENEMY_SHOT) || is_damageable_obj(o) || o->is_boss;
+        /* (враждебность = наличие активного бокса, как +0x2E в оригинале) */
         if (!hostile) continue;
         int h = (o->cur_h > 0) ? o->cur_h : obj_height(o);
         const sprite_t *es = sprite_find(sprite_for_type(o->type, o->anim_phase));
         int w = es ? (int)es->art_w : 16;
         if (px1 < o->x || px0 > o->x + w) continue;
         if (py1 < o->y || py0 > o->y + h) continue;
-        physics_hit();
+        /* Симметричный обмен уроном (file 0xF81E): игрок теряет HP врага,
+         * враг — HP игрока, оба с клампом в ноль. */
+        int ehp = (o->hp > 0) ? o->hp : 1;
+        int php = physics_hp();
+        physics_hit(ehp);
+        o->hp -= php;
+        if (o->hp <= 0 && o->type != TYPE_ENEMY_SHOT) ai_notify_enemy_hit(i, g_ai_frame);
         return;
     }
 }
