@@ -134,6 +134,10 @@ typedef struct ai_obj {
     /* Вспышка попадания (порт puff-обработчика cs:0xD4B:0x3C0): пока
      * счётчик > 0, вместо врага рисуется кадр вспышки #4..#6. */
     int    puff_frames;
+    /* «Добитый, но оставшийся на карте»: у некоторых типов состояние 4
+     * не удаляет объект, а переводит его в obj_type = 9 с hitflag = 0 —
+     * он остаётся стоять неуязвимой декорацией (тип 54, file 0x1953B). */
+    bool   is_decor;
     /* Projectile Q16.16 sub-pixel state (TYPE_ROCK_PROJECTILE).
      * Соответствуют полям object'а +0x0E/+0x10 (vx) и +0x12/+0x14 (vy)
      * из KARNOV.EXE handler cs:0x11D6:0x08B3 (sprites #21-23).
@@ -220,6 +224,7 @@ static bool obj_is_item(const ai_obj_t *o)
 
 static bool is_damageable_obj(const struct ai_obj *o)
 {
+    if (o->is_decor) return false;        /* добитая декорация */
     /* Псевдотипы порта. */
     switch (o->type) {
         case TYPE_STONE_THROWER:
@@ -4298,6 +4303,7 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     if (!o->alive) return;
     /* Урон = PLAYER_FIREBALL_DAMAGE (пул HP врага уменьшается на урон
      * снаряда, как `b->hit_points -= a->hit_points` в оригинале). */
+    if (o->is_decor) return;              /* декорацию уже не добить */
     o->hp -= PLAYER_FIREBALL_DAMAGE;
     if (o->hp > 0) {
         /* Раненый, но живой враг в оригинале не продолжает как ни в чём
@@ -4307,6 +4313,18 @@ void ai_notify_enemy_hit(int slot, u16 frame)
          * по флагу +0xED) и ВОЗВРАЩАЕТ исходный обработчик. В порту это
          * короткая вспышка: 8 кадров рисуем кадры пуфа поверх врага. */
         o->puff_frames = 8;
+        return;
+    }
+    /* Состояние 4 у части типов не убивает объект: тип 54 переходит в
+     * obj_type = 9, box0.hitflag = 0 и аним-состояние 2, то есть
+     * остаётся на карте неуязвимой декорацией (file 0x1953B, 0x030B). */
+    if (o->type == 54) {
+        o->is_decor = true;
+        o->hp = 0;
+        o->pending_state = 2;
+        o->anim_state = 2;
+        o->puff_frames = 8;
+        audio_play_sfx(1);
         return;
     }
     o->alive = false;
