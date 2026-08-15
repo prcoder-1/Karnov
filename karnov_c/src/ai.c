@@ -57,6 +57,7 @@
 struct ai_obj;
 static bool is_damageable_obj(const struct ai_obj *o);
 static int  player_shots_alive(void);
+static void obj_snap_ground(struct ai_obj *o);
 
 /* Многосегментные враги (типы 20, 21, 30, 33, 34, 36, 39, 50, 51):
  * до 8 частей-«bbox» как в оригинальном ActiveObject (+0x1E num_bboxes,
@@ -1082,6 +1083,115 @@ static int obj_bounce_region(ai_obj_t *o)
     if (obj_units(o) > r[2] || obj_units(o) < r[0]) { o->vxq = -o->vxq; bits |= 1; }
     if (o->y > r[3] || o->y < r[1])                 { o->vyq = -o->vyq; bits |= 2; }
     return bits;
+}
+
+/* ── Тип 35 — прыгающий голем (handler cs:0x151A:0x08B0, file 0x17250)
+ *
+ * INIT: tick_period = 4, подфаза (+0xE9) = 0, +0xEB = 0,
+ * phase(+0xED) = (anim_len > 10) — «стреляющий» вариант,
+ * state_list = DS:0x1C40, постановка на землю по ЦЕНТРУ (спрайт 0xF5).
+ * THINK: направление dirsel = (игрок правее) при |dx| > 30, иначе
+ * случайное; подфазы (+0xE9, чётная — одноразовая):
+ *   0/1 — покой: кадр 0; «просыпается» (active = 1), если hp < 0x46 или
+ *         |dx| < 0x3C; когда анимация досмотрена до последнего кадра —
+ *         подфаза 2;
+ *   2/3 — прыжок: кадр dirsel+1, постановка на землю (спрайт 0xEF),
+ *         vx = 0 в 3 случаях из 4, иначе ±1.0; vy = −1.25, ay = +0.125;
+ *         приземлился — подфаза 6;
+ *   6/7 — второй прыжок: кадр dirsel+3, vy = −1.25, ay = +0.125; на
+ *         подъёме, если игрок ниже на 0x19 — зависание (vy = 0);
+ *         приземлился — снова подфаза 2. */
+static bool obj_on_ground(const ai_obj_t *o)
+{
+    return level_solid_at(o->x + 8, o->y + obj_height(o) + 1);
+}
+
+static void ai_type35(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 0);
+        obj_phys_begin(o);
+        o->st_misc  = 0;                        /* +0xE9 */
+        o->st_aux   = 0;                        /* +0xEB */
+        o->st_phase = (o->init_arg > 10);       /* +0xED — «стреляющий» */
+        obj_snap_ground(o);
+        return;
+    }
+    int di = o->st_misc;
+    o->st_misc |= 1;
+    int dx = player_units() - obj_units(o);
+    int adx = dx < 0 ? -dx : dx;
+    int dirsel = (adx > 30) ? (dx > 0) : (int)(rng_next() & 1);
+
+    switch (di) {
+    case 0:
+        o->frame_index = 0;
+        o->pending_state = 0;
+        /* fallthrough */
+    case 1:
+        /* +0xDB (active) в оригинале гейтит ПРОДВИЖЕНИЕ анимации в
+         * ai_dispatch: пока голем «спит», кадр не меняется и до конца
+         * цикла дело не доходит. Просыпается при hp < 0x46 либо когда
+         * игрок ближе 0x3C. */
+        if (o->hp < 0x46 || adx < 0x3C) o->custom = 1;
+        if (!o->custom) { o->frame_index = 0; break; }
+        { const anim_list_t *al = &ANIM_LISTS[35];
+          int n = (al->count && o->anim_state < al->count)
+                      ? al->states[o->anim_state].n : 1;
+          if (o->frame_index >= n - 1) o->st_misc = 2; }
+        break;
+    case 2:
+        o->pending_state = dirsel + 1;
+        obj_snap_ground(o);
+        o->vxq = ((rng_next() & 3) != 0) ? 0 : (dirsel ? Q_1_0 : -Q_1_0);
+        o->vyq = (s32)0xFFFEC000;               /* −1.25 */
+        o->ayq = QV(0, 0x2000);                 /* +0.125 */
+        /* fallthrough */
+    case 3:
+        if (obj_on_ground(o) && o->vyq > 0) o->st_misc = 6;
+        break;
+    case 6:
+        o->pending_state = dirsel + 3;
+        o->vyq = (s32)0xFFFEC000;
+        o->ayq = QV(0, 0x2000);
+        /* fallthrough */
+    case 7:
+        if (o->vyq < 0 && (physics_get_top_y() - o->y) > 0x19) {
+            o->vyq = 0;                          /* завис над игроком */
+            o->ayq = QV(0, 0x2000);
+        }
+        if (obj_on_ground(o) && o->vyq > 0) o->st_misc = 2;
+        break;
+    default: break;
+    }
+}
+
+/* ── Тип 44 — дрейфующий летун (handler cs:0x1692:0x052E, file 0x1864E)
+ *
+ * INIT: +0xEB = init_arg (номер прямоугольника «выгула»),
+ * vx = −0.875 + (rand & 0x1FFF) в Q16.16, vy = +0.1875, tick_period = 3,
+ * state_list = DS:0x1DC0, аним-состояние 0.
+ * THINK: si = 1 с шансом 1 из 32 (`test rand, 0x1F`); отскок от границ
+ * зоны даёт di. Если si или отражение по X — кадр переключается
+ * 0 ⇄ 1, а при si дополнительно разворачивается vx. Очки 0x1800. */
+static void ai_type44(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, 0);
+        obj_phys_begin(o);
+        o->st_aux = (int)o->init_arg;
+        o->vxq = (s32)0xFFFF2000 + (s32)(rng_next() & 0x1FFF);
+        o->vyq = QV(0, 0x3000);
+        return;
+    }
+    int si = ((rng_next() & 0x1F) == 0);
+    int di = obj_bounce_region(o);
+    if (si || (di & 1)) {
+        o->pending_state = (1 - o->anim_state) & 1;
+        if (si) o->vxq = -o->vxq;
+    }
 }
 
 /* ── Тип 45 — дрейфующая искра (handler cs:0x1692:0x00B4, file 0x181D4)
@@ -2203,40 +2313,6 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
-/* Types 44/45 — PRNG-снаряды (ai_type44/45): случайная vy
- *   type 44: vy = −((rand & 0x1FFF) + 0x2000)/65536  (быстрее вверх), vx=0x3000
- *   type 45: vy = −((rand & 0x1FFF) + 0x8000)/65536? — медленный вариант,
- *            vx=0x2000, sub_timer_max=7.
- * Q16.16 как у rock-projectile. Направление по игроку. */
-static void ai_prng_spark(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    if (o->custom == 0) {
-        o->custom = 1;
-        int kx = physics_get_left_x();
-        o->facing = (kx >= o->x) ? 1 : -1;
-        int r = (int)(rng_next() & 0x1FFF);
-        o->pos_x_q16 = o->x << 16;
-        o->pos_y_q16 = o->y << 16;
-        if (o->type == 44) {
-            o->vy_q16 = -(r + 0x2000) * 2;         /* ~-0.25..-0.5 px/f ×2 */
-            o->vx_q16 = o->facing * 0x3000 * 2;
-        } else {
-            o->vy_q16 = -(r + 0x8000);             /* медленный подъём */
-            o->vx_q16 = o->facing * 0x2000 * 2;
-        }
-        o->grav_q16 = 0x1000;
-    }
-    o->vy_q16 += o->grav_q16;
-    o->pos_x_q16 += o->vx_q16;
-    o->pos_y_q16 += o->vy_q16;
-    o->x = o->pos_x_q16 >> 16;
-    o->y = o->pos_y_q16 >> 16;
-    o->anim_phase = (frame >> 2) & 3;
-    int world_w = (int)level_num_map_cols * TILE_W;
-    if (o->y > physics_get_ground_y() + 32 || o->x < -16 || o->x > world_w + 16)
-        o->alive = false;
-}
 
 /* Type 42 — частица/искра (ai_type42, UNIQUE 3-state): короткоживущий
  * объект; behavior_phase = init_arg & 1 (если 1 — y −= 20); живёт
@@ -2349,7 +2425,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [32] = ai_simple,
     [33] = ai_multipart,
     [34] = ai_multipart,            /* червь с HP-индикатором */
-    [35] = ai_simple,          /* dual-mode */
+    [35] = ai_type35,          /* прыгающий голем */
     [36] = ai_ryu,             /* ★ Рю */
     [37] = ai_simple,          /* slow boss */
     [38] = ai_simple,          /* delayed 75 кадров */
@@ -2358,7 +2434,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
     [42] = ai_particle42,
     [43] = ai_type43,          /* «крестовый» летун */
-    [44] = ai_prng_spark,
+    [44] = ai_type44,          /* дрейфующий летун */
     [45] = ai_type45,          /* дрейфующая искра */
     [46] = ai_simple,
     [47] = ai_hopper47,
