@@ -243,6 +243,8 @@ static bool is_damageable_obj(const struct ai_obj *o)
     if (o->type == 46) return o->custom != 0;
     /* Тип 53 неуязвим, пока падает (file 0x193DD). */
     if (o->type == 53) return o->custom != 0;
+    /* Тип 55 неуязвим на «отдыхе» (file 0x196E8). */
+    if (o->type == 55) return o->custom != 0;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -1118,6 +1120,65 @@ static void ai_trap_segment(ai_obj_t *o, u16 frame, u8 in)
     o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
     int cat = level_tile_attr_at(o->x, o->y);
     if (cat != 2) o->alive = false;
+}
+
+/* ── Тип 55 — патрульный (handler cs:0x17EC:0x0028, file 0x196E8) ─────
+ *
+ * INIT: tick_period = 4, +0xEB = СНИМОК стартового hp, подфаза
+ * (+0xE9) = 2 (то есть начинает с «отдыха»), постановка на землю со
+ * спрайтом 0x142 (#322), state_list = DS:0x1EF4.
+ * Подфазы:
+ *   0/1 — ходьба: аним-состояние = phase(+0xED), vx = ±0.5 по нему,
+ *         box0.hitflag = 1 (уязвим). Проба края: тайл в точке
+ *         (x + (phase ? +0x14 : −0x0A), нижняя кромка); пока он
+ *         категории 0 — идём дальше, иначе phase ^= 1 (разворот) и
+ *         подфаза 0 переигрывается;
+ *   2/3 — отдых: аним-состояние 2, vx = 0, hitflag = 0 (НЕУЯЗВИМ),
+ *         счётчик кадров сброшен; через 0x3C кадров зовётся
+ *         cs:0x17EC:0x0001, который выбирает СЛУЧАЙНОЕ направление
+ *         (phase = rand & 1), возвращает подфазу 0 и ВОССТАНАВЛИВАЕТ
+ *         hp из снимка — то есть за время отдыха враг «лечится». */
+static void ai_type55(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 4, 2);
+        obj_phys_begin(o);
+        o->st_aux  = o->hp;              /* +0xEB — снимок hp */
+        o->st_misc = 2;                  /* начинает с отдыха */
+        o->custom  = 0;                  /* box0.hitflag */
+        obj_snap_ground(o);
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    switch (si) {
+    case 0:
+        o->pending_state = o->st_phase;
+        o->vxq = o->st_phase ? QV(0, 0x8000) : (s32)0xFFFF8000;   /* ±0.5 */
+        o->custom = 1;                   /* уязвим на ходу */
+        /* fallthrough */
+    case 1: {
+        int probe_x = o->x + (o->st_phase ? 40 : -20);   /* ±0x14/0x0A ед. */
+        if (level_tile_attr_at(probe_x, o->y + obj_height(o)) == 0) break;
+        o->st_phase ^= 1;                /* край площадки — разворот */
+        o->st_misc = 0;
+        break;
+    }
+    case 2:
+        o->pending_state = 2;
+        o->st_ctr = 0;
+        o->custom = 0;                   /* во время отдыха неуязвим */
+        o->vxq = 0;
+        /* fallthrough */
+    case 3:
+        if (o->st_ctr <= 0x3C) break;
+        o->st_phase = (int)(rng_next() & 1);
+        o->st_misc  = 0;
+        o->hp       = o->st_aux;         /* восстановление hp */
+        break;
+    default: break;
+    }
 }
 
 /* ── Тип 53 — падающий ползун (cs:0x17B6:0x007D, file 0x193DD) ────────
@@ -3075,7 +3136,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [52] = ai_simple,
     [53] = ai_type53,          /* падающий ползун */
     [54] = ai_simple,
-    [55] = ai_simple,
+    [55] = ai_type55,          /* патрульный */
     [56] = ai_stub,            /* level-end триггер — секвенция в game.c */
     [57] = ai_stub,            /* статическая декорация */
 };
