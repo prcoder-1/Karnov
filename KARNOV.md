@@ -6,6 +6,8 @@
 `SPRITES.CGA`, `SPRITES.EGA`, `LEVEL?.MOV`, `LEVEL?.BIN`.
 
 Смежные документы:
+- `docs/DECOMPILATION.md` — **как** велась декомпиляция: инструменты, приёмы
+  поиска, скелет обработчика, типовые ошибки и цикл проверки;
 - `AUDIO.md` — звуковая подсистема (PC-speaker, музыка, SFX);
 - `docs/DECOMPILE_NOTES.md` — полная карта «адрес EXE → имя функции»;
 - `docs/ENEMY_GUIDE.md` — детальный каталог всех 57 AI-типов;
