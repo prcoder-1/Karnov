@@ -232,6 +232,8 @@ static bool is_damageable_obj(const struct ai_obj *o)
     /* Босс LEVEL4 неуязвим, пока дремлет и падает: box0.hitflag = 1
      * ставится только при входе в боевую подфазу 6 (file 0x17E37). */
     if (o->type == 40) return o->custom != 0;
+    /* Босс LEVEL3 так же неуязвим, пока стоит (file 0x17867). */
+    if (o->type == 38) return o->custom != 0;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -1082,6 +1084,91 @@ static int obj_bounce_region(ai_obj_t *o)
     if (obj_units(o) > r[2] || obj_units(o) < r[0]) { o->vxq = -o->vxq; bits |= 1; }
     if (o->y > r[3] || o->y < r[1])                 { o->vyq = -o->vyq; bits |= 2; }
     return bits;
+}
+
+/* ── Тип 38 — босс LEVEL3 «динозавр» (cs:0x151A:0x0EC7, file 0x17867) ──
+ *
+ * INIT: tick_period = 7, подфаза (+0xE9) = 0, phase(+0xED) = СНИМОК
+ * стартового hp, aux(+0xEF) = 0, state_list = DS:0x1CA4,
+ * box0.hitflag = 0 (НЕУЯЗВИМ), frame_ctr = 0x4B.
+ *
+ * Каждый тик: d = |dx| + |dy| до игрока (хелпер cs:0xD4B:0x105);
+ * aux |= (d < 0x64) — «заметил», флаг липкий. Если снимок hp минус
+ * текущий hp превысил 0x46 (70 урона), hp сразу ставится в −20, т.е.
+ * босс умирает — его живучесть задана этим порогом, а не полем записи.
+ *
+ * Подфазы: 0/1 — стойка (кадр 0), установка на землю по центру спрайта
+ * 0x101; ждёт, пока не заметит игрока И пока не пройдёт 0x4B кадров;
+ * 2/3 — атака: кадр 1, счётчик кадров = 0, box0.hitflag = 1 (теперь
+ * уязвим), прыжок vx = −1.5, vy = −2.0 с ускорением +0.25; догнав
+ * игрока (self.x <= player.x) горизонтальная скорость обнуляется.
+ * Очки за смерть 0x20000.
+ *
+ * Не портированы два вызова из подфазы 2 — cs:0x151A:0xDDF и 0xE5D
+ * (по контексту — обновление коллизии и, вероятно, огненное дыхание). */
+static void ai_type38(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 7, 0);
+        obj_phys_begin(o);
+        o->st_misc  = 0;                    /* +0xE9 */
+        o->st_phase = o->hp;                /* +0xED — снимок hp */
+        o->st_aux   = 0;                    /* +0xEF — «заметил» */
+        o->custom   = 0;                    /* box0.hitflag — неуязвим */
+        o->st_ctr   = 0x4B;
+        return;
+    }
+    int dx = player_units() - obj_units(o);
+    int dy = physics_get_top_y() - o->y;
+    int d  = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+    if (d < 0x64) o->st_aux = 1;
+    if (o->st_phase - o->hp > 0x46) o->hp = -20;   /* порог живучести */
+
+    int ph = o->st_misc;
+    o->st_misc |= 1;
+    switch (ph) {
+    case 0:
+        o->pending_state = 0;
+        obj_snap_ground(o);
+        /* fallthrough */
+    case 1:
+        if (!o->st_aux) break;
+        if (o->st_ctr <= 0x4B) break;
+        o->st_misc = 2;
+        break;
+    case 2:
+        o->pending_state = 1;
+        o->st_ctr = 0;
+        o->custom = 1;                      /* теперь уязвим */
+        o->vxq = (s32)0xFFFE8000;           /* −1.5 */
+        o->vyq = -QV(2, 0);                 /* −2.0 */
+        o->ayq = QV(0, 0x4000);             /* +0.25 */
+        /* cs:0x151A:0xDDF — огненное дыхание: с шансом 1/2 снаряд со
+         * скоростью 2.0, иначе 1.5, из (x, y + 7) в сторону игрока. */
+        spawn_enemy_shot(o->x, o->y + 7, (player_units() > obj_units(o)),
+                         (rng_next() & 1) ? Q_2_0 : Q_1_5, 1);
+        /* fallthrough */
+    case 3:
+        if (obj_units(o) <= player_units()) o->vxq = 0;   /* догнал */
+        /* cs:0x151A:0xE5D — посадка: только на снижении, тайл под
+         * (x − 0x10 ед., y + высота спрайта) категорий 0, 4 или 7. */
+        if (o->vyq > 0) {
+            int cat = level_tile_attr_at(o->x - 32, o->y + obj_height(o));
+            /* ЗАЩИТА ПОРТА: если проба слева попала в пропасть, ловим
+             * пересечение строки земли под собственной колонкой —
+             * иначе босс проваливается сквозь карту. */
+            int row = level_ground_row_below(o->x, o->y / TILE_H, 0x0001);
+            bool past = (row >= 0 && o->y + obj_height(o) >= row * TILE_H);
+            if (cat == 0 || cat == 4 || cat == 7 || past) {
+                o->vyq = 0;
+                o->ayq = 0;
+                obj_snap_ground(o);
+            }
+        }
+        break;
+    default: break;
+    }
 }
 
 /* ── Тип 40 — босс LEVEL4 «гусеница» (cs:0x161F:0x0447, file 0x17E37) ──
@@ -2748,7 +2835,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [35] = ai_type35,          /* прыгающий голем */
     [36] = ai_ryu,             /* ★ Рю */
     [37] = ai_simple,          /* slow boss */
-    [38] = ai_simple,          /* delayed 75 кадров */
+    [38] = ai_type38,          /* босс LEVEL3 */
     [39] = ai_multipart,
     [40] = ai_type40,          /* босс LEVEL4 */
     [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
