@@ -1061,6 +1061,80 @@ static void ai_type23(ai_obj_t *o, u16 frame, u8 in)
     else             { if (on)  o->st_phase = 1; }
 }
 
+/* ── Тип 43 — «крестовый» летун (handler cs:0x158C:0x0205, file 0x17085)
+ *
+ * INIT: подфаза (+0xE9) = 0, +0xEB = init_arg, tick_period = 3,
+ * state_list = DS:0x1D7E.
+ * THINK (si = +0xE9, затем +0xE9 |= 1 — чётная подфаза одноразовая):
+ *   при si == 0 случайно выбирается vx = ±0.75;
+ *   0/1 — движение «крестом»: если игрок ближе 0x50 и выпал 1 из 16 и
+ *         frame_ctr > 20 → подфаза 2 (атака). Смена оси: пока vx ≠ 0 —
+ *         через 150 кадров vy = −vx, vx = 0; пока vx == 0 — через 30
+ *         кадров vx = vy, vy = 0 (и каждый раз frame_ctr = 0);
+ *   2/3 — атака: аним-состояние = сторона + 2, скорость пополам,
+ *         на КАДРЕ 1 анимации — выстрел из (x, y+10) вертикально в
+ *         игрока со скоростью 0.875; на кадре 0 без смены состояния —
+ *         возврат в подфазу 0. Очки за смерть 0x1800. */
+static void ai_type43(ai_obj_t *o, u16 frame, u8 in)
+{
+    (void)frame; (void)in;
+    if (!o->use_anim) {
+        anim_begin(o, 3, 0);
+        obj_phys_begin(o);
+        o->st_misc = 0;                       /* +0xE9 */
+        o->st_aux  = (int)o->init_arg;        /* +0xEB */
+        return;
+    }
+    int si = o->st_misc;
+    o->st_misc |= 1;
+    if (si == 0)
+        o->vxq = (rng_next() & 1) ? QV(0, 0xC000) : (s32)0xFFFF4000;
+
+    int dir = (o->vxq > 0);
+    int dx  = player_units() - obj_units(o);
+    int adx = dx < 0 ? -dx : dx;
+
+    switch (si) {
+    case 0:
+        o->pending_state = dir;
+        /* fallthrough */
+    case 1:
+        if (adx < 0x50 && (rng_next() & 0xF) == 0 && o->st_ctr > 20)
+            o->st_misc = 2;
+        if (o->vxq != 0) {
+            if (o->st_ctr <= 0x96) break;     /* 150 кадров по горизонтали */
+            o->vyq = -o->vxq; o->vxq = 0; o->st_ctr = 0;
+        } else {
+            if (o->st_ctr <= 0x1E) break;     /* 30 кадров по вертикали */
+            o->vxq = o->vyq; o->vyq = 0; o->st_ctr = 0;
+        }
+        break;
+    case 2:
+        o->pending_state = dir + 2;
+        o->vxq /= 2;
+        o->st_ctr = 0;
+        /* fallthrough */
+    case 3:
+        if (o->frame_index == 1) {            /* кадр 1 — выстрел вниз */
+            int slot = alloc_obj_slot();
+            if (slot >= 0) {
+                ai_obj_t *b = &g_obj[slot];
+                *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                 .subtype = 3, .x = o->x, .y = o->y + 10,
+                                 .hp = 10, .level_idx = -1, .facing = 1,
+                                 .custom = 0 };
+                obj_phys_begin(b);
+                b->vxq = 0;
+                b->vyq = (physics_get_top_y() > o->y) ? QV(0, 0xE000)
+                                                      : -QV(0, 0xE000);
+            }
+        }
+        if (o->frame_index == 0 && o->pending_state < 0) o->st_misc = 0;
+        break;
+    default: break;
+    }
+}
+
 /* ── Тип 14 — ныряющая птица (handler cs:0x11D6:0x0E0A, file 0x13D6A) ──
  *
  * Преамбула каждого тика: dy = (player_y + h_p) − (self.y + h_s);
@@ -2227,7 +2301,7 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [40] = ai_simple,
     [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
     [42] = ai_particle42,
-    [43] = ai_simple,
+    [43] = ai_type43,          /* «крестовый» летун */
     [44] = ai_prng_spark,
     [45] = ai_prng_spark,
     [46] = ai_simple,
