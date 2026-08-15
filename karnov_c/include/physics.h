@@ -32,6 +32,13 @@ void physics_tick(u8 input_state);
 int  physics_get_x(void);
 int  physics_get_y(void);
 int  physics_get_ground_y(void);
+/* Мировые координаты игрока в конвенции объектов движка: x_world = ЛЕВЫЙ
+ * край спрайта, y_world = ВЕРХ спрайта (пиксели). Оригинал кэширует ровно
+ * их в [DS:0xD8BC]/[DS:0xD8BE] (file 0x10312), и AI-обработчики врагов
+ * сравниваются именно с этими значениями. physics_get_x/y возвращают
+ * внутреннюю конвенцию порта (центр тела / подошва) — для AI не годятся. */
+int  physics_get_left_x(void);
+int  physics_get_top_y(void);
 bool physics_facing_left(void);
 
 /* Ladder state. Karnov ставит лестницу нажатием INP_OPT (B) находясь на земле.

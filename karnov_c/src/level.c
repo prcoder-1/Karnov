@@ -222,6 +222,16 @@ bool level_solid_at(int wx, int wy)
  * struct[+0]/[+2] для верхних углов, [+4]/[+6] для нижних, [+8] для
  * свип-пробы вдоль вектора. У ходьбы Карнова (DS:0x1580, file 0x20710)
  * это 0x0085 сверху и 0x0006 снизу (см. karnov.h). */
+int level_tile_attr_at(int wx, int wy)
+{
+    if (wx < 0 || wy < 0) return -1;
+    int col = wx / TILE_W;
+    int row = wy / TILE_H;
+    if (col >= (int)level_num_map_cols) return -1;
+    if (row >= (int)level_num_map_rows) return -1;
+    return (int)level_tile_attr[level_map[row][col]];
+}
+
 bool level_tile_blocks(int wx, int wy, u16 mask)
 {
     if (wx < 0 || wy < 0) return false;

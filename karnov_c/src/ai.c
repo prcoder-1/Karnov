@@ -258,6 +258,14 @@ static int obj_height(const ai_obj_t *o)
 /* ─── UPDATELOCS: центральный интегратор (file 0x25B3) ─────────────────
  * Точный порт: x += vx; y += vy; vx += ax; vy += ay (всё Q16.16).
  * Вызывается ДО обработчиков, как фаза 1 кадрового цикла до THINKCYCLE. */
+/* Q16.16-константы скоростей: hi — целая часть, lo — дробная. */
+#define QV(hi, lo)  ((s32)(((u32)(u16)(hi) << 16) | (u16)(lo)))
+#define Q_1_0    QV(1, 0)
+#define Q_1_5    QV(1, 0x8000)
+#define Q_2_0    QV(2, 0)
+#define Q_2_5    QV(2, 0x8000)
+#define Q_0_5    QV(0, 0x8000)
+
 static void obj_integrate(ai_obj_t *o)
 {
     o->xq  += o->vxq;
@@ -430,7 +438,7 @@ static void ai_stone_thrower(ai_obj_t *o, u16 frame, u8 karnov_input)
          * статичный facing=-1 из спавна. Facing «замораживается» на старте
          * windup, чтобы спрайт не дёргался во время броска. */
         if (o->type == 17) {
-            int kx = physics_get_x();
+            int kx = physics_get_left_x();
             o->facing = (kx >= o->x) ? 1 : -1;
         }
         o->anim_phase = (phase / IDLE_FLIP_STRIDE) & 1;  /* IDLE #86/#87 */
@@ -516,15 +524,13 @@ static void ai_rock_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (o->x < -16 || o->x > world_w + 16) o->alive = false;
 }
 
-/* TYPE_PLAYER_FIREBALL — снаряд Karnov-а. Прямолинейное движение, без
- * гравитации, 1-hit kill при пересечении bbox-а живого damageable-врага.
- * Despawn при выходе за края экрана.
- *
- * Скорость 6 px/frame в направлении facing — заметно быстрее WALK_SPEED(4)
- * и ROCK_VX(3), чтобы снаряд мог догнать убегающего врага. Конкретное
- * значение пока НЕ байт-верифицировано из KARNOV.EXE (handler Karnov-fire
- * не декомпилирован). */
-#define PLAYER_FIREBALL_SPEED  6
+/* TYPE_PLAYER_FIREBALL — снаряд Karnov-а. Порт трёх обработчиков оригинала
+ * (cs:0xFFA:0x00C2 / 0x00FF / 0x0183) с общим INIT'ом cs:0xFFA:0x0009:
+ *   tick_period = 2, +0xE5 = 2, +0xE7 = 10, ++[0x1424] (счётчик живых),
+ *   vx = ±(6.0 или 7.0) единиц/кадр (= 12/14 px), state_list = DS:0x16B2,
+ *   состояние анимации = (firepower > 1).
+ * Скорости ТЕПЕРЬ байт-верифицированы (раньше здесь стояло 6 px/кадр —
+ * вдвое медленнее оригинала). */
 
 /* Урон снаряда Karnov-а по врагу. В оригинале (level.cpp pair-loop,
  * cs:0xFC2C) урон = hit_points САМОГО снаряда: `b->hit_points -= a->hit_points`,
@@ -536,13 +542,44 @@ static void ai_rock_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
  * И все HP-пулы дают целое число попаданий. */
 #define PLAYER_FIREBALL_DAMAGE 10
 
+/* Варианты снаряда: три разных обработчика оригинала (см. spawn_player_shot,
+ * file 0x12F4F — таблица переходов по firepower). */
+enum { SHOT_STRAIGHT = 0,   /* cs:0xFFA:0x00C2 — vx = ±6.0, летит ровно      */
+       SHOT_RISING   = 1,   /* cs:0xFFA:0x00FF — vx = ±7.0, vy = −5.0 на 16px */
+       SHOT_GROUND   = 2 }; /* cs:0xFFA:0x0183 — vx = ±7.0, падает до земли   */
+
 static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
-    (void)frame; (void)karnov_input;
+    (void)karnov_input;
 
-    /* Движение. */
-    o->x += o->vx;
-    o->anim_phase = (o->anim_phase + 1) & 1;
+    /* Движение — Q16.16-интегратор, как у всех объектов движка. */
+    obj_integrate(o);
+    o->vx = (o->vxq > 0) ? 1 : -1;      /* знак для прочего кода порта */
+
+    switch (o->st_phase) {
+    case SHOT_RISING:
+        /* Подъём ровно на 16 px от точки выстрела, затем горизонтально
+         * (cs:0xFFA:0x0147: `if (y < target) { vy = 0; flag = 0 }`). */
+        if (o->st_aux && o->y < o->st_misc) { o->vyq = 0; o->st_aux = 0; }
+        break;
+    case SHOT_GROUND: {
+        /* Каждый тик щупается тайл ПОД снарядом: категории 2 и 9 (небо/
+         * фон) — продолжаем падать со скоростью 5.0, иначе ложимся на
+         * поверхность (vy = 0). Тайл В точке снаряда категории 3 или 4 —
+         * снаряд гаснет (cs:0xFFA:0x01B3). */
+        int below = level_tile_attr_at(o->x, o->y + TILE_H);
+        o->vyq = (below == 2 || below == 9) ? QV(5, 0) : 0;
+        int here = level_tile_attr_at(o->x, o->y);
+        if (here == 3 || here == 4) { o->alive = false; return; }
+        break;
+    }
+    default: break;
+    }
+
+    /* Анимация: усиленный выстрел (firepower > 1) — 4-кадровый цикл
+     * #2,#2,#3,#3 при tick_period = 2; обычный — один кадр #1
+     * (state_list DS:0x16B2). */
+    if (o->custom) o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
 
     /* Despawn off-screen — теперь world-coords, не screen. */
     int world_w = (int)level_num_map_cols * TILE_W;
@@ -554,8 +591,10 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
     /* Столкновение с живыми damageable-врагами. bbox fireball'а — 8×6.
      * bbox противника — приближённо 16×24 от его (x, y) = центр ног.
      * Простое AABB-пересечение. */
-    int fx0 = o->x - 4, fx1 = o->x + 4;
-    int fy0 = o->y - 3, fy1 = o->y + 3;
+    /* bbox снаряда — от его (x, y) = левый-верх, размером со спрайт
+     * (#1 = 4×4, усиленный #2/#3 — до 6×6). */
+    int fx0 = o->x, fx1 = o->x + (o->custom ? 6 : 4);
+    int fy0 = o->y, fy1 = o->y + (o->custom ? 6 : 4);
     for (int i = 0; i < g_num; ++i) {
         ai_obj_t *e = &g_obj[i];
         if (!e->alive) continue;
@@ -621,7 +660,7 @@ static void ai_bomb_blast(ai_obj_t *o, u16 frame, u8 input)
 static void ai_walking_minion(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
-    int kx = physics_get_x(), ky = physics_get_y();
+    int kx = physics_get_left_x(), ky = physics_get_top_y();
     int dx = kx - o->x;
     int abs_dx = dx < 0 ? -dx : dx;
     o->facing = (dx >= 0) ? 1 : -1;
@@ -695,13 +734,13 @@ static void ai_flying_bird(ai_obj_t *o, u16 frame, u8 karnov_input)
          * и не меняется. Птица рождается на ~100 px ВЫШЕ игрока и сначала
          * «падает в видимый кадр» (ai_type08, state_list 0x171C) БЕЗ
          * горизонтального движения; затем летит по прямой. */
-        int target = physics_get_y() - 40;
+        int target = physics_get_top_y() - 40;
         if (o->home_y < target) {
             o->home_y += 2;
             descending = true;
         }
     } else {
-        int kx = physics_get_x();
+        int kx = physics_get_left_x();
         o->facing = (kx > o->x) ? 1 : -1;
     }
     /* 2-кадровый цикл — взмах крыльями ≈ 4 ticks/кадр.
@@ -759,7 +798,7 @@ static void ai_stone_golem(ai_obj_t *o, u16 frame, u8 karnov_input)
     (void)karnov_input;
     o->anim_phase = (frame >> 2) & 7;   /* 8-фазная анимация чёртика */
     /* Facing к игроку, но не двигаемся. */
-    int kx = physics_get_x();
+    int kx = physics_get_left_x();
     o->facing = (kx > o->x) ? 1 : -1;
 }
 
@@ -804,14 +843,12 @@ static void ai_pendulum(ai_obj_t *o, u16 frame, u8 karnov_input)
  * Единицы: vxq — Q16.16 в единицах движка (1 ед. = 2 px), vyq — Q16.16
  * в пикселях. Константы ниже — как в оригинале.
  */
-#define QV(hi, lo)  ((s32)(((u32)(u16)(hi) << 16) | (u16)(lo)))
-#define Q_1_0    QV(1, 0)
-#define Q_1_5    QV(1, 0x8000)
-#define Q_2_0    QV(2, 0)
-#define Q_2_5    QV(2, 0x8000)
-#define Q_0_5    QV(0, 0x8000)
 
-static int player_units(void) { return physics_get_x() / 2; }
+/* Позиция игрока в конвенции объектов движка: X — левый край в 2px-
+ * единицах, Y — верх спрайта. Оригинал сравнивает координаты врагов
+ * именно с player->x_world/+0x08 и y_world/+0x0C (кэш [DS:0xD8BC/0xD8BE],
+ * file 0x10312). */
+static int player_units(void) { return physics_get_left_x() / 2; }
 static int obj_units(const ai_obj_t *o) { return o->x / 2; }
 
 /* Снаряд врага: летит по прямой, гаснет за краем мира. Порт объекта,
@@ -940,7 +977,7 @@ static void ai_type16(ai_obj_t *o, u16 frame, u8 in)
         return;
     }
     int sdx = player_units() - obj_units(o);
-    int dy  = physics_get_y() - o->y;
+    int dy  = physics_get_top_y() - o->y;
     int dir = sdx > 0;
     switch (o->st_phase) {
     case 0: case 1:
@@ -955,7 +992,11 @@ static void ai_type16(ai_obj_t *o, u16 frame, u8 in)
         }
         break;
     case 2:
-        if (dy <= 0) break;
+        /* Спуск до уровня игрока: остаёмся в фазе, пока верх «комарика»
+         * ВЫШЕ верха Карнова (dy > 0). Оригинал: `or di,di; jng` — переход
+         * при dy <= 0 (file 0x1470F). Прежде условие было инвертировано,
+         * и фаза заканчивалась сразу, поэтому спуск шёл «мимо» игрока. */
+        if (dy > 0) break;
         o->st_phase = 3; o->vxq = dir ? Q_1_5 : -Q_1_5; o->vyq = 0;
         break;
     case 3:
@@ -994,7 +1035,7 @@ static void ai_type25(ai_obj_t *o, u16 frame, u8 in)
         int hcode, vcode;
         if (rng_next() & 1) {
             hcode = HT[rng_next() & 3];
-            vcode = (physics_get_y() > o->y) ? 4 : 8;
+            vcode = (physics_get_top_y() > o->y) ? 4 : 8;
         } else {
             hcode = (player_units() > obj_units(o)) ? 1 : 2;
             vcode = HT[rng_next() & 3] * 4;
@@ -1023,7 +1064,7 @@ static void ai_type27(ai_obj_t *o, u16 frame, u8 in)
     if (!o->use_anim) {
         anim_begin(o, 3, 0);
         obj_phys_begin(o);
-        o->y = physics_get_y() - 70;
+        o->y = physics_get_top_y() - 70;
         obj_phys_begin(o);
         o->st_misc  = 0;
         o->st_aux   = -((int)o->init_arg * 15);
@@ -1198,7 +1239,7 @@ static void ai_simple(ai_obj_t *o, u16 frame, u8 karnov_input)
      * (ai_type35: behavior_phase = sub_timer_start > 10). */
     if (o->type == 35 && o->init_arg > 10) kind = SK_CHASER;
 
-    int kx = physics_get_x();
+    int kx = physics_get_left_x();
     int dx = kx - o->x;
     int abs_dx = dx < 0 ? -dx : dx;
 
@@ -1227,7 +1268,7 @@ static void ai_simple(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->facing = (dx >= 0) ? 1 : -1;
         o->x += s->speed * o->facing;
         if ((frame & 3) == 0) {
-            int ky = physics_get_y();
+            int ky = physics_get_top_y();
             int feet = obj_feet(o);
             if (ky < feet - 2)      o->y -= 1;
             else if (ky > feet + 2) o->y += 1;
@@ -1268,7 +1309,7 @@ static bool sky_chain_alive(void)
 
 static void spawn_sky_bird(u16 frame, int idx)
 {
-    int kx = physics_get_x(), ky = physics_get_y();
+    int kx = physics_get_left_x(), ky = physics_get_top_y();
     int bx = kx + 2 * ((int)(rng_next() & 0x3F) - 10);
     int by = ky - 100 - (int)(rng_next() & 0x3F);
     if (by < 16) by = 16;
@@ -1295,7 +1336,7 @@ static void spawn_sky_bird(u16 frame, int idx)
 static void ai_sky_tick(u16 frame)
 {
     if (!s_sky_enabled) return;
-    int px = physics_get_x() / 2;
+    int px = physics_get_left_x() / 2;
     if (px - s_sky_last_x_units >= SKY_PROGRESS_UNITS) {
         ai_kill_sky_chain();
         s_sky_last_x_units = px;
@@ -1371,7 +1412,7 @@ static void ai_homing_shot(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
     if (o->custom == 0) {
-        int kx = physics_get_x();
+        int kx = physics_get_left_x();
         o->facing = (kx >= o->x) ? 1 : -1;
         o->custom = 1;
     }
@@ -1545,7 +1586,7 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->parts[0].sprite = 245; o->parts[0].dx = 4; o->parts[0].dy = 0;
         o->parts[1].sprite = 249; o->parts[1].dx = 0; o->parts[1].dy = 20;
     }
-    int kx = physics_get_x();
+    int kx = physics_get_left_x();
     o->facing = (kx >= o->x) ? 1 : -1;
     /* Анимация головы: 245..248 (idle → дыхание огнём). */
     u16 ph = (frame >> 4) & 3;
@@ -1574,7 +1615,7 @@ static void ai_prng_spark(ai_obj_t *o, u16 frame, u8 karnov_input)
     (void)karnov_input;
     if (o->custom == 0) {
         o->custom = 1;
-        int kx = physics_get_x();
+        int kx = physics_get_left_x();
         o->facing = (kx >= o->x) ? 1 : -1;
         int r = (int)(rng_next() & 0x1FFF);
         o->pos_x_q16 = o->x << 16;
@@ -1623,7 +1664,7 @@ static void ai_hopper47(ai_obj_t *o, u16 frame, u8 karnov_input)
     if ((frame % 10) != 0) return;
     if ((rng_next() & 3) == 0) o->y -= 4;
     else if (o->y < o->home_y) o->y += 2;
-    int kx = physics_get_x();
+    int kx = physics_get_left_x();
     o->facing = (kx >= o->x) ? 1 : -1;
     o->x += o->facing;
 }
@@ -1637,7 +1678,7 @@ static void ai_ryu_helper(ai_obj_t *o, u16 frame, u8 karnov_input)
     extern u16 g_ai_level_num;         /* ниже, ai_init_from_level */
     bool arena = (g_ai_level_num == 9) && (o->x > 0x44C * 2);
     if (!arena) return;
-    int kx = physics_get_x(), ky = physics_get_y();
+    int kx = physics_get_left_x(), ky = physics_get_top_y();
     o->facing = (kx >= o->x) ? 1 : -1;
     if ((frame & 1) == 0) {
         o->x += 2 * o->facing;
@@ -1903,7 +1944,7 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
     if (pm == PLACE_LIFT || pm == PLACE_ALIGN10 || pm == PLACE_PLAYER_Y) {
         if (pm == PLACE_LIFT)            g_obj[slot].y -= type_place_lift(e->type);
         else if (pm == PLACE_ALIGN10)    g_obj[slot].y -= g_obj[slot].y % TILE_H;
-        else                             g_obj[slot].y = physics_get_y() - 22;
+        else                             g_obj[slot].y = physics_get_top_y() - 22;
         g_obj[slot].home_y = g_obj[slot].y;
         g_obj[slot].spawn_y = (u16)g_obj[slot].y;
     } else if (pm != PLACE_NONE) {
@@ -2064,8 +2105,19 @@ void ai_tick(u16 frame, u8 karnov_input)
             if (g_obj[i].type == TYPE_PLAYER_FIREBALL) ++shots;
         }
         fprintf(stderr, "f=%u alive=%d (из уровня %d) выстрелов=%d сила=%d slots=%d/%d kx=%d\n",
-                frame, alive, from_level, shots, inv_firepower(), g_num, MAX_AI, physics_get_x());
+                frame, alive, from_level, shots, inv_firepower(), g_num, MAX_AI, physics_get_left_x());
     } }
+    /* KARNOV_DBG_TYPE=<n> — трассировка объектов одного типа рядом с
+     * координатами игрока в конвенции движка (левый край / верх спрайта). */
+    { const char *dt = getenv("KARNOV_DBG_TYPE");
+      if (dt) { int want = atoi(dt);
+        for (int i = 0; i < g_num; ++i) {
+            if (!g_obj[i].alive || g_obj[i].type != (u16)want) continue;
+            fprintf(stderr, "f=%u t%d x=%d y=%d h=%d ph=%d | karnov left=%d top=%d feet=%d\n",
+                    frame, want, g_obj[i].x, g_obj[i].y, obj_height(&g_obj[i]),
+                    g_obj[i].st_phase, physics_get_left_x(), physics_get_top_y(),
+                    physics_get_y());
+        } } }
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
         ai_obj_t *o = &g_obj[i];
@@ -2093,7 +2145,7 @@ void ai_tick(u16 frame, u8 karnov_input)
     ai_sky_tick(frame);
 
     /* Off-screen despawn — та же фаза B, сразу после AI (file 0xFD6A). */
-    ai_despawn_behind(physics_get_x());
+    ai_despawn_behind(physics_get_left_x());
 
     /* После убийства boss'а через ~30 ticks спавним свиток (scroll item).
      * custom=999 — sentinel маркер подбора (level-end). item_sprite=0x90 —
@@ -2305,18 +2357,16 @@ void ai_render(bool mode_cga, int scroll_x, int scroll_y)
         if (g_obj[i].type == TYPE_BOMB_BLAST) continue;  /* вспышка — поверх Karnov'а (ai_render_overlay) */
         /* Пасс 0 — только фоновые летуны; пасс 1 — все остальные поверх. */
         if (ai_is_background_flyer(g_obj[i].type) != (pass == 0)) continue;
-        /* Karnov-выстрел — маленький белый шарик, рисуем процедурно (~4px):
-         * подходящего мелкого белого спрайта в кэше нет (мелкие спрайты
-         * серые, белые — крупнее). Круглые синие шарики #0x0A-0x0D — это
-         * снаряд босса «селёдка», не выстрел Karnov'а. */
+        /* Karnov-выстрел рисуется своим спрайтом из архива (не процедурным
+         * ромбиком, как было): state_list снаряда DS:0x16B2 — состояние 0
+         * (обычный выстрел) = один кадр #1, состояние 1 (firepower > 1) =
+         * цикл #2,#2,#3,#3. Выбор состояния — по силе огня на момент
+         * выстрела (cs:0xFFA:0x0009). */
         if (g_obj[i].type == TYPE_PLAYER_FIREBALL) {
-            int bx = g_obj[i].x - scroll_x;
-            int by = g_obj[i].y - 2 - scroll_y;   /* центр (placeholder: y - ph/2) */
-            const u32 W = 0xFFFFFFFFu;
-            /* Крошечный белый шарик 3x3 (ромбик). */
-            render_fill_rect(bx,     by - 1, 1, 1, W);  /* верх */
-            render_fill_rect(bx - 1, by,     3, 1, W);  /* середина 3px */
-            render_fill_rect(bx,     by + 1, 1, 1, W);  /* низ */
+            static const u16 POWERED[4] = { 2, 2, 3, 3 };
+            u16 sid = g_obj[i].custom ? POWERED[g_obj[i].anim_phase & 3] : 1;
+            blit_sprite_world(sid, g_obj[i].x, g_obj[i].y, +1,
+                              scroll_x, scroll_y);
             continue;
         }
         /* Multi-part враги (змея, цепи, черви, Рю, арена): рисуем каждую
@@ -2565,10 +2615,10 @@ void ai_bomb_explode(void)
         g_obj[slot] = (ai_obj_t){
             .alive       = true,
             .type        = TYPE_BOMB_BLAST,
-            .x           = physics_get_x(),
+            .x           = physics_get_left_x(),
             /* Karnov-Y — ноги; вспышке нужен ВЕРХ (общая объектная
              * конвенция), поэтому поднимаем на высоту спрайта вспышки. */
-            .y           = physics_get_y() - 24,
+            .y           = physics_get_top_y() - 24,
             .spawn_frame = g_ai_frame,
         };
     }
@@ -2619,35 +2669,56 @@ static int player_shots_alive(void)
 
 void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
 {
-    /* Порт fire() (cs:0xFFA:0x1888, file 0x13028) и обычного огня
+    /* Порт fire() (cs:0xFFA:0x1888, file 0x13028) и spawn_player_shot
      * (cs:0xFFA:0x17AF, file 0x12F4F):
      *   • при 15 живых снарядах выстрел не происходит вовсе (file 0x1303B);
      *   • звук — play_sound(0) (file 0x13045), НЕ 7;
-     *   • число снарядов = firepower (1..3, [DS:0xD949]); ветки таблицы
-     *     file 0x12FB5 «проваливаются», давая смещения по Y:
-     *       3 → y−2, y+2, y     2 → y+2, y     1 → y
-     *     вертикальной скорости оригинал не задаёт — только стартовый Y. */
+     *   • число снарядов = firepower (1..3, [DS:0xD949]), и ветки таблицы
+     *     file 0x12FB5 «проваливаются» СВЕРХУ ВНИЗ, спавня РАЗНЫЕ объекты
+     *     с разными обработчиками — то самое «раздвоение/растроение»:
+     *       fp=3 → верхний (y−2, cs:0x00FF) + нижний (y+2, cs:0x0183)
+     *              + прямой (y, cs:0x00C2)
+     *       fp=2 → нижний + прямой      fp=1 → только прямой
+     *   • точка вылета: x = player.x_world + 4 ед. (= левый край + 8 px),
+     *     y = верх спрайта Карнова + 7 (+16 если сидит);
+     *   • состояние анимации выбирается по firepower при СПАВНЕ
+     *     (cs:0xFFA:0x0009: [0xD88C] = firepower > 1). */
     if (player_shots_alive() >= 15) return;
 
     int fp = inv_firepower();
     if (fp < 1) fp = 1;
     if (fp > 3) fp = 3;
-    static const int DY3[3] = { -2, +2, 0 };
-    const int *dys = DY3 + (3 - fp);          /* fp=1 → {0}; fp=2 → {+2,0} */
+    int dir = (facing < 0) ? -1 : +1;
+    bool powered = (fp > 1);
 
-    int vx = (facing < 0) ? -PLAYER_FIREBALL_SPEED : +PLAYER_FIREBALL_SPEED;
-    for (int k = 0; k < fp; ++k) {
+    /* variant, dy, |vx| (единицы движка/кадр) */
+    static const struct { int var, dy, spd; } SHOTS[3] = {
+        { SHOT_RISING,   -2, 7 },   /* спавнится только при fp = 3 */
+        { SHOT_GROUND,   +2, 7 },   /* при fp >= 2 */
+        { SHOT_STRAIGHT,  0, 6 },   /* всегда */
+    };
+    for (int k = 3 - fp; k < 3; ++k) {
         int slot = alloc_obj_slot();
         if (slot < 0) break;
-        g_obj[slot] = (ai_obj_t){
+        ai_obj_t *o = &g_obj[slot];
+        *o = (ai_obj_t){
             .alive       = true,
             .type        = TYPE_PLAYER_FIREBALL,
             .x           = x,
-            .y           = y + dys[k],
-            .vx          = vx,
-            .facing      = (facing < 0) ? -1 : +1,
+            .y           = y + SHOTS[k].dy,
+            .vx          = dir,
+            .facing      = dir,
             .spawn_frame = frame,
+            .st_phase    = SHOTS[k].var,
+            .custom      = powered ? 1 : 0,
         };
+        obj_phys_begin(o);
+        o->vxq = dir * QV(SHOTS[k].spd, 0);
+        if (SHOTS[k].var == SHOT_RISING) {
+            o->vyq    = -QV(5, 0);
+            o->st_aux = 1;            /* «поднимается» */
+            o->st_misc = o->y - 16;   /* цель подъёма (+0xE9 = y − 0x10) */
+        }
     }
     audio_play_sfx(0);   /* выстрел — play_sound(0), KARNOV.EXE @ file 0x13045 */
 }

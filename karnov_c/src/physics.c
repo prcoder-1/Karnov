@@ -58,13 +58,12 @@ static int s_world_max_x = 312;
 #define FLY_SPEED_X   4
 #define FLY_SPEED_Y   3
 
-/* Cooldown между выстрелами в game-ticks. KARNOV.EXE (verified 2026-07-10):
- * FIRE НЕ имеет фикс. cooldown-счётчика — стрельба гейтится состоянием
- * fire-анимации Karnov'а (`cmp [obj_state],4; skip` @0x10BF8; fire-функция
- * @0x104E6 → play_sound(7)). Т.е. выстрел вылетает как только Karnov НЕ в
- * позе броска и свободен слот снаряда → быстрый повторный огонь. Прежние 8
- * тиков (~3.5/сек) были слишком медленны; 4 ≈ ~7/сек, ближе к оригиналу. */
-#define FIRE_COOLDOWN_TICKS  4
+/* Cooldown между выстрелами в game-ticks. Байт-верифицировано по fire()
+ * (cs:0xFFA:0x1888, file 0x13028): в конце функция пишет [DS:0xD8B2] = 3
+ * (или 1, если взведён флаг [DS:0xCCA6] — «скорострельность»), т.е.
+ * перезарядка = 3 тика. Плюс жёсткий лимит 15 живых снарядов ([0x1424]),
+ * который проверяется ДО стрельбы. */
+#define FIRE_COOLDOWN_TICKS  3
 
 /* Hitbox лестницы: ширина в которой Karnov цепляется (+/- от ladder_x). */
 #define LADDER_HALF_W 10
@@ -116,6 +115,8 @@ static bool s_prev_opt            = false;   /* для edge-detection B-нажа
 static bool s_prev_r              = false;
 static bool s_prev_l              = false;
 static u16  s_cur_frame           = 0;
+/* Спрайт текущей позы (обновляется в конце physics_tick). */
+static u16  s_render_sid          = 106;   /* K_STAND_R */
 /* Счётчик кадров лазанья — инкрементируется ТОЛЬКО когда Karnov реально
  * движется по лестнице (нажат U или D). Гарантирует, что в idle-pose Karnov
  * висит неподвижно, как и в оригинале (sub_timer не тикает без edge-input). */
@@ -661,10 +662,13 @@ void physics_tick(u8 input)
      * В полёте можно. */
     if (s_fire_cooldown > 0) --s_fire_cooldown;
     if (wants_fire && s_fire_cooldown == 0 && !s_on_ladder) {
-        /* Высота снаряда — на уровне торса (≈ y - 14). Точка выхода —
-         * чуть впереди тела по facing. */
-        int fx = s_x + (s_facing < 0 ? -10 : +10);
-        int fy = s_y - 14;
+        /* Точка вылета — как в оригинале (spawn_player_shot, file 0x12F4F):
+         *   x = player.x_world + 4 ед. = левый край спрайта + 8 px
+         *       (от facing НЕ зависит — направление задаёт знак скорости),
+         *   y = верх спрайта + 7, и ещё +16 если Карнов сидит. */
+        int fx = physics_get_left_x() + 8;
+        int fy = physics_get_top_y() + 7;
+        if (wants_d && s_on_ground) fy += 16;
         ai_spawn_player_fireball(fx, fy, s_facing, s_cur_frame);
         s_fire_cooldown = FIRE_COOLDOWN_TICKS;
     }
@@ -692,6 +696,10 @@ void physics_tick(u8 input)
         s_vy_q4 = 0;
         s_in_jump = false;
     }
+
+    /* Поза этого кадра — из неё берутся ширина/высота для перевода
+     * (центр, подошва) → (левый край, верх), см. physics_get_top_y. */
+    s_render_sid = pick_sprite_id(input, s_cur_frame);
 }
 
 bool physics_just_died(void) { return s_just_died_pulse; }
@@ -701,6 +709,30 @@ void physics_set_sit_scroll(bool on) { s_sit_scroll = on; }
 
 int  physics_get_x(void)       { return s_x; }
 int  physics_get_y(void)       { return s_y; }
+
+/* Мировые координаты игрока в конвенции движка: оригинал каждый кадр
+ * копирует player->x_world(+0x08) и player->y_world(+0x0C) в кэш
+ * [DS:0xD8BC]/[DS:0xD8BE] (file 0x10312), и ИМЕННО с ними сравниваются
+ * координаты врагов в TICK'ах и в check_triggers. У объекта x_world — ЛЕВЫЙ
+ * край, y_world — ВЕРХ спрайта, тогда как порт держит s_x = центр тела,
+ * s_y = подошва. Без пересчёта всякая логика «догнать игрока по Y» промахи-
+ * вается вниз на высоту Карнова (~26 px) — из-за этого «комарик» (type 16)
+ * опускался ниже ног вместо груди. */
+static int karnov_pose_h(void)
+{
+    const sprite_t *ks = sprite_find(s_render_sid);
+    return ks ? (int)ks->h : 26;
+}
+int physics_get_top_y(void)
+{
+    return s_y - karnov_pose_h();
+}
+int physics_get_left_x(void)
+{
+    const sprite_t *ks = sprite_find(s_render_sid);
+    int w = ks ? (int)ks->art_w : 16;
+    return s_x - w / 2;
+}
 int  physics_get_ground_y(void) { return s_ground_y; }
 bool physics_facing_left(void) { return s_facing < 0; }
 

@@ -355,7 +355,7 @@ static int prepare_level(u16 level_num, bool load_demo)
      * (метатель LEVEL0, стартовые враги LEVEL1) срабатывают сразу. */
     int init_view_left = sx - VIEW_W/2;
     if (init_view_left < 0) init_view_left = 0;
-    ai_check_triggers(sx, ph.spawn_y, init_view_left, 0);
+    ai_check_triggers(physics_get_left_x(), physics_get_top_y(), init_view_left, 0);
 
     if (load_demo) {
         int dr = demo_load(level_num);
@@ -373,6 +373,56 @@ static int prepare_level(u16 level_num, bool load_demo)
 }
 
 /* ─── splash_run main loop ─────────────────────────────────────────── */
+
+/* ─── Загрузочный экран ────────────────────────────────────────────────
+ *
+ * Копирайт-экран + loader-music (track 6). Оригинал показывает его при
+ * КАЖДОМ чтении LEVEL%d.BIN с диска — и перед первым уровнем, и между
+ * уровнями, — поэтому та же функция вызывается на переходах. Держим
+ * экран до конца одного полного цикла loader-музыки (или LOADER_MIN_MS,
+ * если звук выключен), затем возвращаем in-game track 0.
+ * Возвращает true, если игрок закрыл окно (QUIT/ESC). */
+#define LOADER_MIN_MS 700
+
+static bool run_loader_screen(bool audio_running)
+{
+    const char *line1 = "Karnov (C) 1987 Data East USA Inc.";
+    const char *line2 = "Adaptation by Quicksilver Software Inc";
+    int x1 = (WIN_W - (int)strlen(line1) * 6) / 2;
+    int x2 = (WIN_W - (int)strlen(line2) * 6) / 2;
+    render_clear(0xFF000000u);
+    render_draw_text(x1, 130, line1, 0xFFFFFFFFu);
+    render_draw_text(x2, 140, line2, 0xFFFFFFFFu);
+    render_present();
+
+    if (audio_running) audio_play_music(6, /*loop=*/true);
+
+    bool quit = false, skip = false;
+    u32  start    = SDL_GetTicks();
+    u32  deadline = start + 30000;      /* safety cap 30 s */
+    while (!quit && !skip && SDL_GetTicks() < deadline) {
+        if (audio_running ? (audio_cycle_count() >= 1)
+                          : (SDL_GetTicks() - start >= LOADER_MIN_MS))
+            break;
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT ||
+                (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE)) {
+                quit = true;
+                break;
+            }
+            /* Любая другая клавиша — прервать загрузку и начать игру. */
+            if (ev.type == SDL_KEYDOWN) { skip = true; break; }
+        }
+        SDL_Delay(20);
+    }
+    if (!quit && audio_running) {
+        audio_play_music(0, /*loop=*/true);
+        printf("audio: in-game music (track 0) запущена%s\n",
+               skip ? " (загрузка прервана клавишей)" : "");
+    }
+    return quit;
+}
 
 int splash_run(const splash_options_t *opt)
 {
@@ -433,7 +483,7 @@ int splash_run(const splash_options_t *opt)
             update_scroll(physics_get_x(), physics_get_y());
             if (physics_get_x() / 2 > s_max_progress_units)
                 s_max_progress_units = physics_get_x() / 2;
-            ai_check_triggers(physics_get_x(), physics_get_y(), g_scroll_x, frame);
+            ai_check_triggers(physics_get_left_x(), physics_get_top_y(), g_scroll_x, frame);
             ++frame;
         }
         /* Initial scroll для frame=0 (когда цикл не выполнился). */
@@ -455,44 +505,8 @@ int splash_run(const splash_options_t *opt)
         return 0;
     }
 
-    /* Ждём минимум один полный цикл loader-music, отображая copyright-
-     * экран (как в оригинале KARNOV.EXE), затем переключаемся на in-game
-     * background music (track 0). */
-    bool quit = false;
-    if (audio_running) {
-        const char *line1 = "Karnov (C) 1987 Data East USA Inc.";
-        const char *line2 = "Adaptation by Quicksilver Software Inc";
-        int x1 = (WIN_W - (int)strlen(line1) * 6) / 2;
-        int x2 = (WIN_W - (int)strlen(line2) * 6) / 2;
-        render_clear(0xFF000000u);
-        render_draw_text(x1, 130, line1, 0xFFFFFFFFu);
-        render_draw_text(x2, 140, line2, 0xFFFFFFFFu);
-        render_present();
-
-        u32 deadline = SDL_GetTicks() + 30000;  /* safety cap 30s */
-        bool skip = false;
-        while (!quit && !skip && audio_cycle_count() < 1 && SDL_GetTicks() < deadline) {
-            SDL_Event ev;
-            while (SDL_PollEvent(&ev)) {
-                if (ev.type == SDL_QUIT ||
-                    (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE)) {
-                    quit = true;
-                    break;
-                }
-                /* Любая другая клавиша — прервать музыку загрузки и начать игру. */
-                if (ev.type == SDL_KEYDOWN) {
-                    skip = true;
-                    break;
-                }
-            }
-            SDL_Delay(20);
-        }
-        if (!quit) {
-            audio_play_music(0, true);
-            printf("audio: in-game music (track 0) запущена%s\n",
-                   skip ? " (загрузка прервана клавишей)" : "");
-        }
-    }
+    /* Заставка загрузки перед первым уровнем. */
+    bool quit = run_loader_screen(audio_running);
 
     /* Interactive main loop. tick_ms=36 ≈ 27.5 FPS (байт-верифицированная
      * частота из KARNOV.EXE think_cycle wait-loop). */
@@ -558,6 +572,8 @@ int splash_run(const splash_options_t *opt)
                     inp        = 0;
                     s_demo_done_frame = 0;
                     prev_start = true;
+                    if (run_loader_screen(audio_running)) { quit = true; break; }
+                    last_tick = SDL_GetTicks();
                 }
             } else if (demo_done && (frame - s_demo_done_frame) >= 60) {
                 u16 next = (current_level == 0) ? 1 : 0;
@@ -635,7 +651,11 @@ int splash_run(const splash_options_t *opt)
                         s_level_end = false;
                         physics_set_invuln(false);   /* invuln не течёт в след. уровень */
                         physics_set_sit_scroll(false); /* сбросить позу свитка */
-                        if (audio_running) audio_play_music(0, /*loop=*/true);  /* снова in-game музыка */
+                        /* Между уровнями — тот же экран загрузки с loader-
+                         * музыкой, что и перед первым (он же возвращает
+                         * in-game track 0). */
+                        if (run_loader_screen(audio_running)) { quit = true; break; }
+                        last_tick = SDL_GetTicks();
                         continue;
                     }
                 }
@@ -661,7 +681,7 @@ int splash_run(const splash_options_t *opt)
             update_scroll(physics_get_x(), physics_get_y());
             if (physics_get_x() / 2 > s_max_progress_units)
                 s_max_progress_units = physics_get_x() / 2;
-            ai_check_triggers(physics_get_x(), physics_get_y(), g_scroll_x, frame);
+            ai_check_triggers(physics_get_left_x(), physics_get_top_y(), g_scroll_x, frame);
             render_clear(0xFF000000u);
             draw_level(mode_cga);
             if (current_level == 1) draw_level1_dragon(g_scroll_x, g_scroll_y);
