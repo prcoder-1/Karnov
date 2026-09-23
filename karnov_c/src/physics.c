@@ -16,12 +16,33 @@
 #include <stdlib.h>
 
 /* Константы физики (Q4 fixed-point для vy).
- * JUMP_VY_Q4 = -80: байт-верифицировано из KARNOV.EXE state 2 TICK
- *   (file 0x118CE: mov [bx+0x14], 0xFFFB = vy_hi=-5 → -5.0 px/frame Q16.16).
- * Q4 эквивалент: -5.0 × 16 = -80.
- * Оригинал использует state-based vy switching (jump→-5, fall→+5, on_ground→0)
- * вместо нашего gradual gravity accumulation. Для LEVEL0 splash это не критично
- * (Karnov не прыгает), но для in-game gameplay требует пересмотра. */
+ *
+ * ОТКАТ (2026-09-14): предыдущий проход (аудит скоростей) заменил эту модель
+ * на «трапецию» — защищённый подъём constant vy=-5.0 ровно на 16px, затем
+ * мгновенное переключение тайл-чеком. Основание («file 0x118CE — прыжок
+ * Карнова, ai_type 2») оказалось ОШИБОЧНЫМ: этот адрес (cs:0xFFA:0x00FF) —
+ * код ВЕРХНЕГО снаряда трёхстрельного выстрела САМОГО Карнова (SHOT_RISING,
+ * см. `ai.c`/`KARNOV.md` §5.4.1 — там же самое совпадение констант vy=-5.0/
+ * 16px уже правильно задокументировано для снаряда). Это другой сегмент
+ * (0xFFA, generic-модуль), не сегмент Карнова (0xE62, ai_type02,
+ * file 0x111E6). Повторный обход всего модуля Карнова (INIT/TICK/
+ * UPDATE_DIR_FLAGS/DESTROY, ~40 записей записи в vy-поля) не нашёл НИ ОДНОЙ
+ * отрицательной vy-константы и ни одной jump-триггер ветки — настоящий
+ * алгоритм прыжка/гравитации Карнова пока НЕ НАЙДЕН (возможно, общий для
+ * всех объектов интегратор вне ai_type02, вызываемый из главного цикла, а
+ * не из объектного обработчика — требует отдельного расследования).
+ *
+ * Пользователь подтвердил на практике: «трапеция» даёт прыжок намного ниже,
+ * чем должен быть, играть невозможно. Восстановлена СТАРАЯ модель (плавное
+ * ускорение JUMP_VY_Q4→GRAVITY_Q4→VY_MAX), которая тоже не байт-подтверждена
+ * байт-в-байт, но была играбельна и не содержит доказанной ошибки — дающая
+ * подъём ≈40px (4 тайла), разумная высота для платформера. `JUMP_VY_Q4=-80`
+ * (эквивалент -5.0 px/frame старта прыжка) сам по себе остаётся правдоподобным
+ * (совпадает по модулю с байт-точной SHOT_RISING-константой в соседнем коде
+ * того же файла EXE — возможно, не случайно, оба тянутся из одной таблицы
+ * констант; но как ИМЕННО эта величина используется в прыжке Карнова —
+ * не подтверждено). cs:0xD4B:0x3A5 — НЕ физика (проверено), это хелпер
+ * очистки флага [0xD8AE] по input-биту (6 строк, file 0xF055..0xF06E). */
 /* s_ground_y / s_ceiling_y / WORLD_MIN_X / WORLD_MAX_X — мировые ограничители
  * физики Karnov. Дефолты — LEVEL0 splash (узкий 320×168). При переходе на
  * широкий уровень game.c вызывает physics_set_world_bounds() с новыми
@@ -30,10 +51,11 @@ static int s_ground_y    = 115;
 static int s_ceiling_y   = 75;
 static int s_world_min_x = 8;
 static int s_world_max_x = 312;
-#define JUMP_VY_Q4  (-80)   /* -5.0 px/frame × 16 (Q4); was -64 (= -4.0) */
-#define GRAVITY_Q4    4
-#define VY_MIN      (-96)
-#define VY_MAX        80    /* +5.0 × 16 = 80 (fall velocity, was 64) */
+#define JUMP_VY_Q4  (-80)   /* -5.0 px/frame × 16 (Q4); старт прыжка */
+#define GRAVITY_Q4    4     /* плавный разгон — порт-модель, не байт-точна,
+                              * но играбельна (см. комментарий выше) */
+#define VY_MIN      (-96)   /* порт-модель, симметрично GRAVITY_Q4/VY_MAX */
+#define VY_MAX        80    /* +5.0 × 16 = 80 — предельная скорость падения */
 /* WALK_SPEED — байт-верифицировано из KARNOV.EXE ai_type 2 handler:
  *   state 2 TICK (file 0x1190D+0x11B):
  *     bx = direction_bits (DS:0xCCAC) & 0x3
@@ -52,13 +74,28 @@ static int s_world_max_x = 312;
  * 28*4=112 px; clamped к LADDER_TOP_Y=45 (≈16 frames до top). */
 #define CLIMB_SPEED   4
 
-/* Flight (wings) — упрощённая физика без гравитации, 4-направленное
- * движение. Скорость подобрана «на ощупь» — близка к WALK_SPEED по
- * горизонтали для согласованности, по вертикали чуть медленнее, чтобы
- * полёт чувствовался «парящим». Байт-верификации из ai_type03 пока нет
- * (см. inventory.c TODO про точный таймер). */
-#define FLY_SPEED_X   4
-#define FLY_SPEED_Y   3
+/* Flight (wings) — байт-верифицировано (2026-09): игровой диспетчер
+ * Karnov'а (cs:0x17EC... на самом деле cs-модуль игрока, file 0x111E6)
+ * проверяет fly_timer прямо в THINK:
+ *   cmp word [0xd8b6], 0 ; jng skip     (file 0x111FE→0x112 47..0x11 24c:
+ *                                        «833E B6D8 00» / «7E 6D»)
+ * пока fly_timer > 0, код НЕ идёт в обычный walk/jump путь, а зовёт общий
+ * хелпер задания скорости cs:0xD4B:0x8D (file 0xED3D), который пишет
+ * vx/vy/ax/ay объекта из ОДНОЙ И ТОЙ ЖЕ 16-байтной velocity-таблицы
+ * DS:0x1348 (file 0x204D8) — той же, что и у ходьбы (WALK_SPEED), но по
+ * ДРУГОМУ индексу (движок AND'ит [0xD8AE] raw-ввод с маской [0xCCAC] и
+ * получает индекс 0..10, а не 0..3 как при ходьбе). Дамп записей 4/7 (вверх)
+ * и 8 (вниз) даёт vy = ±2.0 Q16.16 БЕЗ дальнейшего ×2 lshift (тот
+ * применяется только если ОДНОВРЕМЕННО активны boots, отдельная ветка file
+ * 0x11262+); записи 1/2 (вправо/влево) дают vx = ±2.0 — тоже без ×2.
+ * Т.е. полёт вдвое медленнее ходьбы (WALK_SPEED=4), не «чуть медленнее по
+ * вертикали». Диагональные записи 5/6/9/10 дают (±1.5,±1.5) — движок не
+ * складывает два полных вектора по осям, а использует отдельную
+ * «нормализованную» диагональ; порт этого не переносит (независимые
+ * X/Y-дельты как при клавишах со всех 4 направлений), только магнитуда
+ * осевого движения исправлена. */
+#define FLY_SPEED_X   2
+#define FLY_SPEED_Y   2
 
 /* Cooldown между выстрелами в game-ticks. Байт-верифицировано по fire()
  * (cs:0xFFA:0x1888, file 0x13028): в конце функция пишет [DS:0xD8B2] = 3
@@ -135,6 +172,22 @@ static bool s_in_jump             = false;
 /* Cooldown между выстрелами. Декрементируется каждый тик; FIRE-press
  * на cooldown==0 спаунит снаряд и сбрасывает cooldown в FIRE_COOLDOWN_TICKS. */
 static u16  s_fire_cooldown       = 0;
+/* Edge-detect для FIRE (найдено декомпиляцией 2026-09-24, DOCONTROLS
+ * cs:0x20F:0x2FB, file 0x3BEB + диспетчер клавиш cs:0x20F:0xA/0xDA,
+ * file 0x38FA/0x39CA): в оригинале [DS:0xCCAA] — не «клавиша сейчас
+ * зажата», а ИМПУЛЬС длиной в один тик на каждое буферизованное
+ * BIOS-нажатие (INT 16h-подобная очередь клавиатуры, функция на file
+ * 0x3904 — peek+get, ax=0 если буфер пуст). Диспетчер (file 0x39CA)
+ * устанавливает бит 0x10 только когда в этом тике реально извлечена
+ * клавиша SPACE/X; на любом другом тике (буфер пуст → default-ветка
+ * file 0x3A20) бит СБРАСЫВАЕТСЯ. Т.е. при удержании клавиши повторные
+ * «нажатия» появляются только с частотой аппаратного автоповтора
+ * клавиатуры (typematic), а не каждый тик — visually «нужно нажимать
+ * заново». Порт не эмулирует BIOS-автоповтор (он недетерминирован и
+ * зависит от железа), поэтому вместо этого выстрел разрешён только по
+ * переднему фронту wants_fire — как и JUMP (s_prev_u) и переключение
+ * OPTIONS (s_prev_r/s_prev_l). */
+static bool s_prev_fire            = false;
 /* Кэш «летает ли Karnov» — synced с inv_flying() в начале каждого тика,
  * чтобы post-OPT-handling корректно выбирать ветку физики. */
 static bool s_flying              = false;
@@ -144,13 +197,90 @@ static bool s_flying              = false;
 static int  s_spawn_x             = 137;
 static int  s_spawn_y             = 108;
 
-/* Death state. Triggered by water-contact. Karnov играет 4-кадровую
- * анимацию (K_DIE_1..4) DEATH_LEN тиков (~2.2 sec @ 27.5 FPS),
- * после чего respawn'ится в s_spawn_x/y. game.c (через physics_just_died)
- * проигрывает death-music (track 5) на старте анимации. */
+/* ─── Гибель Карнова — порт cs:0xE62:0x1791 (file 0x115B1) ────────────
+ *
+ * Вход в смерть — две точки в модуле игрока (сегмент 0xE62):
+ *   die_water (cs:0xE62:0x06C6, file 0x104E6) — тайл категории 8 (вода) в
+ *       tile-loop игрока; делает set_player_anim(7, 4), y_world += 4 и
+ *       **play_sound(7)** (единственный play_sound во всём модуле игрока,
+ *       file 0x10515). Зовётся из трёх мест: file 0x10C10 / 0x10DB1 /
+ *       0x1114C — по одному на каждый режим движения.
+ *   die_hit (cs:0xE62:0x06FE) — state_byte 4, поставленный pair-loop'ом;
+ *       set_player_anim(6, 4). Звук уже сыгран самим pair-loop:
+ *       **play_sound(2)** в ветке «игрок ПОГИБ» (file 0x0FBC2) — при
+ *       НЕсмертельном касании игроку не играется ничего.
+ *   Обе через set_player_anim (0x683) ставят обработчик 0xE62:0x1791,
+ *   player_state ([0xD8CE]) = 7 (вода) либо 6 (враг) и firepower = 1.
+ *
+ * Обработчик 0x1791:
+ *   INIT (0x17B7): tick_period = 8, state_list = DS:0x1682, num_bboxes = 1,
+ *       box0.hitflag = 0 (виден, но не сталкивается), vx = 0, ax = 0,
+ *       ay += 0x8000 (0.5 px/тик²; если тайл под ногами категории 9 —
+ *       только 0x2000 = 0.125), +0xE9 = 1 («ещё летит»), аним-состояние 0
+ *       и play_music(DS:0x09D9, prio 0x64, loop 0) = трек 5 «смерть Karnov».
+ *   THINK (0x184C): пока летит — если y_world ушёл ниже низа экрана + 100,
+ *       объект прячется (num_bboxes = 0) и переходит в аним-состояние 1;
+ *       после приземления, когда 3-кадровая анимация 1 отработала круг
+ *       (frame_idx вернулся в 0), — аним-состояние 2. Респавн
+ *       (cs:0x4E4:0x18D — он же гасит музыку и декрементит жизни DS:0xCF4E)
+ *       вызывается, только когда музыка доиграла (cs:0xCB9:0x37 —
+ *       «[0x1212]|[0x1214] == 0») И аним-состояние равно 2.
+ *   state 3 (0x18BE) — коллизия с тайлом вида 4 («уперся снизу»):
+ *       y_world = кромка тайла − высота ТЕКУЩЕГО спрайта (таблица высот
+ *       DS:0x0FAC), vy = 0, ay = 0, «летит» = 0, аним-состояние 1.
+ *   state 4 (0x1972) — повторный урон игнорируется (state_byte := 2).
+ *
+ * Кадры (state_list DS:0x1682 → AnimScript + FrameOffset, dx в 2px-единицах):
+ *   0: #114                 (0,0)
+ *   1: #115, #116, #117     (−4,3) (−6,12) (−6,18)
+ *   2: #117                 (−6,18)
+ * Высоты из DS:0x0FAC — байт-верифицировано заново (2026-09):
+ *   file 0x1F190+0xFAC+sprite_id — таблица ИНДЕКСИРУЕТСЯ РЕАЛЬНЫМ id
+ *   спрайта (не позицией 0..3 в анимации). Само чтение —
+ *   cs:0xE62:0x18BE (file 0x116DE): «shl bx,1; mov ax,[bx+0xd8e6];
+ *   les bx,[0xd8a6]; mov bx,[es:bx+0x20] (bbox0.sprite); mov dl,[bx+0xfac]
+ *   (BYTE, без сдвига!); sub ax,dx; …; mov [es:bx+0xc],ax» — т.е.
+ *   y_world = кромка_тайла − table[sprite_id]. Дамп по sprite_id:
+ *     #114→24 (file 0x201AE), #115→24 (0x201AF),
+ *     #116→15 (0x201B0), #117→11 (0x201B1).
+ *   В кэше порта КАНВА этих спрайтов — 25/24/15/14 px (без пустых строк
+ *   сверху/снизу — расхождение НЕ паддинг, а сама таблица уже отличается
+ *   от полной высоты арта). Но try_land вызывается только пока
+ *   state_byte==0 (see death_try_land ниже), а в состоянии 0 текущий
+ *   спрайт всегда #114 — так что практически используется только
+ *   табличная высота 24 (не canvas-высота 25 из кэша). Записано байт-в-
+ *   байт через death_sprite_ground_h(), а не через sprite_find()->h. */
+#define DEATH_TICK_PERIOD  8            /* +0xC9 из INIT */
+#define DEATH_AY_Q         0x8000       /* 0.5 px/тик² */
+#define DEATH_AY_Q_CAT9    0x2000       /* 0.125 — если под ногами категория 9 */
+/* Маска нижних углов хитбокса на время смерти: state-структура DS:0x169A,
+ * поле +0x04 = 0x0004 (проходит только «небо», всё остальное — опора). */
+#define DEATH_LOWER_MASK   0x0004
+/* Страховка порта: если музыка смерти почему-то не сигналит о завершении,
+ * всё равно возродиться. В оригинале ограничения нет. */
+#define DEATH_MAX_TICKS    400
+
 static bool s_dying               = false;
-static u16  s_dying_frame         = 0;
+static int  s_death_state         = 0;      /* аним-состояние 0..2 */
+static int  s_death_frame         = 0;      /* индекс кадра внутри состояния */
+static int  s_death_tick          = 0;      /* троттлинг tick_period */
+static bool s_death_falling       = false;  /* +0xE9 */
+static bool s_death_hidden        = false;  /* num_bboxes = 0 */
+static int  s_death_x             = 0;      /* якорь: ЛЕВЫЙ край (px) */
+static s32  s_death_y_q           = 0;      /* якорь: ВЕРХ спрайта, Q16.16 */
+static s32  s_death_vy_q          = 0;
+static s32  s_death_ay_q          = 0;
+static u16  s_death_ticks         = 0;
+static bool s_death_by_water      = false;  /* player_state 7 vs 6 */
 static bool s_just_died_pulse     = false;
+/* Камера (мировой Y верхнего края вьюпорта) — нужна для порога «скрыть
+ * тело за экраном» в death_tick (байт-верификация — см. комментарий там).
+ * Обновляется game.c каждый кадр через physics_set_scroll_y(); при смерти
+ * physics_get_y()/get_x() замораживаются на месте гибели, поэтому камера
+ * (следующая за update_scroll(physics_get_x/y())) тоже фактически
+ * замирает — как и в оригинале, где смерть подменяет обработчик игрока и
+ * курсор камеры перестаёт двигаться за телом. */
+static int  s_scroll_y            = 0;
 /* Неуязвимость: включается на время victory-секвенции (boss убит, Karnov
  * авто-идёт к свитку), чтобы вода/опасности не убили его во время прохода. */
 static bool s_invuln              = false;
@@ -167,7 +297,6 @@ static int  s_hit_iframes         = 0;
 /* Level-end: Karnov сидит со свитком (front-facing поза #0x60-0x62), а не
  * обычный crouch. Включается на время s_level_end. */
 static bool s_sit_scroll          = false;
-#define DEATH_LEN  60   /* ≈ 2.2 sec @ 27.5 FPS */
 
 /* Sprite-slot mapping для Karnov (пользователь-verified из оригинала
  * KARNOV.EXE, 2026-05-27). Спрайты содержатся как РАЗДЕЛЬНЫЕ left/right
@@ -227,26 +356,63 @@ enum {
     K_FLYL_1 = 124, K_FLYL_2 = 125,
 };
 
-/* LEVEL0 splash имеет статичные «платформы» — буквы KARNOV в верхней
- * полосе. Тайлы букв в LEVEL0.BIN имеют attr=02, что НЕ удовлетворяет
- * `attr & 1` (рабочий solid-критерий из KARNOV.EXE для LEVEL1+). Чтобы
- * Karnov мог ходить по верху букв после подъёма по лестнице (как в
- * оригинальной заставке, где он MOV-driven), захардкодим overlay:
- *   y_top=45  (top of letter row 4), x_range=[48, 240]  (cols 3..14).
- * Извлечено из LEVEL0 map: letters в rows 4..6 cols 3..14. */
-static int s_level0_splash = 0;
-/* LEVEL1 start — slim каменная платформа слева, где сидит большой brown
- * dragon. Это «солидная поверхность» поверх обычного ground_y=290. Karnov
- * стоит на ней рядом с драконом. Match'ит оригинал DOSBox: stone slab
- * extends x≈0..130, top y=260. После x=130 — abyss с обычным brick floor
- * (y=290) внизу. */
-static int s_level1_dragon_platform = 0;
-#define LVL1_PLAT_X0   0     /* world x_min платформы */
-#define LVL1_PLAT_X1 191     /* world x_max — соответствует визуальной протяжённости
-                              * каменной платформы в row 26 (cols 0..11, x=0..191).
-                              * Раньше 130 — Karnov проваливался посреди gray-stone
-                              * визуально (col 8.5 вместо col 11). */
-#define LVL1_PLAT_TOP_Y 260  /* верх платформы (на чём стоит Karnov/дракон) */
+/* Аним-состояния смерти — байт-порт state_list DS:0x1682 (3 StateScript'а).
+ * dx хранится в единицах движка (2 px), dy — в пикселях; спрайт рисуется
+ * в (2·x_world + 2·dx, y_world + dy), см. KARNOV.md §3.3. */
+typedef struct { u16 sid; s16 dx_units, dy; } death_frame_t;
+static const death_frame_t DEATH_FALL[1]    = { {K_DIE_1,  0,  0} };
+static const death_frame_t DEATH_COLLAPSE[3]= { {K_DIE_2, -4,  3},
+                                                {K_DIE_3, -6, 12},
+                                                {K_DIE_4, -6, 18} };
+static const death_frame_t DEATH_REST[1]    = { {K_DIE_4, -6, 18} };
+static const death_frame_t *const DEATH_ANIM[3] = {
+    DEATH_FALL, DEATH_COLLAPSE, DEATH_REST
+};
+static const int DEATH_ANIM_N[3] = { 1, 3, 1 };
+
+static const death_frame_t *death_cur_frame(void)
+{
+    int st = (s_death_state >= 0 && s_death_state < 3) ? s_death_state : 0;
+    int fi = s_death_frame;
+    if (fi < 0 || fi >= DEATH_ANIM_N[st]) fi = 0;
+    return &DEATH_ANIM[st][fi];
+}
+
+/* DS:0x0FAC[sprite_id] байт-в-байт (см. комментарий выше death_frame_t):
+ * только эти 4 значения нужны смерти Карнова. death_try_land() зовётся
+ * только пока текущий кадр — #114 (state 0), так что реально «в дело»
+ * идёт только 24, но таблица оставлена полной для честности порта. */
+static u8 death_sprite_ground_h(u16 sid)
+{
+    switch (sid) {
+        case K_DIE_1: return 24;   /* file 0x201AE */
+        case K_DIE_2: return 24;   /* file 0x201AF */
+        case K_DIE_3: return 15;   /* file 0x201B0 */
+        case K_DIE_4: return 11;   /* file 0x201B1 */
+        default:      return 24;
+    }
+}
+
+/* LEVEL0 splash и LEVEL1 dragon-platform — байт-верифицировано (2026-09),
+ * хардкод СНЯТ: прежняя гипотеза «эти тайлы НЕ помечены attr&1» была
+ * неверна. Прямой разбор LEVEL0.BIN/LEVEL1.BIN (формат level_load,
+ * level.c) показывает:
+ *   LEVEL0: row4 (y=40..49), tile_id∈{1,4,7,10,13,16,19,22,26,29,32,35}
+ *     (cols 3..14, x=48..239 — верх букв KARNOV) → attr=0 (props=0x0001,
+ *     «standable floor»), т.е. ИМЕННО solid по обычному KARNOV_WALK_MASK
+ *     тесту. Соседние ряды 0..3 и 5..8 (фон и «тело» букв) — attr=2
+ *     (passable), поэтому визуально Karnov не проваливается внутрь букв,
+ *     а стоит ровно на их верхней кромке.
+ *   LEVEL1: row26 (y=260..269), tile_id∈{5,6,7} cols 0..11 (x=0..191,
+ *     каменная плита под драконом) → attr=0 — тоже solid.
+ * Обычный generic-скан find_floor_y (шаг 2 ниже) УЖЕ находит эти тайлы
+ * без всякого overlay: для LEVEL1 top_y=row26*TILE_H=260 — ТОЧНО
+ * совпадает с прежним хардкодом LVL1_PLAT_TOP_Y=260 (нулевая невязка).
+ * Для LEVEL0 generic-скан даёт top_y=row4*TILE_H=40 (прежний хардкод
+ * y_top=45 был ручной DOSBox-оценкой «на глаз» с точностью до полтайла —
+ * байт-точное значение из данных уровня приоритетнее). Оба
+ * s_level0_splash/s_level1_dragon_platform overlay и LVL1_PLAT_* сняты
+ * как избыточные костыли порта. */
 
 /* find_floor_y — порт алгоритма KARNOV.EXE «найти solid-тайл под объектом».
  *
@@ -274,10 +440,9 @@ static int s_level1_dragon_platform = 0;
  * от wy_above до уровня пола (s_ground_y), возвращаем TOP_Y первого
  * solid тайла. Эквивалентно итерации probe_tile вниз с шагом TILE_H.
  *
- * Хаки для LEVEL0 splash (буквы KARNOV) и LEVEL1 dragon platform
- * остаются: в level-данных эти тайлы НЕ помечены attr&1 (визуальная
- * декорация), но в оригинале player на них стоит — вероятно, через
- * иной механизм (per-level overlay в данных, которые мы не расшифровали). */
+ * LEVEL0 «буквы KARNOV» и LEVEL1 dragon-platform больше НЕ нуждаются в
+ * overlay-костыле (см. комментарий над этой функцией) — generic-скан ниже
+ * сам находит их через level_solid_at (attr=0 в данных уровня). */
 static int find_floor_y(int wx, int wy_above)
 {
     /* Дефолт — самая нижняя строка карты. Karnov «проваливается до конца
@@ -288,20 +453,6 @@ static int find_floor_y(int wx, int wy_above)
                  ? ((int)level_num_map_rows - 1) * TILE_H
                  : s_ground_y;
     if (best < s_ground_y) best = s_ground_y;  /* LEVEL0 splash (map < ground_y). */
-
-    /* (1) LEVEL0 splash overlay — KARNOV letter platform (engine workaround). */
-    if (s_level0_splash) {
-        if (wx >= 48 && wx <= 240 && wy_above <= 45) {
-            if (45 < best) best = 45;
-        }
-    }
-
-    /* (1b) LEVEL1 start overlay — stone platform под драконом (engine workaround). */
-    if (s_level1_dragon_platform) {
-        if (wx >= LVL1_PLAT_X0 && wx <= LVL1_PLAT_X1 && wy_above <= LVL1_PLAT_TOP_Y) {
-            if (LVL1_PLAT_TOP_Y < best) best = LVL1_PLAT_TOP_Y;
-        }
-    }
 
     /* (2) Tile-attr scan — точный порт probe_tile (file 0xF214) с iteration
      * по строкам. Делегируем solid-test в level_solid_at (LUT-based с
@@ -335,8 +486,6 @@ void physics_set_world_bounds(int min_x, int max_x, int ground_y, int ceiling_y)
     s_ceiling_y   = ceiling_y;
 }
 
-void physics_set_level0_splash(bool enable) { s_level0_splash = enable ? 1 : 0; }
-
 /* Обновить точку респауна БЕЗ полного сброса состояния. Используется
  * checkpoint-логикой смерти (KARNOV.EXE file 0x10019): точка возрождения
  * берётся из ObjectRegion по позиции гибели, а не из старта уровня. */
@@ -344,9 +493,10 @@ void physics_set_spawn_point(int x, int y)
 {
     s_spawn_x = x;  s_spawn_y = y;
 }
-void physics_set_level1_dragon_platform(bool enable) {
-    s_level1_dragon_platform = enable ? 1 : 0;
-}
+
+/* Камера — см. s_scroll_y выше. Зовётся game.c каждый кадр (update_scroll
+ * пишет g_scroll_x/g_scroll_y). */
+void physics_set_scroll_y(int scroll_y) { s_scroll_y = scroll_y; }
 
 void physics_reset(int x, int y)
 {
@@ -365,9 +515,18 @@ void physics_reset(int x, int y)
     s_fire_cooldown = 0;
     s_flying = false;
     s_prev_u = false;
+    s_prev_fire = false;
     s_in_jump = false;
     s_dying = false;
-    s_dying_frame = 0;
+    s_death_state = 0;
+    s_death_frame = 0;
+    s_death_tick = 0;
+    s_death_falling = false;
+    s_death_hidden = false;
+    s_death_vy_q = 0;
+    s_death_ay_q = 0;
+    s_death_ticks = 0;
+    s_death_by_water = false;
     s_just_died_pulse = false;
     s_invuln = false;
     s_hp = 5;                 /* file 0x101CE: hit_points = 5 при респавне */
@@ -393,20 +552,144 @@ static bool in_ladder_column(void)
  * ТЕКУЩЕГО спрайта, как оригинал (sprite_w/sprite_h по bbox[0].sprite_id). */
 static u16 pick_sprite_id(u8 input, u16 frame);
 
+/* ─── Гибель: запуск и тик ────────────────────────────────────────────
+ * by_water = true — путь die_water (player_state 7): +4 к y_world и
+ * play_sound(7). Иначе die_hit (player_state 6): звук уже сыграл
+ * pair-loop (play_sound(2) в physics_hit). */
+static void death_begin(bool by_water)
+{
+    /* Якорь берём в конвенции движка — левый край / верх ТЕКУЩЕГО кадра,
+     * то есть ровно x_world/y_world объекта игрока. */
+    s_death_x   = physics_get_left_x();
+    int top     = physics_get_top_y();
+    if (by_water) top += 4;              /* die_water: `add [es:bx+0xc],4` */
+    s_death_y_q = (s32)top << 16;
+
+    s_dying           = true;
+    s_just_died_pulse = true;
+    s_on_ladder       = false;
+    s_flying          = false;
+    s_in_jump         = false;
+    s_vy_q4           = 0;
+
+    s_death_state   = 0;                 /* аним-состояние 0 = #114 */
+    s_death_frame   = 0;
+    s_death_tick    = DEATH_TICK_PERIOD;
+    s_death_falling = true;              /* +0xE9 = 1 */
+    s_death_hidden  = false;
+    s_death_vy_q    = 0;
+    /* ay += 0x8000, но над тайлом категории 9 — только 0x2000. */
+    s_death_ay_q    = (level_tile_attr_at(s_x, s_y) == 9)
+                        ? DEATH_AY_Q_CAT9 : DEATH_AY_Q;
+    s_death_ticks   = 0;
+    s_death_by_water = by_water;
+
+    if (by_water) audio_play_sfx(7);     /* file 0x10515 */
+    /* INIT обработчика (0x1838): play_music(DS:0x09D9, prio 0x64, loop 0) —
+     * трек 5 «смерть Karnov». Приоритет в порту не моделируется. Музыку
+     * стартует САМА смерть, а не игровой цикл, — иначе она не звучит там,
+     * где цикл другой (headless-прогон). */
+    audio_play_music(5, /*loop=*/false);
+}
+
+/* Приземление — порт state 3 (0x18BE), вид коллизии 4 «уперся снизу».
+ * Проверяется каждый кадр (фаза коллизий, а не throttled THINK). */
+static bool death_try_land(void)
+{
+    u16 sid = death_cur_frame()->sid;
+    const sprite_t *s = sprite_find(sid);
+    int h = (int)death_sprite_ground_h(sid);   /* DS:0x0FAC[sid], НЕ canvas-высота кэша */
+    int w = s ? (int)s->art_w : 16;
+    int top    = (int)(s_death_y_q >> 16);
+    int bottom = top + h;
+    int x1 = s_death_x + (w > 0 ? w - 1 : 0);
+    if (!level_tile_blocks(s_death_x, bottom, DEATH_LOWER_MASK) &&
+        !level_tile_blocks(x1,        bottom, DEATH_LOWER_MASK))
+        return false;
+    /* y_world = кромка тайла − высота текущего спрайта. */
+    s_death_y_q     = (s32)((bottom / TILE_H) * TILE_H - h) << 16;
+    s_death_vy_q    = 0;
+    s_death_ay_q    = 0;
+    s_death_falling = false;
+    s_death_state   = 1;                 /* [0xD88C] = 1 */
+    s_death_frame   = 0;
+    s_death_tick    = DEATH_TICK_PERIOD;
+    return true;
+}
+
+static void death_tick(void)
+{
+    if (s_death_ticks < 0xFFFF) ++s_death_ticks;
+
+    /* Фаза 1 (UPDATELOCS) — скорость интегрируется КАЖДЫЙ кадр. */
+    if (s_death_falling) {
+        s_death_vy_q += s_death_ay_q;
+        s_death_y_q  += s_death_vy_q;
+        death_try_land();
+    }
+
+    /* THINK — раз в tick_period кадров; ai_dispatch сперва прокручивает
+     * кадр анимации, потом зовёт обработчик. */
+    if (--s_death_tick <= 0) {
+        s_death_tick = DEATH_TICK_PERIOD;
+        if (++s_death_frame >= DEATH_ANIM_N[s_death_state]) s_death_frame = 0;
+        if (s_death_falling) {
+            /* Ушёл ниже мира — байт-верифицировано (2026-09):
+             * cs:0xE62:0x185E (file 0x1167E) THINK:
+             *   cmp word[es:bx+0xe9],0 ; je skip      («ещё летит»?)
+             *   mov ax,[es:bx+0xc]                    ; ax = y_world
+             *   mov dx,[0xcc94] ; add dx,0x64 ; cmp ax,dx ; jle skip
+             *   mov word[es:bx+0x1e],0 ; …             ; hide (num_bboxes=0)
+             * [0xCC94] — НЕ level-константа, а ПЕР-КАДРОВЫЙ «низ вьюпорта
+             * в мировых координатах» = view_y + 180 (0xB4, file 0x36FC:
+             * «mov word[0xb832],0xb4»), где view_y — камера (file 0xFF8C:
+             * «[bp-4] = raw − [0xd955] − [0xb82e]; [0xcc90]=view_y;
+             * [0xcc94]=view_y+[0xb832]»). Итого порог = view_y + 280
+             * (180 высота вьюпорта + 100 запас), а НЕ низ карты уровня —
+             * эквивалент в порту: s_scroll_y (камера, см. physics_set_
+             * scroll_y) + 280. */
+            int floor_px = s_scroll_y + 180 + 100;
+            if ((int)(s_death_y_q >> 16) > floor_px) {
+                s_death_hidden  = true;   /* num_bboxes = 0 */
+                s_death_falling = false;
+                s_death_state   = 1;
+                s_death_frame   = 0;
+            }
+        } else if (s_death_state == 1 && s_death_frame == 0) {
+            s_death_state = 2;           /* круг анимации 1 отработан */
+            s_death_frame = 0;
+        }
+    }
+
+    /* KARNOV_DBG_DEATH=1 — трассировка анимации гибели. */
+    if (getenv("KARNOV_DBG_DEATH")) {
+        const death_frame_t *df = death_cur_frame();
+        fprintf(stderr, "f=%u death[%s] t=%u anim=%d frame=%d sid=%u top=%d vy=%.3f "
+                        "fall=%d hidden=%d music_done=%d x=%d\n",
+                s_cur_frame, s_death_by_water ? "water/sfx7" : "enemy/sfx2",
+                s_death_ticks, s_death_state, s_death_frame, df->sid,
+                (int)(s_death_y_q >> 16), s_death_vy_q / 65536.0,
+                (int)s_death_falling, (int)s_death_hidden,
+                (int)audio_music_finished(), s_death_x);
+    }
+
+    /* Респавн: аним-состояние 2 И трек смерти доиграл. */
+    if ((s_death_state == 2 && audio_music_finished()) ||
+        s_death_ticks >= DEATH_MAX_TICKS) {
+        physics_reset(s_spawn_x, s_spawn_y);
+    }
+}
+
 void physics_tick(u8 input)
 {
     /* Сбрасываем «just_died»-импульс предыдущего кадра. game.c прочитает
      * его в той же тике, в которой был установлен. */
     s_just_died_pulse = false;
 
-    /* Death animation тикает без обработки input. По окончании DEATH_LEN
-     * Karnov respawn'ится в s_spawn_x/y. */
+    /* Анимация гибели тикает без обработки ввода (в оригинале обработчик
+     * игрока подменён на 0xE62:0x1791 и ввод в нём не читается). */
     if (s_dying) {
-        ++s_dying_frame;
-        if (s_dying_frame >= DEATH_LEN) {
-            int sx = s_spawn_x, sy = s_spawn_y;
-            physics_reset(sx, sy);
-        }
+        death_tick();
         return;
     }
 
@@ -575,7 +858,19 @@ void physics_tick(u8 input)
          * При crouch (wants_d on ground) блокируем горизонтальное движение И
          * смену facing — чтобы повернуться надо сначала встать. */
         bool crouching = wants_d && s_on_ground;
-        if (!crouching) {
+        /* User-spec (2026-09-13): управление в воздухе работает ТОЛЬКО если
+         * Karnov прыгнул (s_in_jump) — сорвавшись с края платформы без
+         * прыжка (walk-off-edge ниже, а также шаг в сторону с лестницы,
+         * который тоже роняет s_on_ground без прыжка), он должен падать
+         * строго вертикально, без бокового контроля. s_in_jump уже
+         * существовал и байт-верифицированно взводится только реальным
+         * прыжком (edge-triggered ниже) — раньше использовался только для
+         * выбора спрайта (K_JUMP/K_FALL), теперь эта же граница действует и
+         * на управление. Настоящий алгоритм оригинала (cs:0xD4B:0x3A5
+         * "apply physics") не декомпилирован — это поведенческий фикс по
+         * прямой спецификации пользователя, не байт-подтверждённый порт. */
+        bool air_control_locked = !s_on_ground && !s_in_jump;
+        if (!crouching && !air_control_locked) {
             if (wants_r) { dx_walk += WALK_SPEED; s_facing =  1; }
             if (wants_l) { dx_walk -= WALK_SPEED; s_facing = -1; }
         }
@@ -631,6 +926,11 @@ void physics_tick(u8 input)
             s_in_jump = true;
         }
 
+        /* ОТКАТ (2026-09-14): плавное ускорение вместо «трапеции» — см.
+         * большой комментарий у констант выше (JUMP_VY_Q4/GRAVITY_Q4/…) —
+         * прошлая byte-точная модель оказалась построена на перепутанном
+         * адресе (код чужого объекта, не Карнова) и давала прыжок намного
+         * ниже игрового. Эта модель не байт-точна, но играбельна. */
         s_vy_q4 += GRAVITY_Q4;
         if (s_vy_q4 < VY_MIN) s_vy_q4 = VY_MIN;
         if (s_vy_q4 > VY_MAX) s_vy_q4 = VY_MAX;
@@ -648,9 +948,6 @@ void physics_tick(u8 input)
                 s_in_jump = false;       /* приземлились — выходим из jump-state */
             } else {
                 s_y = new_y;
-                /* Покинули пол? Если нет ни тайла ниже, ни default-ground в
-                 * ближайшем тике — мы в воздухе. Здесь не сбрасываем
-                 * on_ground т.к. new_y < floor_y → ещё не достигли пола. */
                 s_on_ground = false;
             }
         } else {
@@ -671,22 +968,36 @@ void physics_tick(u8 input)
         }
     }
 
-    /* 4. Стрельба: на удержание FIRE спаунит снаряд с rate-limit. На
-     * лестнице стрелять нельзя (как в оригинале — обе руки заняты).
-     * В полёте можно. */
+    /* 4. Стрельба: выстрел — по ПЕРЕДНЕМУ ФРОНТУ FIRE (в оригинале это
+     * импульс от буферизованного нажатия клавиши, см. комментарий у
+     * s_prev_fire), удержание клавиши автоогня не даёт. cooldown
+     * остаётся вторичным ограничителем на случай частых повторных
+     * нажатий (как [0xD8B2] в оригинале). На лестнице стрелять нельзя
+     * (как в оригинале — обе руки заняты). В полёте можно. */
+    bool fire_edge = wants_fire && !s_prev_fire;
     if (s_fire_cooldown > 0) --s_fire_cooldown;
-    if (wants_fire && s_fire_cooldown == 0 && !s_on_ladder) {
-        /* Точка вылета — как в оригинале (spawn_player_shot, file 0x12F4F):
-         *   x = player.x_world + 4 ед. = левый край спрайта + 8 px
-         *       (от facing НЕ зависит — направление задаёт знак скорости),
+    if (fire_edge && s_fire_cooldown == 0 && !s_on_ladder) {
+        /* Точка вылета — переразобрано заново (2026-09, file 0x12F55..
+         * 0x12FA3, см. комментарий в ai_spawn_player_fireball()):
+         *   x = player.x_world + 8 px, если Карнов смотрит вправо,
+         *       player.x_world + 0 px, если влево — АСИММЕТРИЧНО (одна и
+         *       та же velocity-таблица DS:0x1348, что и у WALK_SPEED,
+         *       даёт ±2.0, удваивается, плюс флат +4.0; раньше здесь стоял
+         *       единый facing-независимый +8, что было неверно для левого
+         *       направления);
          *   y = верх спрайта + 7, и ещё +16 если Карнов сидит. */
-        int fx = physics_get_left_x() + 8;
+        int fx = physics_get_left_x() + (s_facing > 0 ? 8 : 0);
         int fy = physics_get_top_y() + 7;
         if (wants_d && s_on_ground) fy += 16;
-        ai_spawn_player_fireball(fx, fy, s_facing, s_cur_frame);
-        /* С читом перезарядка 1 тик вместо 3 (file 0x1302C). */
-        s_fire_cooldown = input_god_mode() ? 1 : FIRE_COOLDOWN_TICKS;
+        /* Cooldown взводится, только если выстрел реально состоялся —
+         * при лимите в 15 живых снарядов оригинал (fire(), file 0x1303B)
+         * НЕ трогает [0xD8B2], позволяя мгновенный повтор попытки. */
+        if (ai_spawn_player_fireball(fx, fy, s_facing, s_cur_frame)) {
+            /* С читом перезарядка 1 тик вместо 3 (file 0x1302C). */
+            s_fire_cooldown = input_god_mode() ? 1 : FIRE_COOLDOWN_TICKS;
+        }
     }
+    s_prev_fire = wants_fire;
 
     if (s_x < s_world_min_x) s_x = s_world_min_x;
     if (s_x > s_world_max_x) s_x = s_world_max_x;
@@ -704,15 +1015,8 @@ void physics_tick(u8 input)
      * оригинала. */
     if (s_hit_iframes > 0) --s_hit_iframes;
 
-    if (!s_invuln && !s_dying && level_is_water_at(s_x, s_y)) {
-        s_dying = true;
-        s_dying_frame = 0;
-        s_just_died_pulse = true;
-        s_on_ladder = false;
-        s_flying = false;
-        s_vy_q4 = 0;
-        s_in_jump = false;
-    }
+    if (!s_invuln && !s_dying && level_is_water_at(s_x, s_y))
+        death_begin(/*by_water=*/true);   /* die_water → play_sound(7) */
 
     /* Поза этого кадра — из неё берутся ширина/высота для перевода
      * (центр, подошва) → (левый край, верх), см. physics_get_top_y. */
@@ -733,15 +1037,17 @@ void physics_hit(int enemy_hp)
     if (s_invuln || s_dying || s_hit_iframes > 0) return;
     s_hit_iframes = 20;
     s_hp -= enemy_hp;
-    if (s_hp > 0) { audio_play_sfx(2); return; }   /* ранен, но жив */
+    /* Ранен, но жив: в оригинале в этой ветке игроку НЕ играется ничего.
+     * Хит-тест (file 0xF81E) вычитает hit_points врага из hit_points
+     * игрока и возвращает 1, только если итог == 0 (смертельно). Если
+     * ax==0 (игрок жив), pair-loop прыгает на file 0xFB91 — просто снимает
+     * флаг касания [+0xDD], без звука. play_sound(2) стоит дальше, в ветке
+     * «игрок погиб» (file 0x0FBC2), поэтому звук ниже. Практически ветка
+     * недостижима: у игрока 5 HP, у врагов ≥10. */
+    if (s_hp > 0) return;
     s_hp = 0;
-    s_dying = true;
-    s_dying_frame = 0;
-    s_just_died_pulse = true;
-    s_on_ladder = false;
-    s_flying = false;
-    s_vy_q4 = 0;
-    s_in_jump = false;
+    audio_play_sfx(2);                    /* file 0x0FBC2 — предсмертный крик */
+    death_begin(/*by_water=*/false);      /* die_hit (player_state 6) */
 }
 
 int physics_hp(void) { return s_hp; }
@@ -769,10 +1075,14 @@ static int karnov_pose_h(void)
 }
 int physics_get_top_y(void)
 {
+    /* На время гибели объект живёт в своей (движковой) системе координат:
+     * якорь = верх спрайта, его и отдаём. */
+    if (s_dying) return (int)(s_death_y_q >> 16);
     return s_y - karnov_pose_h();
 }
 int physics_get_left_x(void)
 {
+    if (s_dying) return s_death_x;
     const sprite_t *ks = sprite_find(s_render_sid);
     int w = ks ? (int)ks->art_w : 16;
     return s_x - w / 2;
@@ -818,13 +1128,8 @@ static void render_placeholder(int cx, int cy, u8 input, u16 frame, bool walking
  * Возвращает ужё facing-correct sprite id — render не флипает. */
 static u16 pick_sprite_id(u8 input, u16 frame)
 {
-    /* Death-animation: 4-кадровый цикл K_DIE_1..4, stride 8 ticks/frame
-     * — занимает ровно DEATH_LEN тиков (60/8 ≈ 7 переключений между
-     * кадрами, остановится на K_DIE_4 к концу). */
-    if (s_dying) {
-        static const u16 die_cycle[4] = { K_DIE_1, K_DIE_2, K_DIE_3, K_DIE_4 };
-        return die_cycle[(s_dying_frame >> 3) & 3];
-    }
+    /* Гибель: кадр берётся из state_list DS:0x1682 (см. death_tick). */
+    if (s_dying) return death_cur_frame()->sid;
     /* Level-end: Karnov сидит со свитком — front-facing CROUCH-поза
      * #0x67(R)/#0x6F(L) (руки скрещены на груди). Это правильная «сидячая»
      * поза (0x60-0x62 были dissolve, 0x7B — спина на лестнице). Сам свиток
@@ -911,6 +1216,8 @@ void physics_render(u8 input, u16 frame, bool mode_cga, int scroll_x, int scroll
     if (getenv("KARNOV_DBG_POSE"))
         fprintf(stderr, "f=%u sid=%u x=%d y=%d on_ladder=%d climb=%u\n",
                 frame, sid, s_x, s_y, (int)s_on_ladder, s_climb_ticks);
+    /* Упал ниже мира — num_bboxes = 0, объект не рисуется (0x1867). */
+    if (s_dying && s_death_hidden) return;
     const sprite_t *s = sprite_find(sid);
     if (s) {
         /* pick_sprite_id уже вернул спрайт нужного разворота (в архиве
@@ -920,6 +1227,13 @@ void physics_render(u8 input, u16 frame, bool mode_cga, int scroll_x, int scroll
          * своей конвенции ноги/центр, см. KARNOV.md §3.3.) */
         int x0 = s_x - s->art_w / 2 - scroll_x;
         int y0 = s_y - s->h - scroll_y;
+        if (s_dying) {
+            /* Смерть идёт в движковой конвенции: якорь (левый край, верх)
+             * плюс FrameOffset кадра — dx в 2px-единицах, dy в пикселях. */
+            const death_frame_t *df = death_cur_frame();
+            x0 = s_death_x + df->dx_units * 2 - scroll_x;
+            y0 = (int)(s_death_y_q >> 16) + df->dy - scroll_y;
+        }
         u8 ck = sprite_is_cga() ? 0xFF : 1;
         const u32 *pal = sprite_is_cga() ? CGA_PAL_1H : EGA_PAL16;
         for (int r = 0; r < s->h; ++r) {

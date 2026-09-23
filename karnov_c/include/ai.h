@@ -55,8 +55,12 @@ void ai_try_pickup(int kx, int ky);
  * Снаряд летит по прямой, гасится при выходе за экран или столкновении
  * с врагом. Урон = PLAYER_FIREBALL_DAMAGE (10) из пула HP врага.
  *
- * facing: -1 → влево, +1 → вправо. */
-void ai_spawn_player_fireball(int x, int y, int facing, u16 frame);
+ * facing: -1 → влево, +1 → вправо.
+ * Возвращает false, если выстрел не состоялся (лимит 15 живых снарядов,
+ * file 0x1303B) — в оригинале в этом случае fire() не перезаряжает
+ * cooldown (DS:0xD8B2), звук тоже не проигрывается; вызывающая сторона
+ * должна взводить cooldown только при успешном выстреле. */
+bool ai_spawn_player_fireball(int x, int y, int facing, u16 frame);
 
 /* Boss kill / scroll-pickup query (level end transition). */
 int  ai_debug_count_scrolls(void);

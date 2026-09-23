@@ -12,6 +12,7 @@
 #include "audio.h"
 #include <SDL2/SDL.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define SAMPLE_RATE   22050
@@ -329,6 +330,12 @@ int audio_init(void)
 
 void audio_play_music(int track_idx, bool loop)
 {
+    /* KARNOV_DBG_AUDIO=1 — трассировка вызовов музыки/SFX (работает и с
+     * --no-audio: печать стоит до проверки инициализации плеера). */
+    if (getenv("KARNOV_DBG_AUDIO"))
+        fprintf(stderr, "audio: music %d (%s) loop=%d\n", track_idx,
+                (track_idx >= 0 && track_idx < NUM_TRACKS)
+                    ? g_tracks[track_idx].label : "?", (int)loop);
     if (!g_initialized) return;
     if (track_idx < 0 || track_idx >= NUM_TRACKS) return;
 
@@ -367,11 +374,22 @@ u32 audio_cycle_count(void)
 
 void audio_play_sfx(int id)
 {
+    if (getenv("KARNOV_DBG_AUDIO"))
+        fprintf(stderr, "audio: sfx %d\n", id);
     if (!g_initialized) return;
     if (id > 9 || !g_sfx_tbl[id].data) return;   /* id 0 — звук выстрела */
     SDL_LockAudioDevice(g_dev);
-    /* Приоритет: новый SFX перебивает текущий только если prio >= (как
-     * [0x121F]-арбитр в KARNOV.EXE). Одинаковый prio → перезапуск (rapid fire). */
+    /* Приоритет — байт-верифицировано (2026-09), арбитр file 0xE46D
+     * (cs-модуль SFX, вызывается с (ptr_off, ptr_seg, priority)):
+     *   cmp si,[0x121f] ; jnc start_new        ; si=новый prio, [0x121F]=текущий
+     *     (jnc = «>=» unsigned) → новый ВСЕГДА играет, если prio не меньше
+     *   иначе: mov ax,[0x1221] ; or ax,[0x1223] ; jnz skip
+     *     (0x1221/0x1223 — far-указатель на активный SFX; ненулевой = «занято»)
+     *     → при prio МЕНЬШЕ текущего новый звук проигрывается, только если
+     *       ничего не играет ([0x1221]/[0x1223] == 0)
+     * start_new: [0x121f]=si; …
+     * Т.е. ровно `!active || new_prio >= cur_prio` — porт уже совпадает
+     * байт-в-байт, включая "==" → перезапуск при равном приоритете. */
     if (!g_sfx.active || (int)g_sfx_tbl[id].prio >= g_sfx.prio) {
         g_sfx.script     = g_sfx_tbl[id].data;
         g_sfx.pc         = 0;

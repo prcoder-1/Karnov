@@ -21,13 +21,12 @@ void physics_set_spawn_point(int x, int y);
  * Для широкого LEVEL1+ game.c вызывает с min_x=8, max_x=level_w_px-8,
  * ground_y=240, ceiling_y=10. */
 void physics_set_world_bounds(int min_x, int max_x, int ground_y, int ceiling_y);
-/* Включает LEVEL0-only платформу «верх букв KARNOV» на y=45 для
- * x в [48..240]. См. physics.c::find_floor_y. Вызывается из game.c
- * при загрузке LEVEL0. */
-void physics_set_level0_splash(bool enable);
-/* LEVEL1 start area — slim каменная платформа под драконом (x∈[0..130]
- * y=260). Включается game.c при загрузке LEVEL1. */
-void physics_set_level1_dragon_platform(bool enable);
+/* Камера (мировой Y верха вьюпорта) — обновляется game.c каждый кадр.
+ * Нужна death_tick для байт-точного порога «скрыть тело за экраном»
+ * ([0xCC94]+0x64, см. physics.c). LEVEL0-буквы KARNOV и LEVEL1
+ * dragon-platform больше не требуют отдельных setter'ов — они уже solid
+ * по данным уровня (attr=0), find_floor_y находит их generic-сканом. */
+void physics_set_scroll_y(int scroll_y);
 void physics_tick(u8 input_state);
 int  physics_get_x(void);
 int  physics_get_y(void);

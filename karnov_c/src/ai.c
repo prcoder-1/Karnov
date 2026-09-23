@@ -33,9 +33,10 @@
 #define TYPE_STONE_THROWER     1001  /* зелёный качок справа splash, кидает глыбы */
 #define TYPE_ROCK_PROJECTILE   1002  /* катящаяся красная глыба */
 #define TYPE_PLAYER_FIREBALL   1003  /* снаряд Karnov-а (FIRE press) */
-#define TYPE_FLYING_BIRD       1004  /* LEVEL1-start «два орла» (sky-spawn, sprites
-                                      * #147-148). Отдельный псевдо-тип, чтобы не
-                                      * путать с реальным type 14 = Селёдка. */
+/* TYPE_FLYING_BIRD (1004) убран (2026-09-13) вместе с ai_flying_bird/
+ * ai_bird_flock_tick — это была честно подписанная «чистая синтетика
+ * порта» (случайная «птичья стая»), не соответствующая ничему в оригинале;
+ * настоящие «орлы» LEVEL1 — это байт-точный AI TYPE 10 (ai_type10). */
 #define TYPE_BOMB_BLAST        1005
                                       /* анимированная вспышка Bomb-предмета
                                        * (#25→#26→#27→#28, ~50 кадров). */
@@ -46,6 +47,15 @@
                                       * #271..274, obj_type = 3, hp = 100 */  /* шар «золотого человека» (type 24):
                                       * ребёнок cs:0x1348:0x00D7, спрайты
                                       * #185/#186, hp 10, очки 0x500. */
+#define TYPE_ARENA_PILLAR      1009  /* 8-сегментный столб арены (тип 51):
+                                      * отдельный объект cs:0x175E:0x3A9,
+                                      * queue_state из state4/6 родителя,
+                                      * см. ai_arena_static/ai_arena_pillar. */
+
+/* Сентинел hit_idx для «партнёр — сам игрок» (obj_type партнёра == 0 в
+ * оригинале, см. ai_type49 и ai_check_player_hit). Игрок не входит в
+ * g_obj[], поэтому обычный индекс сюда попасть не может. */
+#define HIT_IDX_PLAYER (-2)
 
 /* Sprite IDs для player-fireball — мелкие круглые «шарики» (7x7).
  * #0x0A/#0x0B — маленькие round energy-ball'ы (4-кадровый набор 0x0A-0x0D).
@@ -63,6 +73,7 @@ static int  player_shots_alive(void);
 static void obj_snap_ground(struct ai_obj *o);
 static void arm_real_scroll(void);
 static int  obj_width(const struct ai_obj *o);
+static void ai_head_column_hit_box(struct ai_obj *o, int idx);
 
 /* Многосегментные враги (типы 20, 21, 30, 33, 34, 36, 39, 50, 51):
  * до 8 частей-«bbox» как в оригинальном ActiveObject (+0x1E num_bboxes,
@@ -148,7 +159,7 @@ typedef struct ai_obj {
      * проходом по боксам, file 0x2CB0/0x2D72. */
     bool   hit_flag;      /* коснулись в ЭТОМ кадре */
     bool   has_partner;   /* +0xDF когда-либо заполнялось */
-    int    hit_idx;
+    int    hit_idx;        /* индекс партнёра в g_obj[], либо HIT_IDX_PLAYER */
     /* Projectile Q16.16 sub-pixel state (TYPE_ROCK_PROJECTILE).
      * Соответствуют полям object'а +0x0E/+0x10 (vx) и +0x12/+0x14 (vy)
      * из KARNOV.EXE handler cs:0x11D6:0x08B3 (sprites #21-23).
@@ -181,7 +192,7 @@ u16 g_ai_level_num = 0;
  * Респавна-при-возврате-камеры в оригинале нет, но off-screen despawn
  * ЕСТЬ — в THINKCYCLE (file 0xFD6A): объект, отставший от игрока более
  * чем на 0x7D единиц (250 px) и не являющийся goal-объектом, получает
- * state_byte = 6. В порту пока не реализовано (TODO). */
+ * state_byte = 6. В порту реализовано — см. ai_despawn_behind() ниже. */
 
 /* Boss-конец: когда goal-объект убит — g_boss_dead=true и через 30 ticks
  * спавним свиток (scroll item) сверху. После пикапа Karnov-ом инициируем
@@ -198,6 +209,12 @@ static int  g_boss_y = 0;
 /* Левый край камеры — сохраняется каждый кадр из ai_check_triggers;
  * нужен типам, которые живут «пока видны» (23). */
 static int  g_camera_left = 0;   /* Y boss'а на момент смерти — с этой высоты падает свиток */
+/* Верхний край камеры — сохраняется из ai_render (единственное место в
+ * порту, куда прокинут scroll_y каждый кадр); используется типом 25 для
+ * отражения скорости от границ видимой области (см. t25_reflect). На кадр
+ * позже, чем g_camera_left (ai_render идёт после ai_tick) — не критично,
+ * скролл меняется на единицы px/кадр. */
+static int  g_camera_top = 0;
 
 /* Sky-spawner (драйвер file 0x12DB5) — работает ВНЕ объектной системы.
  * Запись type 8 cur=(0,0) range=(0,0) в BIN никогда не спавнится сама
@@ -205,13 +222,13 @@ static int  g_camera_left = 0;   /* Y boss'а на момент смерти —
  * Состояние: последняя точка прогресса игрока (DS:0xD8A0) и счётчик
  * простоя (DS:0xD8A4). */
 static bool s_sky_enabled = false;
-static int  s_sky_last_x_units = 0;
-static int  s_ice_ctr = 0;   /* [0xD8A4] — счётчик sky-цепи */
-static int  s_sky_idle = 0;
+static int  s_ice_ctr = 0;            /* [0xD8A4] — простой sky-цепи (лёд) */
+static int  s_ice_last_x_units = 0;   /* [0xD8A0] — точка прогресса игрока */
 
 
 static void spawn_rock(int x, int y, int vx, u16 frame);
 static int alloc_obj_slot(void);
+static void obj_aim(ai_obj_t *o, int from_x, int from_y, int to_x, int to_y, int n);
 
 /* ─── PRNG ──────────────────────────────────────────────────────────────
  * Общий генератор для всех PRNG-типов (6, 8, 25, 44, 45, 47) — Turbo-C
@@ -243,7 +260,6 @@ static bool is_damageable_obj(const struct ai_obj *o)
     switch (o->type) {
         case TYPE_STONE_THROWER:
         case TYPE_ROCK_PROJECTILE:
-        case TYPE_FLYING_BIRD:
             return true;
         case TYPE_TRAP_SEGMENT:
             return false;                  /* states 4/5/6 возвращают в THINK */
@@ -269,6 +285,18 @@ static bool is_damageable_obj(const struct ai_obj *o)
     if (o->type == 55) return o->custom != 0;
     /* Тип 37 неуязвим, пока дремлет (file 0x175D1). */
     if (o->type == 37) return o->custom != 0;
+    /* Тип 48 (турель) уязвима только пока игрок ближе 120 ед. по X,
+     * иначе box0.hitflag=0 (file 0x18B2E/0x18B3E). */
+    if (o->type == 48) return o->custom != 0;
+    /* Тип 33 теряет hitflag (box0.hitflag=0), как только начал «схлопывание»
+     * (file 0x16BB3): подбитая насмерть колонна не может быть задета
+     * повторно — она просто превращается в неубираемую груду обломков.
+     * ВАЖНО (см. подробный разбор в ai_multipart): касание телом сюда
+     * вообще не ведёт — только смертельный удар снарядом/Bomb. */
+    if (o->type == 33) return o->st_phase < 2;
+    /* Столб арены (порождение типа 51) неуязвим целиком: во всех 8 боксов
+     * его собственного INIT hitflag=0 (file 0x191E1..0x19226). */
+    if (o->type == TYPE_ARENA_PILLAR) return false;
     switch (o->type) {
         case TYPE_PLAYER_FIREBALL:
         case TYPE_BOMB_BLAST:
@@ -308,6 +336,7 @@ static int obj_height(const ai_obj_t *o)
         if (bottom > 0) return bottom;
     }
     u16 sid = 0xFFFF;
+    int dy = 0;
     /* Приоритет — аним-таблицы САМОГО EXE: ручной sprite_for_type у
      * многих типов возвращал случайный кадр (у типа 15 — высотой 16 px),
      * из-за чего постановка на землю в ai_spawn_from_record сажала врага
@@ -318,7 +347,20 @@ static int obj_height(const ai_obj_t *o)
         if (al->count) {
             int st = (o->anim_state < al->count) ? o->anim_state : 0;
             const anim_state_t *as = &al->states[st];
-            if (as->n) sid = as->spr[(o->frame_index < as->n) ? o->frame_index : 0];
+            if (as->n) {
+                int fi = (o->frame_index < as->n) ? o->frame_index : 0;
+                sid = as->spr[fi];
+                /* ИСПРАВЛЕНО (2026-09): эта ветка (используется ТОЛЬКО при
+                 * спавне, до первого anim_apply) игнорировала dy кадра —
+                 * а он не нулевой почти везде (см. anim_apply, `ai.c:417-418`,
+                 * которая для КАЖДОГО следующего тика формулу dy+h уже
+                 * учитывает). Итог: постановка на землю при спавне была
+                 * смещена ровно на dy кадра 0 состояния 0 (для типа 11 —
+                 * на 2 px вверх, «стражники висят над землёй» на LEVEL1).
+                 * Приводим формулу к тому же виду, что и в num_parts>0
+                 * ветке выше (bottom = dy + sprite_h). */
+                if (as->off) dy = as->off[fi * 2 + 1];
+            }
         }
     }
     if (sid == 0xFFFF)
@@ -326,7 +368,24 @@ static int obj_height(const ai_obj_t *o)
                   ? o->item_sprite
                   : sprite_for_type(o->type, o->anim_phase);
     const sprite_t *s = (sid == 0xFFFF) ? NULL : sprite_find(sid);
-    return s ? (int)s->h : 16;
+    return s ? dy + (int)s->h : 16;
+}
+
+/* Верхняя граница многосегментного объекта относительно o->y — минимум
+ * (самый отрицательный) parts[i].dy. Нужна отдельно от obj_height
+ * (которая берёт МАКСИМУМ dy+h, т.е. НИЖНИЙ край): у объектов со
+ * стеком, растущим ВВЕРХ (тип 33 — голова/тело торчат на dy до −68,
+ * тип 21 — верхний ряд мозаики на dy=−30), верх спрайта лежит ЗНАЧИТЕЛЬНО
+ * выше o->y, а не в нём самом. Без этой поправки AABB-хиттест снаряда
+ * (ai_player_fireball) считал верх бокса равным o->y и промахивался мимо
+ * всей верхней части такого объекта — файербол физически не мог попасть
+ * в дерево (тип 33) выше его нижней кромки. */
+static int obj_top_offset(const ai_obj_t *o)
+{
+    int top = 0;
+    for (int i = 0; i < o->num_parts; ++i)
+        if (o->parts[i].dy < top) top = o->parts[i].dy;
+    return top;
 }
 
 /* ─── UPDATELOCS: центральный интегратор (file 0x25B3) ─────────────────
@@ -339,6 +398,7 @@ static int obj_height(const ai_obj_t *o)
 #define Q_2_0    QV(2, 0)
 #define Q_2_5    QV(2, 0x8000)
 #define Q_0_5    QV(0, 0x8000)
+#define Q_4_0    QV(4, 0)
 
 static void obj_integrate(ai_obj_t *o)
 {
@@ -609,18 +669,34 @@ static void ai_rock_projectile(ai_obj_t *o, u16 frame, u8 karnov_input)
  * Скорости ТЕПЕРЬ байт-верифицированы (раньше здесь стояло 6 px/кадр —
  * вдвое медленнее оригинала). */
 
-/* Урон снаряда Karnov-а по врагу. В оригинале (level.cpp pair-loop,
- * cs:0xFC2C) урон = hit_points САМОГО снаряда: `b->hit_points -= a->hit_points`,
- * где a — атакующий объект игрока. HP врага (spawn.trigger>>8) — это ПУЛ:
- * все значения в LEVEL%d.BIN кратны/сравнимы с 10 (обычные враги=10 → 1 удар,
- * type18=20 → 2, type13/15=30 → 3, боссы 95..250 → 10..25). Отсюда damage=10.
- * НЕ байт-верифицировано (handler Karnov-fire не декомпилирован), но это
- * единственное значение, при котором обычные враги гибнут с одного попадания
- * И все HP-пулы дают целое число попаданий. */
+/* Урон снаряда Karnov-а по врагу — ТЕПЕРЬ БАЙТ-ВЕРИФИЦИРОВАНО (code-review
+ * PSEUDO-TYPES 2026-09, две независимые точки в дизасме):
+ *   1) Общий INIT снаряда cs:0xFFA:0x0009 (file 0x117A9, см. коммент выше
+ *      «TYPE_PLAYER_FIREBALL») пишет `mov word [es:bx+0xE7],0xA` (file
+ *      0x117C2) — то есть hit_points САМОГО снаряда = 10, безусловно для
+ *      всех трёх вариантов выстрела (firepower 1/2/3).
+ *   2) Общий pair-loop урона (level.cpp, file 0xFC2C..0xFC42) для ЛЮБОЙ
+ *      пары объектов с obj_type атакующего в [1..9]: `b.hit_points -=
+ *      a.hit_points; a.hit_points -= (b.hit_points ДО вычитания)` —
+ *      симметричный обмен по хитпоинтам самих объектов, не константа урона.
+ * Combining 1+2: снаряд Карнова всегда отнимает у цели ровно 10 (своих же
+ * hit_points), независимо от firepower — что и объясняет, почему все
+ * HP-пулы врагов в LEVEL%d.BIN кратны 10 (обычные=10 → 1 удар, type18=20 →
+ * 2, type13/15=30 → 3, боссы 95..250 → 10..25 попаданий). */
 #define PLAYER_FIREBALL_DAMAGE 10
 
 /* Варианты снаряда: три разных обработчика оригинала (см. spawn_player_shot,
- * file 0x12F4F — таблица переходов по firepower). */
+ * file 0x12F4F — таблица переходов по firepower, file 0x12FB5).
+ * Дизассемблировано заново и байт-подтверждено (2026-09, code-review этой
+ * сессии): каждый обработчик вызывает общий INIT (cs:0xFFA:0x0009, file
+ * 0x117A9) с параметрами (dx,ax) = магнитуда скорости Q16.16, из которой
+ * INIT сам ставит знак по facing ([DS:0xD8B0] бит0=вправо):
+ *   STRAIGHT: file 0x1187F "mov dx,6; xor ax,ax" → магнитуда 6.0
+ *   RISING:   file 0x118BC "mov dx,7; xor ax,ax" → магнитуда 7.0
+ *   GROUND:   file 0x11945 "mov dx,7; xor ax,ax" → магнитуда 7.0
+ * obj_integrate() порта удваивает целую часть xq при переводе в пиксели
+ * (`o->x = (xq>>16)*2`), поэтому величины 6.0/7.0 ниже — это именно то,
+ * что нужно передавать в QV(spd,0) БЕЗ дополнительного удвоения. */
 enum { SHOT_STRAIGHT = 0,   /* cs:0xFFA:0x00C2 — vx = ±6.0, летит ровно      */
        SHOT_RISING   = 1,   /* cs:0xFFA:0x00FF — vx = ±7.0, vy = −5.0 на 16px */
        SHOT_GROUND   = 2 }; /* cs:0xFFA:0x0183 — vx = ±7.0, падает до земли   */
@@ -635,15 +711,29 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
 
     switch (o->st_phase) {
     case SHOT_RISING:
-        /* Подъём ровно на 16 px от точки выстрела, затем горизонтально
-         * (cs:0xFFA:0x0147: `if (y < target) { vy = 0; flag = 0 }`). */
+        /* Подъём ровно на 16 px от точки выстрела, затем горизонтально —
+         * переразобрано и байт-подтверждено (2026-09, file 0x118BC/0x118E7,
+         * = cs:0xFFA:0x011C init / 0x0147 tick):
+         *   init: vy_hi = 0xFFFB (= −5, т.е. vy = −5.0 Q16.16), private-флаг
+         *     «поднимается» = 1, target_y = y_world − 16;
+         *   tick: `if (flag) { if (y_world < target_y) { vy=0; flag=0 } }`
+         *     (cmp+jnl: сброс срабатывает, когда y_world СТРОГО МЕНЬШЕ
+         *     target, т.е. поднялись НЕ МЕНЕЕ чем на 16 px). */
         if (o->st_aux && o->y < o->st_misc) { o->vyq = 0; o->st_aux = 0; }
         break;
     case SHOT_GROUND: {
         /* Каждый тик щупается тайл ПОД снарядом: категории 2 и 9 (небо/
          * фон) — продолжаем падать со скоростью 5.0, иначе ложимся на
          * поверхность (vy = 0). Тайл В точке снаряда категории 3 или 4 —
-         * снаряд гаснет (cs:0xFFA:0x01B3). */
+         * снаряд гаснет (cs:0xFFA:0x01B3, file 0x11953/0x119A6) —
+         * байт-подтверждено заново (2026-09): обе ветки таблицы `ax==3` и
+         * `ax==4` (file 0x119BF) ведут на один и тот же код, ставящий
+         * state_byte=4; в оригинале это на один кадр ОТКЛАДЫВАЕТ удаление
+         * (снаряд гасится не мгновенно, а на следующем тике, после ещё
+         * одной итерации UPDATELOCS) — порт убирает объект немедленно
+         * (`return` ниже). Разница на 1 кадр движения признана
+         * незначительной и не портируется (см. project convention
+         * «непортированное помечать явно»). */
         int below = level_tile_attr_at(o->x, o->y + TILE_H);
         o->vyq = (below == 2 || below == 9) ? QV(5, 0) : 0;
         int here = level_tile_attr_at(o->x, o->y);
@@ -658,9 +748,25 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
      * (state_list DS:0x16B2). */
     if (o->custom) o->anim_phase = (u16)(((frame - o->spawn_frame) / 2) & 3);
 
-    /* Despawn off-screen — теперь world-coords, не screen. */
-    int world_w = (int)level_num_map_cols * TILE_W;
-    if (o->x < -8 || o->x > world_w + 8) {
+    /* Despawn off-screen — ПРАВИЛЬНО screen-relative, не world-relative.
+     * Передизассемблировано (2026-09): общая THINK-функция снаряда игрока
+     * (cs:0xFFA:0x0083, file 0x11823) сравнивает тайл-колонку снаряда с
+     * [0xB834]/[0xB838] — а эти два слова пересчитываются КАЖДЫЙ кадр из
+     * ТЕКУЩЕГО экранного прямоугольника (file 0xFFCF: `[0xb834] =
+     * [0xcc8e] + [0xcc9a]`; file 0xFFE3: `[0xb838] = [0xcc92] - [0xba66]`,
+     * где [0xCC8E]/[0xCC92] — левая/правая граница ВИДИМОГО экрана, не
+     * уровня). Т.е. снаряд снимается, как только выходит из ВИДИМОЙ
+     * области — а не когда долетает до края уровня. Прежняя версия этого
+     * комментария ("теперь world-coords, не screen") ссылалась на
+     * непроверенное предположение и была неверна: именно она объясняла
+     * баг «Карнов иногда перестаёт стрелять» — снаряды, не долетевшие до
+     * края уровня, годами оставались «живыми» и забивали лимит в 15 штук
+     * ([0x1424], см. player_shots_alive() выше).
+     * Точные original-константы [0xCC9A]/[0xBA66] (небольшие поля-запасы)
+     * не восстановлены — используется тот же идиом «видим на экране»,
+     * что и у is_damageable-видимости в type23/type20 (g_camera_left..+
+     * VIEW_W), с запасом в один тайл на сторону. */
+    if (o->x < g_camera_left - TILE_W || o->x > g_camera_left + VIEW_W + TILE_W) {
         o->alive = false;
         return;
     }
@@ -677,11 +783,37 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
         if (!e->alive) continue;
         if (e == o) continue;
         if (!is_damageable_obj(e) && !e->is_boss) continue;
+        /* Тип 20 (колонна голов, obj_type=9): в оригинале ЛЮБОЕ попадание
+         * снаряда в obj_type==9 НЕ идёт через симметричный обмен hit_points
+         * (generic pair-loop, file 0xFB68: таблица по b.obj_type для
+         * значения 9 ведёт на file 0xFBCB — ставит только state_byte=5 и
+         * ВООБЩЕ ПРОПУСКАЕТ hp-обмен, см. ai_head_column_hit_box) — у него
+         * ПЕР-БОКСОВАЯ система повреждений (2 бита счётчика попаданий на
+         * каждый box в self.st_aux/+0xEB, file 0x152B8): 3 попадания по
+         * ОДНОМУ И ТОМУ ЖЕ сегменту гасят именно его (спрайт→0, вне игры),
+         * не весь объект разом. Поэтому проверяем КАЖДЫЙ part отдельно,
+         * а не общий AABB объекта. */
+        if (e->type == 20 && e->num_parts > 0) {
+            for (int p = 0; p < e->num_parts; ++p) {
+                if (e->parts[p].sprite == 0) continue;   /* уже разрушен — box.flag=0 */
+                const sprite_t *ps = sprite_find(e->parts[p].sprite);
+                int pw = ps ? (int)ps->art_w : 16, ph = ps ? (int)ps->h : 20;
+                int px0 = e->x + e->parts[p].dx, px1 = px0 + pw;
+                int py0 = e->y + e->parts[p].dy, py1 = py0 + ph;
+                if (fx1 < px0 || fx0 > px1) continue;
+                if (fy1 < py0 || fy0 > py1) continue;
+                ai_head_column_hit_box(e, p);
+                o->alive = false;
+                return;
+            }
+            continue;      /* ни один сегмент не задет — снаряд летит дальше */
+        }
         /* bbox врага в объектной конвенции: (x, y) — левый-верх,
          * размеры — из спрайта (в оригинале это box.x0..x1/y0..y1). */
         int ew = obj_width(e);
         int ex0 = e->x, ex1 = e->x + ew;
-        int ey0 = e->y, ey1 = e->y + (e->cur_h > 0 ? e->cur_h : 24);
+        int ey0 = e->y + obj_top_offset(e);
+        int ey1 = e->y + (e->cur_h > 0 ? e->cur_h : 24);
         if (fx1 < ex0 || fx0 > ex1) continue;
         if (fy1 < ey0 || fy0 > ey1) continue;
         /* Hit. */
@@ -691,9 +823,26 @@ static void ai_player_fireball(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
-/* TYPE_BOMB_BLAST — анимированная вспышка Bomb-предмета. Растёт через
- * спрайты #25→#26→#27→#28 (16×6, 32×9, 32×15, 32×19 — уже в кэше) за ~50
- * кадров, затем исчезает. Врагов уже убил ai_bomb_explode() при спавне. */
+/* TYPE_BOMB_BLAST — анимированная вспышка Bomb-предмета. Врагов уже убил
+ * ai_bomb_explode() при спавне (area-kill, не эта функция).
+ *
+ * ЧАСТИЧНО байт-верифицировано (code-review PSEUDO-TYPES 2026-09):
+ * Bomb-предмет (item id 2, file 0x61ED) спавнит объект с обработчиком
+ * cs:0xFFA:0xBCB (file 0x1236B). Его INIT: box0.sprite = 0x19 (#25),
+ * x=player.x, y=player.y+5, hit_points=100, таймер(+0xE9) = 0x32 = **50**
+ * — длительность 50 кадров ПОДТВЕРЖДЕНА байтом (age>=50 ниже — верно).
+ * НО за все 50 тиков box0.sprite в этом обработчике НИ РАЗУ не
+ * перезаписывается — по дизасму спрайт всё это время остаётся #25, а
+ * НЕ растёт до #28. По истечении таймера объект спаунит ВТОРОЙ объект
+ * (handler cs:0xFFA:0xA7B, file 0x1221B) с собственным StateScript
+ * (DS:0x1706), 3-кадровая анимация со спрайтами [5, 27, 28] — назначение
+ * spрайта #5 в этом контексте не установлено (возможно другой FX, не
+ * относящийся к росту вспышки). Т.е. «рост через #25→#26→#27→#28» ниже —
+ * НЕ подтверждённая байтом реконструкция, а правдоподобная замена;
+ * оставлено как есть (визуально приемлемо), но не выдавать за декомпиляцию.
+ * Разобрать до конца — cs:0xFFA:0xA7B TICK (условия смены кадра, подфазы
+ * 0xB2C, возможный урон игроку по близости — поле +0x26 сравнивается с
+ * player.x_world в этом обработчике и не объяснено). */
 static void ai_bomb_blast(ai_obj_t *o, u16 frame, u8 input)
 {
     (void)input;
@@ -719,53 +868,90 @@ static void ai_bomb_blast(ai_obj_t *o, u16 frame, u8 input)
  * убивает с одного попадания, что упрощает геймплей. */
 
 
-/* Type 17 в LEVEL1 — это «Зелёный каменный человек» (метатель), а не
- * страус (user-verified 2026-05-28). Sprites #86..90 — 5-кадровая
- * анимация: idle #86/#87 → windup #88 → release #89 → follow-through #90.
- * Логика идентична splash-TYPE_STONE_THROWER: периодически спавнит
- * катящийся камень (TYPE_ROCK_PROJECTILE, sprites #21..23) влево по facing.
- *
- * Используется существующий ai_stone_thrower (см. ниже) — он закрывает
- * как splash-декорацию, так и обычных LEVEL1 врагов type 17. Разница только
- * в способе спавна (LEVEL0 inline upfront vs LEVEL1 scroll-gated). */
-/* (Скелет на страусе #161..163 — это другой враг, в LEVEL1 не встречается;
- * sprite-диапазон оставлен для будущих уровней.) */
+/* УСТАРЕЛО И ОШИБОЧНО (code-review GROUND MELEE/CHASER, 2026-09): здесь
+ * раньше утверждалось, что тип 17 в LEVEL1 — «Зелёный каменный человек»,
+ * якобы диспетчеризуемый на ai_stone_thrower. Это неверно и опровергнуто
+ * побайтовой сверкой: AI_HANDLERS[17] = ai_type17 (см. ниже), отдельный
+ * обработчик cs:0x11D6:0x0617 (file 0x13B77) — «скелет на страусе»,
+ * который действительно всегда идёт влево с vx=−3.0 и НЕ отслеживает
+ * игрока (повторная декомпиляция подтвердила это дословно: THINK-ветка
+ * состоит только из `ai_result|=4`, без единого обращения к player_ptr).
+ * ai_stone_thrower по-прежнему используется — но только для LEVEL0
+ * splash-декорации, к type 17 отношения не имеет. */
 
-/* Type 18 — Чёртик (walking minion Y-snap, спрайты #153..160).
- * Идёт к Karnov-у по X, его Y постепенно подтягивается к Y игрока. */
+/* ai_walking_minion — диспетчеризуется на ТИП 9 (AI_HANDLERS[9]), а не на
+ * тип 18 (у того — отдельный ai_type18 ниже): заголовок «Type 18 — Чёртик»
+ * ниже был скопирован не туда и описывает чужой дизасм — исправлено.
+ *
+ * ПОВТОРНАЯ ДЕКОМПИЛЯЦИЯ (code-review MULTIPART/STATIC, 2026-09): тип 9,
+ * handler cs:0x11D6:0x1644 (file 0x14BA4) — «2-bbox boss-like декор-дракон».
+ * INIT (file 0x14BC6): num_bboxes=2, box0=спрайт 0x91(145) в (0,0),
+ * box1=спрайт 0x92(146) при dx=5 ед., dy=[DS:0x103D] (байт-таблица,
+ * зависит от уровня/варианта); tick_period=1; финал — cs:0x6E:0x52B(self)
+ * + ОДИН вызов «boss_helper» cs:0x11D6:0x15D6. THINK (state2) делает РОВНО
+ * ТО ЖЕ — просто зовёт тот же boss_helper КАЖДЫЙ тик, больше ничего.
+ *
+ * boss_helper (file 0x14B36..0x14B73) НЕ двигает объект (нет записи в
+ * x_world/y_world, vx/vy не трогаются) — это ОДНОРАЗОВАЯ проверка,
+ * работающая только пока frame_ctr<=10: если player.x−self.x>30 ед. И
+ * self.active(+0xB0)==0 → cs:0x6E:0x4B4(self) + cs:0xFFA:0x724() (похоже
+ * на «показать»/эффект появления); отдельно если |self.x−player.x|<=8 И
+ * self.active==0 → cs:0x6E:0x52B(self) (пересчёт bbox). НИКАКОГО
+ * преследования игрока по X или Y-подтягивания в этом дизасме НЕТ.
+ *
+ * КОНФЛИКТ С ИСТОРИЕЙ ПОРТА — РАЗРЕШЁН (2026-09-12, повторный проход по
+ * прямому указанию: приоритет у алгоритма оригинала над пользовательскими
+ * правками, внесёнными ДО полного извлечения алгоритма). Прежняя реализация
+ * (идёт к игроку 2px/кадр + Y-snap) была добавлена 2026-07-07 по жалобе
+ * «демон застревает у точки спавна» — но полная передизассемблировка ОБЕИХ
+ * функций типа 9 (сам обработчик, cs:0x11D6:0x1644..0x17F6, файл
+ * 0x14BA4..0x14C56, включая общий с типом 19 boss_helper по адресу
+ * cs:0x11D6:0x15D6 = file 0x14B36..0x14BA3) не находит ни единой записи в
+ * self.x_world(+0x08)/self.y_world(+0x0A) НИГДЕ — ни в INIT, ни в THINK, ни
+ * в boss_helper. Разобран boss_helper целиком:
+ *   if (self.frame_ctr <= 10) return;                      // первые 10 кадров — no-op
+ *   dx = player.x_world - self.x_world;
+ *   if (dx > 30 && self.field_0xB0 != 0)
+ *       { call cs:0x6E:0x4B4(self); call cs:0xFFA:0x724(); }  // непрозрачный эффект
+ *   dx2 = player.x_world - self.x_world;                    // тот же dx, пересчитан
+ *   if (dx2 > 8 && self.field_0xB0 == 0)
+ *       call cs:0x6E:0x52B(self);                           // recompute-bbox
+ * Оба вызова НЕ трогают позицию. К тому же САМ объект типа 9 не рендерится
+ * через ai_render (см. `if (g_obj[i].type == 9) continue;` ниже по файлу) —
+ * видимая картинка LEVEL1-дракона рисуется отдельно, хардкод-координатами,
+ * в draw_level1_dragon() (game.c), НЕЗАВИСИМО от x/y этого AI-объекта. То
+ * есть прежний «фикс» двигал невидимый (нерисуемый) объект — на экране
+ * никакого эффекта дать не мог; предполагаемая жалоба 2026-07-07 была либо
+ * про другой тип/объект, либо возникла ДО того как рендер дракона был
+ * выделен в отдельную функцию. Возвращено к байт-точной статике оригинала:
+ * позиция не меняется никогда, num_bboxes=2 с фиксированными смещениями
+ * (INIT: box0=спрайт 145 @ (0,0), box1=спрайт 146 @ (dx=5, dy=DS:0x103D=57,
+ * глобальная константа, НЕ зависит от уровня — «зависит от уровня/варианта»
+ * было ошибочным домыслом более раннего прохода). Непрозрачные вызовы
+ * 0x6e:0x4b4/0xffa:0x724/0x6e:0x52b не портированы — они не двигают объект
+ * и не влияют на то немногое, что от него видно (или не видно). */
 static void ai_walking_minion(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
-    (void)karnov_input;
-    int kx = physics_get_left_x(), ky = physics_get_top_y();
-    int dx = kx - o->x;
-    int abs_dx = dx < 0 ? -dx : dx;
-    o->facing = (dx >= 0) ? 1 : -1;
-    /* 8-кадровый walk-cycle (sub_timer_max=3 × stride ≈ 3 = 9 ticks/кадр). */
-    o->anim_phase = (frame >> 2) & 7;
-
-    /* Идёт к игроку по X — 2 px/frame. Останавливается вплотную (abs_dx≤8),
-     * чтобы не дёргаться поверх Karnov'а. НЕТ позиционного clamp'а home±range:
-     * оригинал ai_type18 преследует игрока, range_x/y в файле — маленькие
-     * подсказки (10px), а не границы. Раньше клампилось и демон застревал
-     * у точки спавна (user 2026-07-07). */
-    if (abs_dx > 8) o->x += 2 * o->facing;
-    /* Y-snap — медленное подтягивание к Y игрока (1 px каждые 8 кадров), без
-     * clamp'а, чтобы демон-на-облаке снижался к Karnov'у. */
-    if ((frame & 7) == 0) {
-        int feet = obj_feet(o);
-        if (ky < feet - 1)      o->y -= 1;
-        else if (ky > feet + 1) o->y += 1;
+    (void)karnov_input; (void)frame;
+    if (o->num_parts == 0) {
+        o->num_parts = 2;
+        o->parts[0].sprite = 145; o->parts[0].dx = 0; o->parts[0].dy = 0;
+        o->parts[1].sprite = 146; o->parts[1].dx = 5; o->parts[1].dy = 57;
     }
+    /* Оригинал никогда не пишет x_world/y_world для типа 9 — движения нет. */
 }
 
 
-/* Type 5 — падающий бонус (KARNOV.EXE: ai_type05 cs:0xFFA:0x12... ).
- * INIT: vy=+2 px/frame (gravity). TICK: tile_at_xy(x, y+10) — если
- * (attr & 1), bonus застыл → меняем custom-state на «pickable». До тех пор
- * — падает.
- *
- * Реализация: используем custom как «is_landed». Если 0 — падаем со
- * скоростью 2 px/frame. Если 1 — стоим, ждём подбора. */
+/* Type 5 — падающий бонус (file 0x1254A, cs:0xFFA:0x0DAA; повторная
+ * декомпиляция 2026-09, byte-точная). INIT: box0.dy=0, box0.hitflag=1,
+ * vy=+2.0 px/frame. THINK (пока не приземлился): тест ФИКСИРОВАННОЙ точки
+ * (x_world, box0.y0+10) — box0.y0=y_world (dy=0), т.е. это (x, y+10), а
+ * НЕ высота спрайта и НЕ «ноги» (12px-иконки #39-48 ниже настоящей точки
+ * контакта на ~2px — так в оригинале). Тест — bit0 таблицы свойств тайла
+ * (props & 1 = категория 0 или 4, см. ai_type08/level_tile_attr_at выше).
+ * Приземление (file 0x125D5): ТОЛЬКО set_motion(0) (обнуление скорости) —
+ * в оригинале НЕТ привязки Y к сетке тайлов, предмет замирает там, где
+ * упал в тот момент. */
 static void ai_falling_bonus(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
@@ -775,104 +961,45 @@ static void ai_falling_bonus(ai_obj_t *o, u16 frame, u8 karnov_input)
     if (o->custom == 1) return;  /* приземлился */
     /* Падаем 2 px/frame. */
     o->y += 2;
-    /* Контакт с полом считаем по НОГАМ (o->y — верх спрайта). */
-    int h = o->cur_h > 0 ? o->cur_h : obj_height(o);
-    int feet = o->y + h;
-    if (level_solid_at(o->x, feet + 1)) {
-        o->y = (feet / 10) * 10 - h;   /* ноги на верхнюю кромку строки */
-        o->custom = 1;
+    int cat = level_tile_attr_at(o->x, o->y + 10);
+    if (cat == 0 || cat == 4) {
+        o->custom = 1;              /* set_motion(0) — байт-точно */
     }
-    /* Страховка ТОЛЬКО от вылета за нижний край карты. Раньше здесь
-     * стояло «feet >= physics_get_ground_y() → положить на этот пол», и на
-     * многоярусных уровнях предмет, летящий мимо площадок, ПОДТЯГИВАЛСЯ
-     * ВВЕРХ к расчётному «основному» полу: на LEVEL4 это y=373, выше
-     * Карнова (его ноги на 480), из-за чего свиток за боссом-«гусеницей»
-     * оказывался недосягаем и уровень нельзя было закончить. */
-    else if (o->y + h >= (int)level_num_map_rows * TILE_H) {
-        o->y = (int)level_num_map_rows * TILE_H - h;
-        o->custom = 1;
-    }
-}
-
-/* Type 14 — Летящая зелёная птица (спрайты #147..148, 2 фазы).
- * Sinusoidal Y-движение + горизонтальный дрейф к игроку. */
-static void ai_flying_bird(ai_obj_t *o, u16 frame, u8 karnov_input)
-{
-    (void)karnov_input;
-    /* «Два орла» в начале LEVEL1 — synthetic spawn (level_idx<0): летят
-     * строго влево без разворота к игроку, Y-осцилляция вдвое быстрее.
-     * Остальные type-14 птицы (из level_enemies[]) — стандартное
-     * tracking-поведение с разворотом к игроку. */
-    bool fixed_left = (o->level_idx < 0);
-    bool descending = false;
-    if (fixed_left) {
-        /* Sky-spawn (type 8): facing задан при спавне (в сторону игрока)
-         * и не меняется. Птица рождается на ~100 px ВЫШЕ игрока и сначала
-         * «падает в видимый кадр» (ai_type08, state_list 0x171C) БЕЗ
-         * горизонтального движения; затем летит по прямой. */
-        int target = physics_get_top_y() - 40;
-        if (o->home_y < target) {
-            o->home_y += 2;
-            descending = true;
+    /* Страховка ТОЛЬКО от вылета за нижний край карты (порт, не из
+     * оригинала). Раньше здесь стояло «feet >= physics_get_ground_y() →
+     * положить на этот пол», и на многоярусных уровнях предмет, летящий
+     * мимо площадок, ПОДТЯГИВАЛСЯ ВВЕРХ к расчётному «основному» полу: на
+     * LEVEL4 это y=373, выше Карнова (его ноги на 480), из-за чего свиток
+     * за боссом-«гусеницей» оказывался недосягаем и уровень нельзя было
+     * закончить. */
+    else {
+        int h = o->cur_h > 0 ? o->cur_h : obj_height(o);
+        if (o->y + h >= (int)level_num_map_rows * TILE_H) {
+            o->y = (int)level_num_map_rows * TILE_H - h;
+            o->custom = 1;
         }
-    } else {
-        int kx = physics_get_left_x();
-        o->facing = (kx > o->x) ? 1 : -1;
-    }
-    /* 2-кадровый цикл — взмах крыльями ≈ 4 ticks/кадр.
-     * Анимация из KARNOV.EXE state_list @ DS:0x17E4: count=6, sprites
-     * [0x93, 0x93, 0x93, 0x94, 0x94, 0x94] = [147, 147, 147, 148, 148, 148].
-     * 6-frame cycle с 3 повторами каждого спрайта = медленный взмах.
-     *
-     * Скорость: оригинал KARNOV.EXE eagle handler @ cs:0xFFA:0x07CC INIT
-     * устанавливает `obj+0x14 = 2` (vy_hi=Q16.16 = +2.0 px/frame базовый
-     * spawn-fall). После lshift_long×2 (как в Karnov walk) = vy=4 px/frame.
-     * Для горизонтального движения структура DS:0x1800 содержит [5,0,5,0,5]
-     * — это X-движение per tick. Используем 3 px/frame (компромисс между
-     * "fall in" и "attack" фазами; для horizontal-tracking быстрее чем
-     * базовый Karnov walk=4, чтобы орлы догоняли игрока). */
-    o->anim_phase = (frame >> 2) & 1;
-    if (!descending) o->x += 3 * o->facing;
-
-    /* Counterphase Y oscillation (user-spec 2026-05-29): два орла в
-     * LEVEL1 начале должны менять высоту в противофазе. `custom` поле =
-     * phase offset: 0 = верхний (старт max -20 px), 1 = нижний (старт max
-     * +20 px, 180° сдвиг). Таблица начинается с MAX чтобы орлы видимо
-     * разделялись с frame=0. Период для «двух орлов» ускорен (frame>>2,
-     * ~64 ticks ≈ 2.3s @ 27.5 FPS) против ~128 ticks у остальных. */
-    static const s8 sin16[16] = {
-        -20, -18, -14,  -8,   0,  +8, +14, +18,
-        +20, +18, +14,  +8,   0,  -8, -14, -18,
-    };
-    int phase = ((frame >> (fixed_left ? 2 : 3)) + (o->custom ? 8 : 0)) & 15;
-    /* Колебание только ВВЕРХ от точки спавна: для type 14 INIT оригинала
-     * ставит объект ногами на пол (хелпер cs:0xD4B:0x19F), и симметричная
-     * синусоида утапливала бы его в землю на половине периода. */
-    o->y = o->home_y - (sin16[phase] < 0 ? -sin16[phase] : sin16[phase]);
-
-    /* Movement bounds. */
-    if (o->half_range_x > 0) {
-        int xmin = o->home_x - o->half_range_x;
-        int xmax = o->home_x + o->half_range_x;
-        if (o->x < xmin) o->x = xmin;
-        if (o->x > xmax) o->x = xmax;
-    }
-    if (o->half_range_y > 0) {
-        int ymin = o->home_y - o->half_range_y;
-        int ymax = o->home_y + o->half_range_y;
-        if (o->y < ymin) o->y = ymin;
-        if (o->y > ymax) o->y = ymax;
     }
 }
 
-
-/* Type 19 — медленный враг (ENEMY_GUIDE: sprite 0xAC=172, sub_timer_max=1000
- * — почти статичный). Использует helper 0x4B36, общий с type 9.
- * Реализация: декорация с очень медленной анимацией. */
+/* Type 19 (декомпилирован полностью, file 0x14C20..0x14C86, cs:0x11D6:
+ * 0x16C0..0x1726 — единственная своя функция, следующий адрес в сегменте
+ * это уже handler типа 23, cs:0x1348:0x0007≡файл 0x14C87). INIT: active
+ * (+0xDB) = 0, num_bboxes = 1, box0.sprite = 0xAC (172) — ОДИН РАЗ,
+ * tick_period = 1000, затем recompute-bbox(self) + вызов ТОГО ЖЕ
+ * boss_helper (cs:0x11D6:0x15D6 = file 0x14B36..0x14B73), что и у типа 9
+ * (см. комментарий ai_walking_minion). THINK каждый тик зовёт ровно тот
+ * же boss_helper и БОЛЬШЕ НИЧЕГО — box0.sprite нигде не переписывается
+ * (нет второго кадра), x_world/y_world объект тоже не трогает сам.
+ * hurt(state4) и delete(state6) — оба просто ai_result|=1 (без вспышки,
+ * без очков в этом обработчике). Т.е. это ПОЛНОСТЬЮ статичный единственный
+ * спрайт: прежняя «очень медленная флипа» была домыслом — в листинге
+ * второго кадра нет вообще (манифест SPRITES.EGA тоже даёт для ai_type=19
+ * только один спрайт #172, так что видимого различия эта правка не даёт,
+ * но код не должен изображать несуществующую анимацию). */
 static void ai_slow_helper(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
-    (void)karnov_input;
-    o->anim_phase = (frame >> 6) & 1;       /* очень медленная флипа */
+    (void)karnov_input; (void)frame;
+    o->anim_phase = 0;                      /* единственный кадр — #172 */
 }
 
 
@@ -914,35 +1041,73 @@ static void spawn_enemy_shot(int x, int y, int dir, s32 speed_units, int kind)
  *
  * INIT: state_list = DS:0x1784, tick_period = 2, obj_type = 3, hp = 10,
  * num_bboxes = 1, box0.hitflag = 1, а АНИМ-СОСТОЯНИЕ берётся из +0xE9 —
- * то есть «kind», переданный стрелявшим. Дальше по этому же kind:
- *   kind 10 — вертикальная скорость принудительно вниз (vy = |vy|);
- *   kind 8/9 — obj_type меняется на 1, т.е. снаряд становится «врагом»
- *              для pair-loop и может ранить.
+ * то есть «kind», переданный стрелявшим. Дальше по этому же kind (проверено
+ * повторной декомпиляцией file 0x1380x — таблицы @0x31C/@0x388, у прежней
+ * версии этого комментария kind 7/8/9/10 были перепутаны местами):
+ *   kind 8/9/10 — obj_type меняется на 1 (снаряд становится «врагом» для
+ *                 pair-loop, может ранить); ДОПОЛНИТЕЛЬНО kind 10 —
+ *                 вертикальная скорость принудительно вниз (vy = |vy|).
  * THINK — правила гибели тоже по kind:
- *   kind 8 — жив, пока тайл в его точке пустой (категория 2); иначе
- *            зовётся cs:0x11D6:0x021A (разрыв о препятствие);
- *   kind 9 — жив, только пока тайл категории 9 (вода);
- *   прочие — живут до frame_ctr > 0x28 (40 кадров).
+ *   kind 7  — жив, пока тайл в его точке — категория 2 («sky/passable»,
+ *             см. level.c); иначе зовётся cs:0x11D6:0x021A (разрыв о
+ *             препятствие) и снаряд удаляется;
+ *   kind 10 — гибнет, как только тайл под ним — категория 9 (вода);
+ *   kind 8/9 и прочие (1,4,5,6) — живут до frame_ctr > 0x28 (40 кадров).
  * Прежняя реализация просто летела до края карты. */
 static void ai_enemy_shot(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)in;
-    /* Кадры снаряда из аним-скрипта оригинала (state_list DS:0x1784):
-     * kind 1 → 1,2,3,2; kind 5 → 14,15 (влево); kind 6 → 16,17 (вправо). */
+    /* Кадры снаряда — StateScript DS:0x1784, ПОЛНОСТЬЮ вычитан по формату
+     * StateScript/AnimScript (см. extract_anim_tables.py), все 11 состояний
+     * (проверка code-review PSEUDO-TYPES 2026-09, дамп таблицы напрямую):
+     *   state0(kind0)=2,3            state1(kind1)=1,2,3,2
+     *   state2(kind2)=9 (статика)    state3(kind3)=34,36
+     *   state4(kind4, наведённый снаряд типа 14)=10,11,12,13
+     *   state5(kind5)=14,14,14,15,15,15 (влево)
+     *   state6(kind6)=16,16,16,17,17,17 (вправо)
+     *   state7(kind7, «огненное дыхание» типа 38)=10,11,12,13 (тот же
+     *     набор, что и kind4)
+     *   state8=[19] (статика)  state9=[20] (статика)  state10=[283] (статика)
+     * Индекс кадра — think-тик (раз в tick_period=2 кадра, тот же счётчик
+     * для всех состояний) по модулю длины ТЕКУЩЕЙ таблицы.
+     * ИСПРАВЛЕНО: раньше kind 0 и kind 2 (оба реально спаунятся — тип 29,
+     * тип 47, наземный турельный «горелка» и т.п.) попадали в generic
+     * fallback «спрайт 14-17 по знаку vxq», который на самом деле
+     * принадлежит kind 5/6 — то есть эти снаряды рисовались чужими
+     * кадрами. kind 5/6 сами тоже раньше шли через тот же fallback: та же
+     * пара спрайтов, но с неверным периодом смены кадра (4 тика вместо
+     * правильных 3-кратных повторов из таблицы). */
+    static const u16 K0[2] = { 2, 3 };
     static const u16 K1[4] = { 1, 2, 3, 2 };
-    o->anim_phase = (u16)((frame >> 1) & 3);
-    if (o->custom == 1) o->item_sprite = K1[o->anim_phase];
-    else o->item_sprite = (u16)((o->vxq < 0 ? 14 : 16) + ((frame >> 2) & 1));
+    static const u16 K3[2] = { 34, 36 };
+    static const u16 K4[4] = { 10, 11, 12, 13 };   /* kind 4 и kind 7 */
+    static const u16 K5[6] = { 14, 14, 14, 15, 15, 15 };
+    static const u16 K6[6] = { 16, 16, 16, 17, 17, 17 };
+    u16 tick = (u16)(frame >> 1);
+    o->anim_phase = tick;
+    switch (o->custom) {
+    case 1:  o->item_sprite = K1[tick & 3]; break;
+    case 2:  o->item_sprite = 9; break;
+    case 3:  o->item_sprite = K3[tick & 1]; break;
+    case 4:
+    case 7:  o->item_sprite = K4[tick & 3]; break;
+    case 5:  o->item_sprite = K5[tick % 6]; break;
+    case 6:  o->item_sprite = K6[tick % 6]; break;
+    case 8:  o->item_sprite = 19; break;
+    case 9:  o->item_sprite = 20; break;
+    case 10: o->item_sprite = 283; break;
+    default: o->item_sprite = K0[tick & 1]; break;   /* kind 0 */
+    }
 
     int cat = level_tile_attr_at(o->x, o->y);
     switch (o->custom) {
-    case 8:                                  /* разрывается о препятствие */
+    case 7:                                  /* разрывается о препятствие */
         if (cat != 2) { o->alive = false; return; }
         break;
-    case 9:                                  /* живёт только в воде */
-        if (cat != 9) { o->alive = false; return; }
+    case 10:                                 /* гибнет в воде */
+        if (cat == 9) { o->alive = false; return; }
         break;
-    default:
+    default:                                 /* 1,4,5,6,8,9 */
         if (o->st_ctr > 0x28) { o->alive = false; return; }   /* 40 кадров */
         break;
     }
@@ -1004,8 +1169,14 @@ static void ai_type13(ai_obj_t *o, u16 frame, u8 in)
         if (o->st_aux < 0) { o->st_misc = 4; o->pending_state = dir + 2; }
     } else {                                     /* серия бросков */
         if (o->frame_index == 1) {
-            /* Снаряд — тип 12 оригинала: vx = ±3.0 ед./кадр. */
-            spawn_rock(o->x, o->y + 6, dir ? 6 : -6, frame);
+            /* Снаряд — тип 12 оригинала (spawn cs:0x11D6:0x788, file 0x13CE8).
+             * Ребёнок наследует x_world РОДИТЕЛЯ без сдвига и Y = y_world −
+             * [DS:0xFC1] (=16, file 0x13E7D: `sub ax,[0xfc1]`), а не y+6 —
+             * прежнее значение было визуальной подгонкой, не байтом. Дочерний
+             * обработчик (уже портирован как TYPE_ROCK_PROJECTILE) при
+             * child.frame_idx==dir берёт vx=±3.0 (file 0x13E8B/0x13E92),
+             * а НЕ ±6.0 — тут раньше был баг вдвое завышенной скорости. */
+            spawn_rock(o->x, o->y - 16, dir ? 3 : -3, frame);
             if (--o->st_misc != 0) o->frame_index = (o->st_ctr & 3) ? 1 : 0;
             o->pending_state = dir + 2;
         } else if (o->frame_index == 0) {
@@ -1086,7 +1257,7 @@ static void ai_type16(ai_obj_t *o, u16 frame, u8 in)
     }
 }
 
-/* ── Тип 10 — демон на облаке (handler cs:0x11D6:0x0413, file 0x140F3) ─
+/* ── Тип 10 — демон на облаке (handler cs:0x11D6:0x0413, file 0x13973) ─
  *
  * Маятник: INIT ставит state_list = DS:0x180A, аним-состояние 0,
  * vx = −0.9375 (0xFFFF:0x1000), frame_ctr(+0xC7) = 8 и вертикальное
@@ -1108,7 +1279,9 @@ static void ai_type10(ai_obj_t *o, u16 frame, u8 in)
     if ((o->st_ctr & 0xF) == 0) o->ayq = -o->ayq;
 }
 
-/* ── Тип 23 — летящий шар (handler cs:0x11D6:0x0008, file 0x13508) ────
+/* ── Тип 23 — летящий шар (handler cs:0x1348:0x0007, file 0x14C87) ────
+ * (прежний адрес cs:0x11D6:0x0008/file 0x13508 в комментарии был неверен —
+ * настоящий обработчик по таблице DS:0x10FE лежит в сегменте 0x1348).
  *
  * INIT: tick_period = 2, box0.hitflag = 1, box0.sprite = 0xB9 (#185),
  * vx = ±3.0 ед./кадр (= 6 px) в сторону игрока, phase(+0xED) = 0.
@@ -1227,11 +1400,83 @@ static void ai_type08(ai_obj_t *o, u16 frame, u8 in)
         }
         break;
     }
-    case 2:
+    case 2: {
         o->pending_state = 1;
         o->vyq = 0;
         o->st_ctr = 0;
+        /* ИСПРАВЛЕНО (2026-09): раньше здесь только гасили vy, БЕЗ привязки
+         * Y к земле — объект «закапывался» (верх спрайта на уровне земли
+         * вместо низа). Оригинал в этот момент вызывает
+         * snap_to_ground(obj, sprite=#75, category=0) — cs:0xD4B:0x19F,
+         * file 0xEE4F (тот же хелпер, что и у obj_snap_ground() выше по
+         * файлу): y_world = row*TILE_H − высота ИМЕННО спрайта #75
+         * (приземлившийся кадр), а не текущего/произвольного. */
+        const sprite_t *ls = sprite_find(75);
+        int h = ls ? (int)ls->h : 24;
+        int row = level_ground_row_below(o->x + 6, o->y / TILE_H, 0x0001);
+        if (row >= 0) {
+            o->y = row * TILE_H - h;
+            if (o->phys) o->yq = (s32)o->y << 16;   /* иначе интегратор на
+                                                      * следующем кадре вернёт
+                                                      * старое (незаснэпленное)
+                                                      * значение из yq */
+        }
         break;
+    }
+    case 3: {
+        /* ИСПРАВЛЕНО (2026-09): подфаза «устойчиво приземлился» отсутствовала
+         * целиком — st_misc застревал на 3 навсегда (см. `|= 1` выше) и
+         * каждый тик проваливался в default, поэтому объект молчал после
+         * посадки. Портирован реальный алгоритм (file 0x12CB0-0x12CDE +
+         * хелпер-триплет file 0x12AE0):
+         *   если st_ctr(+0xC7) > 100 — три снаряда из
+         *   (self.x_world+2, self.y_world + i*2 + 2) в
+         *   (player.x_world, player.y_world + jitter − 5), jitter
+         *   накапливается между тремя выстрелами (+= rand()&0x1F каждый
+         *   раз) — нарастающий вертикальный разброс; скорость Q16.16
+         *   = (speed_hi=1, speed_lo=0x4000) = 1.25, нормировано по
+         *   Манхэттену — та же схема, что уже верифицирована для типов
+         *   14/20/32. После триплета st_ctr = −30 (file 0x12CC4).
+         *   Независимо от триплета — дистанционный гейт cs:0xD4B:0x105
+         *   (тот же хелпер, что и у скрытого предмета типа 6: d=|dx|+|dy|):
+         *   если d < 15 — st_ctr += 100 (file 0x12CD9), т.е. пока игрок
+         *   слишком близко, следующая попытка откладывается ещё на 100
+         *   кадров (сам st_ctr тикает каждый кадр отдельно от этого
+         *   обработчика — обычный o->st_ctr порта).
+         * kind/спрайт снаряда (+ поле bp+0x12 оригинала) байтом не
+         *   подтверждён — используется kind=0 (générique #2/#3), честно
+         *   не точный, но не влияющий на траекторию/урон. */
+        if (o->st_ctr > 100) {
+            int jitter = 0;
+            for (int i = 0; i < 3; ++i) {
+                int slot = alloc_obj_slot();
+                if (slot >= 0) {
+                    int fx = o->x + 4, fy = o->y + i * 2 + 2;
+                    int tx = player_units() - fx / 2;
+                    int ty = physics_get_top_y() + jitter - 5 - fy;
+                    int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+                    if (len < 1) len = 1;
+                    ai_obj_t *b = &g_obj[slot];
+                    *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                      .subtype = 3, .x = fx, .y = fy, .hp = 10,
+                                      .level_idx = -1, .facing = (tx >= 0) ? 1 : -1,
+                                      .custom = 0 };
+                    obj_phys_begin(b);
+                    b->vxq = ((s32)tx * QV(1, 0x4000)) / len;
+                    b->vyq = ((s32)ty * QV(1, 0x4000)) / len;
+                }
+                jitter += (int)(rng_next() & 0x1F);
+            }
+            o->st_ctr = -30;
+        }
+        {
+            int d  = player_units() - obj_units(o);
+            int dy = physics_get_top_y() - o->y;
+            int dist = (d < 0 ? -d : d) + (dy < 0 ? -dy : dy);
+            if (dist < 15) o->st_ctr += 100;
+        }
+        break;
+    }
     default: break;
     }
 }
@@ -1253,12 +1498,19 @@ static void ai_type08(ai_obj_t *o, u16 frame, u8 in)
  */
 static void ai_type07(ai_obj_t *o, u16 frame, u8 in)
 {
-    (void)frame; (void)in;
+    (void)in;
     if (!o->use_anim) {
         anim_begin(o, 1, 0);
         o->invisible   = true;          /* num_bboxes = 0 */
         o->item_sprite = 0x90;          /* #144 — свиток */
-        o->st_phase    = 0;             /* +0xED — «взведён» */
+        /* +0xED — «взведён». Обычно его поднимает гибель goal-объекта
+         * (arm_real_scroll), но запись свитка может заспауниться и ПОСЛЕ
+         * этой гибели: бомбой/Clapper'ом (ai_clear_enemies) босса убивают
+         * издалека, а на LEVEL9 goal-запись (idx 142) вообще стоит в
+         * sorted-таблице ПЕРЕД свитком (idx 143). Безусловный ноль здесь
+         * обезоруживал свиток навсегда, а real_scroll глушил запасной
+         * синтетический путь — уровень становился непроходимым. */
+        o->st_phase    = g_boss_dead ? 1 : 0;
         return;
     }
     if (!o->st_phase) return;           /* boss ещё жив */
@@ -1268,6 +1520,7 @@ static void ai_type07(ai_obj_t *o, u16 frame, u8 in)
         o->invisible = false;
         o->is_scroll = true;
         o->vy = 2;                      /* vy = +2.0 — падает */
+        o->spawn_frame = frame;         /* отсчёт страховки — с появления */
         physics_set_invuln(true);       /* player_state = 9 */
     }
     /* Падение до поверхности — как у падающего бонуса. */
@@ -1276,6 +1529,12 @@ static void ai_type07(ai_obj_t *o, u16 frame, u8 in)
         int h = (o->cur_h > 0) ? o->cur_h : obj_height(o);
         if (level_solid_at(o->x, o->y + h + 1)) {
             o->y = ((o->y + h) / TILE_H) * TILE_H - h;
+            o->custom = 1;
+        } else if (o->y + h >= (int)level_num_map_rows * TILE_H) {
+            /* Аварийный пол по нижней кромке карты: без него свиток над
+             * пропастью падает из мира навсегда и уровень не закончить.
+             * Дальше его подберёт 400-кадровая страховка в ai_tick. */
+            o->y = (int)level_num_map_rows * TILE_H - h;
             o->custom = 1;
         }
     }
@@ -1289,10 +1548,32 @@ static void ai_type07(ai_obj_t *o, u16 frame, u8 in)
  *   0/1 — дремлет (аним 0), пока расстояние до игрока не меньше 0x32;
  *   2/3 — прыжок: аним 1, vx = +1.0, vy = −2.5, ay = +0.129 (0x2100);
  *         ждём, пока vy не станет положительной, и смотрим тайл под
- *         ногами — по его категории идёт разбор посадки;
- *   4/5 — приземлился: аним 2 и НАВЕДЁННЫЙ выстрел в игрока со
- *         скоростью 2.0, затем подфаза 6;
- *   6/7 — снова подскок: аним 3, vy = −2.5. */
+ *         ногами — по его категории идёт разбор посадки. Таблицы
+ *         @0x1659/@0x1734 (file 0x162D9/0x163B4 — по 8 записей на
+ *         категории 0..7) приземляют ТОЛЬКО на 0, 4, 7; на 1, 2, 3, 5,
+ *         6 продолжает падать. Прежняя проверка `== 2` была записана
+ *         с точностью до наоборот (та же ошибка, что нашлась у типов
+ *         26/40 в этом же файле).
+ *   4/5 — приземлился: аним 2 и выстрел в игрока со скоростью 2.0,
+ *         затем подфаза 6;
+ *   6/7 — снова подскок: аним 3, vy = −2.5, приземление по той же
+ *         таблице {0,4,7}.
+ *
+ * ИСПРАВЛЕНО (2026-09, выстрел): полная передизассемблировка вызова
+ * spawn_projectile в подфазе 4 (пуши file 0x162F5..0x16318, сам call
+ * cs:0x1348:0x1699 → file 0x16319) даёт аргументы (глубина→мелко):
+ * flag=1, speed_hi=2, speed_lo=0,
+ * kind=0, target_y=player.y_world, target_x=player.x_world, source_y=
+ * self.y_world, source_x=self.x_world. flag=1 у cs:0x11D6:0x139 —
+ * ТОТ ЖЕ override, что у типа 22 (см. его комментарий и урок в шапке
+ * аудита): target_y принудительно заменяется на source_y ДО нормировки,
+ * так что реальная вертикальная составляющая всегда 0 — снаряд летит
+ * СТРОГО ГОРИЗОНТАЛЬНО со скоростью 2.0, а не «наведённый». Прежняя
+ * реализация считала полный Манхэттен-вектор к игроку (с реальным
+ * physics_get_top_y()) — бралась «по смыслу» из факта, что вызов идёт
+ * через общий аиминг-хелпер, без проверки самого флага (в точности
+ * ловушка типа 22 из шапки аудита). Заменено на flat-порт через
+ * spawn_enemy_shot(), как у типа 15. */
 static void ai_type29(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1322,31 +1603,20 @@ static void ai_type29(ai_obj_t *o, u16 frame, u8 in)
         o->vyq = (s32)0xFFFD8000;            /* −2.5 */
         o->ayq = QV(0, 0x2100);
         /* fallthrough */
-    case 3:
+    case 3: {
         if (o->vyq <= 0) break;
-        if (level_tile_attr_at(o->x, o->y + obj_height(o)) == 2) break;
+        int cat = level_tile_attr_at(o->x, o->y + obj_height(o));
+        if (!(cat == 0 || cat == 4 || cat == 7)) break;
         o->st_misc = 4;
         break;
+    }
     case 4:
         o->pending_state = 2;
         o->vyq = 0; o->ayq = 0;
         obj_snap_ground(o);
-        {   /* наведённый снаряд со скоростью 2.0 */
-            int slot = alloc_obj_slot();
-            if (slot >= 0) {
-                ai_obj_t *b = &g_obj[slot];
-                *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
-                                 .subtype = 3, .x = o->x, .y = o->y, .hp = 10,
-                                 .level_idx = -1, .facing = (dxp > 0) ? 1 : -1 };
-                obj_phys_begin(b);
-                int tx = player_units() - obj_units(o);
-                int ty = physics_get_top_y() - o->y;
-                int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
-                if (len < 1) len = 1;
-                b->vxq = ((s32)tx * Q_2_0) / len;
-                b->vyq = ((s32)ty * Q_2_0) / len;
-            }
-        }
+        /* flag=1 у spawn_projectile — строго горизонтальный выстрел
+         * (см. комментарий к обработчику), НЕ наведённый. */
+        spawn_enemy_shot(o->x, o->y, dxp > 0, Q_2_0, 0);
         o->st_misc = 6;
         break;
     case 6:
@@ -1354,10 +1624,12 @@ static void ai_type29(ai_obj_t *o, u16 frame, u8 in)
         o->vyq = (s32)0xFFFD8000;            /* снова подскок */
         o->ayq = QV(0, 0x2100);
         /* fallthrough */
-    case 7:
-        if (o->vyq > 0 &&
-            level_tile_attr_at(o->x, o->y + obj_height(o)) != 2) o->st_misc = 4;
+    case 7: {
+        if (o->vyq <= 0) break;
+        int cat = level_tile_attr_at(o->x, o->y + obj_height(o));
+        if (cat == 0 || cat == 4 || cat == 7) o->st_misc = 4;
         break;
+    }
     default: break;
     }
 }
@@ -1375,11 +1647,26 @@ static void ai_type29(ai_obj_t *o, u16 frame, u8 in)
  *         каждый раз, когда индекс кадра обнуляется; после трёх таких
  *         оборотов анимации — возврат в подфазу 0.
  *
- * НЕ ПЕРЕНЕСЕНО: что именно переводит объект из покоя в «пробуждён».
- * В самом обработчике перехода нет; state 4 (получил урон) читает
- * +0xDF — индекс объекта, с которым пересеклись боксы (его пишет
- * pair-loop коллизий, file 0x2D72). Без pair-loop'а, которого в порту
- * нет, воспроизвести этот триггер нечем, а додумывать я не стал. */
+ * Пробуждение — это state 5 обработчика (НЕ 4!), file 0x1910B
+ * (cs:0x175E:0x32B), таблица состояний @0x21B: индексы 0/1→INIT,
+ * 2→THINK, 3/4→пусто (retf), 5→код ниже, 6→удаление. Кто ставит
+ * state_byte=5 — отдельный общий диспетчер пар cs:0xD4B (file
+ * 0xFAB3+, список DS:0x2722, дизассемблирован построчно): для пары
+ * (A касается B) он смотрит A.obj_type и затем B.obj_type по вложенным
+ * таблицам file 0xFB3A/0xFC06 и ТОЛЬКО для B.obj_type∈{7,9} ставит
+ * B.state_byte=5 (при A=игрок(0) или A=файербол(2)). Сам код state5:
+ *   ax = [+0xDF] (индекс партнёра из pair-loop, file 0x2D72);
+ *   если partner.obj_type != 0 (не игрок) — выход, блок спит дальше;
+ *   если player.y_world >= self.y_world (игрок НЕ выше блока) — тоже
+ *   выход; иначе misc(+0xE9) = 2 — пробуждение.
+ * То есть будит блок СТРОГО касание ИГРОКОМ (не любым объектом, не
+ * файерболом — тот проходит только до B.obj_type-диспетчера, а
+ * внутренний recheck partner.obj_type==0 его отсеивает) И ТОЛЬКО когда
+ * игрок находится НАД блоком (обычно — приземлился сверху). Прежний
+ * порт будил от hit_flag БЕЗ этих двух условий (любой партнёр, любая
+ * сторона) — это неверно. Игрок не входит в g_obj[], поэтому «касание
+ * игроком» помечается отдельно в ai_check_player_hit (HIT_IDX_PLAYER),
+ * а условие «игрок выше» проверяется здесь по живым координатам. */
 static void ai_type52(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1395,9 +1682,9 @@ static void ai_type52(ai_obj_t *o, u16 frame, u8 in)
     case 0:
         o->pending_state = 0;
         o->custom = 1;                       /* уязвим в покое */
-        /* Пробуждение приходит извне — через state 4, который читает
-         * +0xDF. В порту эквивалент: нас коснулись (hit_flag). */
-        if (o->hit_flag) o->st_misc = 2;
+        if (o->hit_flag && o->hit_idx == HIT_IDX_PLAYER &&
+            physics_get_top_y() < o->y)
+            o->st_misc = 2;
         break;
     case 2:
         o->pending_state = (player_units() > obj_units(o) + 8) ? 2 : 1;
@@ -1426,7 +1713,13 @@ static void ai_type52(ai_obj_t *o, u16 frame, u8 in)
  *         возврат в покой;
  *   4   — получил урон: аним 2, obj_type = 9, box0.hitflag = 0 —
  *         объект превращается в неуязвимую декорацию.
- * Сам плевун неподвижен. */
+ * Сам плевун неподвижен.
+ * Выстрел передизассемблирован полностью (file 0x19628 →
+ * cs:0x11D6:0x139): flag=1 (принудительно горизонтальный), speed=3.0,
+ * kind=2 (было 1 — чужой спрайт {1,2,3,2} вместо статичного #9),
+ * target_x = self.x_world−10 (фиксированная, БЕЗ игрока — отсюда
+ * «всегда влево», не наведение), source=(x_world, y_world+0x0F) —
+ * подтверждено без изменений, кроме kind. */
 static void ai_type54(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1455,7 +1748,7 @@ static void ai_type54(ai_obj_t *o, u16 frame, u8 in)
     case 2:
         o->pending_state = 1;
         o->st_ctr = 0;
-        spawn_enemy_shot(o->x, o->y + 0x0F, 0, QV(3, 0), 1);   /* влево, 3.0 */
+        spawn_enemy_shot(o->x, o->y + 0x0F, 0, QV(3, 0), 2);   /* влево, 3.0 */
         /* fallthrough */
     case 3:
         if (o->st_ctr > 0x19) o->st_misc = 0;
@@ -1469,8 +1762,17 @@ static void ai_type54(ai_obj_t *o, u16 frame, u8 in)
  * INIT: tick_period = 7, подфаза (+0xE9) = 0, +0xEB = 0,
  * phase(+0xED) = СНИМОК hp, state_list = DS:0x1C86, постановка на землю
  * по центру спрайта 0xFB (#251).
- * Живучесть, как у типа 38, задана порогом: если снимок минус текущий hp
- * превысил 0x46, hp принудительно ставится в −20.
+ * Порог 0x46 (file 0x17651/0x1775B): НЕ «70 суммарного урона с момента
+ * спауна» — phase(+0xED) перезаписывается hit_points'ом В КОНЦЕ КАЖДОГО
+ * тика (file 0x1763C, общий хвост THINK), поэтому проверка в начале
+ * THINK сравнивает hp с его же значением НА КОНЕЦ ПРЕДЫДУЩЕГО тика —
+ * это защита от разового «взрывного» урона (>70 за один тик, т.е. за
+ * tick_period=7 кадров — бомба/несколько попаданий разом), а не общий
+ * счётчик живучести. Обычный выстрел (10 урона) эту защиту практически
+ * никогда не задевает; убивает объект штатный hp<=0. Прежний порт брал
+ * снимок ОДИН РАЗ при спауне и никогда не обновлял — это накапливало
+ * урон с рождения и убивало объект принудительно намного раньше, чем в
+ * оригинале (после ~7 обычных попаданий вместо «почти никогда»).
  * Подфазы:
  *   0/1 — дремлет: аним 0, box0.hitflag = 0 (НЕУЯЗВИМ); просыпается,
  *         когда расстояние до игрока меньше 0x55;
@@ -1480,7 +1782,25 @@ static void ai_type54(ai_obj_t *o, u16 frame, u8 in)
  *         frame_ctr и, если hp < 0xFA, hp += 0x0A — то есть за каждый
  *         выстрел враг ЛЕЧИТСЯ на 10. Отстреляв шесть, ждёт 0x14 кадров
  *         и обнуляет счётчик. Догнав игрока (self.x <= player.x),
- *         останавливается и замирает (active = 0). */
+ *         останавливается и замирает (active = 0).
+ *
+ * Скорость снаряда (byte-verified, file 0x174B8=cs:0x151A:0xB18):
+ *   хелпер 0xB18 зовёт play_sound(2), затем spawn_projectile(
+ *     x0=self.x_world, y0=self.y_world+7,
+ *     x1=player.x_world, y1=self.box0.y1−4,
+ *     kind=4, speed_hi=2, speed_lo=0, flag=0)  — `mov dx,2 / xor ax,ax`
+ *     прямо перед четырьмя position-пушами (file 0x174B2/0x174B7), т.е.
+ *     QV(2,0) = 2.0 — ровно текущая константа Q_2_0.
+ *   flag=0 ⇒ в spawn_projectile (cs:0x11D6:0x139, file 0x13699+0x1A4)
+ *     y1 НЕ подменяется (в отличие от типа 22, где flag=1 обнуляет
+ *     вертикаль) — цель реально (player.x, self.box0.y1−4), т.е. снаряд
+ *     нормализуется Манхэттен-хелпером (cs:0x11D6:0x006) по вектору к
+ *     игроку с небольшой вертикальной составляющей от собственной
+ *     геометрии хитбокса. Порт (`spawn_enemy_shot`, ниже) упрощает это
+ *     до строго горизонтального выстрела (vy=0) — величина 2.0
+ *     подтверждена побайтово, но ТРАЕКТОРИЯ не байт-точна (малая
+ *     вертикальная компонента не переносится); не подтверждено, что
+ *     этим можно пренебречь во всех случаях. */
 static void ai_type37(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)in;
@@ -1531,6 +1851,7 @@ static void ai_type37(ai_obj_t *o, u16 frame, u8 in)
         break;
     default: break;
     }
+    o->st_phase = o->hp;   /* file 0x1775B: снимок обновляется каждый тик */
 }
 
 /* ── Тип 49 — «щит» босса (handler cs:0x170C:0x03C5, file 0x18C85) ────
@@ -1538,17 +1859,26 @@ static void ai_type37(ai_obj_t *o, u16 frame, u8 in)
  * INIT: подфаза (+0xE9) = 0, +0xEB = СНИМОК hp, active = 0,
  * num_bboxes = 1, box0.dx = dy = 0, а спрайт зависит от НОМЕРА УРОВНЯ
  * ([DS:0xD8AA]): 0x131 (#305) на LEVEL6, иначе 0x130 (#304); phase
- * (+0xED) = 1 только на LEVEL9 и правее x = 0x44C.
- * THINK: каждый тик hp ВОССТАНАВЛИВАЕТСЯ из снимка — то есть щит
- * практически неуязвим; затем объект смотрит на +0xDF и, если у того
- * объекта обнулился obj_type, удаляет себя (ai_result |= 1).
- *
- * ВАЖНО про +0xDF: это НЕ «родитель». Поле пишет pair-loop коллизий
- * (file 0x2D72) вместе с +0xDD/+0xE1/+0xE3 — там лежит индекс объекта,
- * с которым произошло ПОСЛЕДНЕЕ пересечение боксов. То есть щит
- * привязывается к тому, кто его коснулся, и исчезает, когда тот гибнет.
- * Pair-loop в порту не реализован (нет и урона врагов игроку), поэтому
- * здесь приближение: щит исчезает по смерти goal-объекта уровня. */
+ * (+0xED) = 1 ТОЛЬКО на LEVEL9 и правее x = 0x44C (file 0x18CDF,
+ * cs:0x170C:0x3FF..0x41D).
+ * THINK subphase 1 (file 0x18D63): каждый тик hp ВОССТАНАВЛИВАЕТСЯ из
+ * снимка — щит практически неуязвим для выстрелов. Дальше (file
+ * 0x18D71, `cmp [+0xed],0; je <конец>`) весь нижеследующий блок
+ * ЦЕЛИКОМ пропускается, если phase(+0xED) == 0 — то есть проверка ниже
+ * реально исполняется ТОЛЬКО у той единственной LEVEL9-записи; у щита
+ * LEVEL6-босса и у левого щита LEVEL9 код обрывается здесь на каждом
+ * тике, и они этим путём вообще никогда не гибнут.
+ * Если phase != 0: смотрим +0xDD («задели в этом кадре», file 0x18D79)
+ * и, если да, читаем +0xDF (индекс объекта, с которым пересеклись
+ * боксы — pair-loop, file 0x2D72) и проверяем obj_type ЭТОГО объекта
+ * (file 0x18D81..0x18D92, `[hit_idx*245+0x2909]==0`). Полный скан
+ * бинаря подтверждает: НИ ОДНА ветка гибели/удаления враг НЕ пишет
+ * obj_type=0 — то есть «0» здесь не «партнёр умер», а «партнёр — это
+ * КАРНОВ» (obj_type 0 = игрок, см. таблицу полей ActiveObject). Значит
+ * LEVEL9-правый щит гибнет от ПРОСТОГО КАСАНИЯ игроком (die_puff НЕ
+ * играется — сразу ai_result |= 1), а не от смерти какого-то партнёра.
+ * Игрок не входит в g_obj[], поэтому в порту это отдельная проверка
+ * пересечения боксов в ai_check_player_hit (сентинел HIT_IDX_PLAYER). */
 static void ai_type49(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1561,15 +1891,14 @@ static void ai_type49(ai_obj_t *o, u16 frame, u8 in)
         return;
     }
     o->hp = o->st_aux;                            /* hp восстанавливается */
-    /* Оригинал смотрит на +0xDF — того, с кем пересеклись боксы, — и
-     * гибнет, когда у того обнулился obj_type. Теперь у порта есть эти
-     * пары, поэтому проверка настоящая; ai_boss_dead() остаётся
-     * подстраховкой, если щит ещё никого не коснулся. */
-    if (o->has_partner && o->hit_idx >= 0 && o->hit_idx < g_num) {
-        const ai_obj_t *p = &g_obj[o->hit_idx];
-        if (!p->alive || p->is_dying) { o->alive = false; return; }
-    } else if (ai_boss_dead()) {
-        o->alive = false;
+    if (o->st_phase) {
+        /* Только эта запись реально проверяет касание игроком. */
+        if (o->hit_flag && o->hit_idx == HIT_IDX_PLAYER) { o->alive = false; return; }
+    } else {
+        /* В оригинале эти щиты НЕ гибнут этим путём никогда (см. выше);
+         * ai_boss_dead() — защита порта, чтобы они не оставались
+         * навсегда препятствием после смерти босса уровня. */
+        if (ai_boss_dead()) o->alive = false;
     }
 }
 
@@ -1642,8 +1971,16 @@ static void ai_type55(ai_obj_t *o, u16 frame, u8 in)
  *   2/3 — ползёт: аним 1, vy = 0, vx = −2.0, постановка на землю со
  *         спрайтом 0x13F (#319), box0.hitflag = 1 (уязвим). Когда
  *         расстояние до игрока меньше 0x1E и phase ещё 0 — ОДИН раз
- *         зовётся cs:0x17B6:0x000C (горизонтальный снаряд в игрока со
- *         скоростью 2.0) и phase ставится в 1. Очки 0x1000. */
+ *         зовётся cs:0x17B6:0x000C и phase ставится в 1. Очки 0x1000.
+ *
+ * ИСПРАВЛЕНО (2026-09, полная передизассемблировка cs:0x17B6:0x000C,
+ * file 0x1936C): это не один снаряд 2.0, а ДВА горизонтальных
+ * наведённых по X снаряда подряд (два отдельных вызова
+ * cs:0x11D6:0x139, file 0x1939D и 0x193D3), у обоих flag=1, kind=2
+ * (был 1 — чужой спрайт), speed=4.0 (была 2.0):
+ *   #1 source=(x_world−5, y_world+3),  target_x=player.x_world
+ *   #2 source=(x_world+5, y_world+20), target_x=player.x_world
+ * (X — в 2px-единицах x_world, ×2 при переносе в пиксели порта). */
 static void ai_type53(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1681,7 +2018,13 @@ static void ai_type53(ai_obj_t *o, u16 frame, u8 in)
         int dyp = physics_get_top_y() - o->y;
         int d = (dxp < 0 ? -dxp : dxp) + (dyp < 0 ? -dyp : dyp);
         if (d >= 0x1E || o->st_phase != 0) break;
-        spawn_enemy_shot(o->x, o->y, (dxp > 0), Q_2_0, 1);
+        {
+            int px  = physics_get_left_x();
+            int sx1 = o->x - 10, sy1 = o->y + 3;
+            int sx2 = o->x + 10, sy2 = o->y + 20;
+            spawn_enemy_shot(sx1, sy1, px > sx1, QV(4, 0), 2);
+            spawn_enemy_shot(sx2, sy2, px > sx2, QV(4, 0), 2);
+        }
         o->st_phase = 1;                 /* выстрел одноразовый */
         break;
     }
@@ -1703,7 +2046,11 @@ static void ai_type53(ai_obj_t *o, u16 frame, u8 in)
  *         cs:0x1692:0x0634 — тот же выстрел, что у типа 47: наведённый
  *         снаряд в (player.x, player.y + 10) со скоростью 0.75.
  *         Как только счётчик дошёл до нуля — снова подфаза 0.
- * Очки за смерть 0x1000. */
+ * Очки за смерть 0x1000.
+ * ИСПРАВЛЕНО (2026-09, полная передизассемблировка выстрела): kind=8
+ * (был 0 — чужой спрайт), клэмп нормализатора len<2→2 (был len<1→1,
+ * тот самый Gotcha #4). flag=0, скорость 0.75, цель (player.x,
+ * player.y+10) — подтверждено, без изменений. */
 static void ai_type46(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1737,18 +2084,24 @@ static void ai_type46(ai_obj_t *o, u16 frame, u8 in)
         /* fallthrough */
     case 3:
         if (o->st_ctr >= 0) { o->st_misc = 0; break; }
-        {   /* cs:0x1692:0x634 — наведённый выстрел, как у типа 47 */
+        {   /* cs:0x1692:0x634 — наведённый выстрел, как у типа 47.
+             * Передизассемблировка (file 0x18761..0x18781) даёт kind=8
+             * (push ax,0x8 перед позиционными аргументами) — старый порт
+             * не проставлял custom вовсе (снаряд рисовался чужим спрайтом
+             * K0 вместо статичного #19 у kind=8). */
             int slot = alloc_obj_slot();
             if (slot < 0) break;
             ai_obj_t *b = &g_obj[slot];
             *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
                              .x = o->x, .y = o->y, .hp = 10, .level_idx = -1,
-                             .facing = dir ? 1 : -1 };
+                             .facing = dir ? 1 : -1, .custom = 8 };
             obj_phys_begin(b);
             int tx = physics_get_left_x() / 2 - obj_units(o);
             int ty = physics_get_top_y() + 10 - o->y;
             int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
-            if (len < 1) len = 1;
+            /* Gotcha #4: клэмп нормализатора (cs:0x11D6:0x0006, file
+             * 0x13566) — len<2 → 2, а не len<1 → 1. */
+            if (len < 2) len = 2;
             b->vxq = ((s32)tx * QV(0, 0xC000)) / len;
             b->vyq = ((s32)ty * QV(0, 0xC000)) / len;
         }
@@ -1764,12 +2117,20 @@ static void ai_type46(ai_obj_t *o, u16 frame, u8 in)
  * THINK: объект НЕ движется (прежняя реализация «прыгуна» была
  * выдумкой). Раз в тик (а тик — раз в 10 кадров) с шансом 1 из 16
  * стреляет НАВЕДЁННЫМ снарядом из своей точки в (player.x,
- * player.y + 10) со скоростью 0.75. Очки за смерть 0x1000. */
+ * player.y + 10) со скоростью 0.75. Очки за смерть 0x1000.
+ * ИСПРАВЛЕНО (2026-09): kind=8 (file 0x18608: push ax,0x8), был 0 —
+ * снаряд рисовался кадрами {2,3} вместо статичного спрайта #19;
+ * клэмп нормализатора len<2→2 (был len<1→1, Gotcha #4). flag=0,
+ * speed=0.75, source=(x_world,y_world), target=(player.x, player.y+10)
+ * — подтверждено без изменений. */
 static void ai_type47(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
     if (!o->use_anim) {
         anim_begin(o, 10, 0);
+        o->y -= 16;   /* file 0x185D8: y_world -= [DS:0x10D4] (=16, byte-verified);
+                        * ДО obj_phys_begin — иначе o->yq останется на старом y и
+                        * obj_integrate вернёт объект вниз на следующем кадре. */
         obj_phys_begin(o);
         o->st_aux = (int)o->init_arg;
         return;
@@ -1780,13 +2141,15 @@ static void ai_type47(ai_obj_t *o, u16 frame, u8 in)
     ai_obj_t *b = &g_obj[slot];
     *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
                      .x = o->x, .y = o->y, .hp = 10, .level_idx = -1,
-                     .facing = (player_units() > obj_units(o)) ? 1 : -1 };
+                     .facing = (player_units() > obj_units(o)) ? 1 : -1,
+                     .custom = 8 };
     obj_phys_begin(b);
     /* Единичный вектор к цели со скоростью 0.75 ед./кадр. */
     int tx = physics_get_left_x() / 2 - obj_units(o);
     int ty = physics_get_top_y() + 10 - o->y;
     int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
-    if (len < 1) len = 1;
+    /* Gotcha #4: клэмп нормализатора — len<2 → 2, не len<1 → 1. */
+    if (len < 2) len = 2;
     b->vxq = ((s32)tx * QV(0, 0xC000)) / len;
     b->vyq = ((s32)ty * QV(0, 0xC000)) / len;
 }
@@ -1794,8 +2157,14 @@ static void ai_type47(ai_obj_t *o, u16 frame, u8 in)
 /* ── Тип 42 — периодическая ловушка (cs:0x161F:0x029F, file 0x17C8F) ───
  *
  * INIT: tick_period = 3, подфаза (+0xE9) = 0, счётчик (+0xEB) =
- * init_arg * 10, при phase(+0xED) != 0 объект поднимается на 20 px,
- * num_bboxes = 1, state_list = DS:0x1CF2.
+ * init_arg * 10, phase(+0xED) = init_arg & 1 (file 0x17CBF..0x17CC7:
+ * `self.frame_idx`, который на первом вызове INIT уже равен init_arg —
+ * тот же приём, что у типа 22), и при phase != 0 объект поднимается на
+ * 20 px, num_bboxes = 1, state_list = DS:0x1CF2. Порт раньше НЕ
+ * присваивал st_phase вовсе (поле оставалось 0 по умолчанию) — запись
+ * никогда не поднималась и всегда рисовалась анимацией 0/2 вместо
+ * 1/3, хотя на LEVEL4 половина записей (idx 7,8,9,10 — trigger&0xFF
+ * нечётный: 11,41,21,31) должна получать именно эту, вторую, ориентацию.
  * THINK: подфазы 0/1 — покой: аним-состояние = phase, кадр 0, счётчик
  * уменьшается на tick_period за тик; когда он вышел в ноль (или раньше
  * с шансом 1/128) — подфаза 2. Подфазы 2/3 — срабатывание: аним
@@ -1811,8 +2180,9 @@ static void ai_type42(ai_obj_t *o, u16 frame, u8 in)
     (void)frame; (void)in;
     if (!o->use_anim) {
         anim_begin(o, 3, 0);
-        o->st_misc = 0;                          /* +0xE9 */
-        o->st_aux  = (int)o->init_arg * 10;      /* +0xEB */
+        o->st_misc  = 0;                          /* +0xE9 */
+        o->st_phase = (int)o->init_arg & 1;       /* +0xED */
+        o->st_aux   = (int)o->init_arg * 10;      /* +0xEB */
         if (o->st_phase != 0) o->y -= 20;
         return;
     }
@@ -1875,8 +2245,13 @@ static void ai_type42(ai_obj_t *o, u16 frame, u8 in)
  * игрока (self.x <= player.x) горизонтальная скорость обнуляется.
  * Очки за смерть 0x20000.
  *
- * Не портированы два вызова из подфазы 2 — cs:0x151A:0xDDF и 0xE5D
- * (по контексту — обновление коллизии и, вероятно, огненное дыхание). */
+ * Оба вызова из подфазы 2/3 декомпилированы (были ранее не разобраны):
+ *  cs:0x151A:0xDDF — «огненное дыхание», ОДИН прицельный выстрел из
+ *    (x, y+7) при прыжке: с шансом 1/2 — точно в (player.x, player.y),
+ *    kind=7 (гибнет о препятствие), скорость 2.0; иначе — в точку
+ *    (player.x+15, player.y+5), kind=1, скорость 1.5. НЕ горизонтальный
+ *    выстрел по направлению — цель берётся по снимку позиции игрока.
+ *  cs:0x151A:0xE5D — приземление: см. комментарий у обработки vyq>0 ниже. */
 static void ai_type38(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -1915,20 +2290,49 @@ static void ai_type38(ai_obj_t *o, u16 frame, u8 in)
         o->vxq = (s32)0xFFFE8000;           /* −1.5 */
         o->vyq = -QV(2, 0);                 /* −2.0 */
         o->ayq = QV(0, 0x4000);             /* +0.25 */
-        /* cs:0x151A:0xDDF — огненное дыхание: с шансом 1/2 снаряд со
-         * скоростью 2.0, иначе 1.5, из (x, y + 7) в сторону игрока. */
-        spawn_enemy_shot(o->x, o->y + 7, (player_units() > obj_units(o)),
-                         (rng_next() & 1) ? Q_2_0 : Q_1_5, 1);
+        /* cs:0x151A:0xDDF — прицельное огненное дыхание (не горизонтальное:
+         * см. комментарий к обработчику). */
+        {
+            int sx = o->x, sy = o->y + 7;
+            int odd = (int)(rng_next() & 1);
+            int dst_x_units = player_units() + (odd ? 0 : 15);
+            int dst_y       = physics_get_top_y() + (odd ? 0 : 5);
+            int kind        = odd ? 7 : 1;
+            s32 speed       = odd ? Q_2_0 : Q_1_5;
+            int tx = dst_x_units - obj_units(o);
+            int ty = dst_y - sy;
+            int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+            if (len < 1) len = 1;
+            int slot = alloc_obj_slot();
+            if (slot >= 0) {
+                ai_obj_t *b = &g_obj[slot];
+                *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                 .subtype = 3, .x = sx, .y = sy, .hp = 10,
+                                 .level_idx = -1, .facing = (tx > 0) ? 1 : -1,
+                                 .custom = kind };
+                obj_phys_begin(b);
+                b->vxq = ((s32)tx * speed) / len;
+                b->vyq = ((s32)ty * speed) / len;
+            }
+        }
         /* fallthrough */
     case 3:
         if (obj_units(o) <= player_units()) o->vxq = 0;   /* догнал */
-        /* cs:0x151A:0xE5D — посадка: только на снижении, тайл под
-         * (x − 0x10 ед., y + высота спрайта) категорий 0, 4 или 7. */
+        /* cs:0x151A:0xE5D (декомпилировано): только на снижении (vy>0),
+         * тайл под (x − 0x10 ед. = −32 px, y + высота спрайта). Таблица
+         * @0xEA0 приземляет на категориях 1,2,3,5,6 и >7 — НЕ приземляет
+         * (продолжает падать) на 0, 4, 7. Раньше условие было записано
+         * с точностью до наоборот. */
         if (o->vyq > 0) {
             int cat = level_tile_attr_at(o->x - 32, o->y + obj_height(o));
-            if (cat == 0 || cat == 4 || cat == 7) {
+            if (!(cat == 0 || cat == 4 || cat == 7)) {
                 o->vyq = 0;
                 o->ayq = 0;
+                /* set_motion(0) — сброс vx/vy/ax/ay, отдельно от вызова
+                 * obj_snap_ground; misc(+0xE9) = 0 (назад в стойку). */
+                o->vxq = 0;
+                o->axq = 0;
+                o->st_misc = 0;
                 obj_snap_ground(o);
             }
         }
@@ -1953,7 +2357,16 @@ static void ai_type38(ai_obj_t *o, u16 frame, u8 in)
  *         затем подфаза 6;
  *   6/7 — бой: active = 1, phase = 1, vx = ±0.75 к игроку, счётчик
  *         кадров = 0 и box0.hitflag = 1 — только теперь босса можно
- *         ранить; далее раз в 8 кадров подключается вертикальный рывок.
+ *         ранить. НИКАКОГО «вертикального рывка» в оригинале нет (vy
+ *         всё время 0 — раньше было выдумано «по смыслу»): пока
+ *         ((frame_ctr>>3)&1)==0 (8-тиковые окна стрельбы через 8 тиков
+ *         тишины) каждый тик летит прицельный снаряд из переднего края
+ *         хитбокса в (player.x, player.y + rand(0..127) − 63), kind=1,
+ *         скорость 1.5; спустя 30 тиков боя (frame_ctr > 0x1E) — назад
+ *         в подфазу 4 (посадка/отдых), после чего цикл 4→5→6→7
+ *         повторяется. Есть ещё разовая при входе в 6 проверка стены
+ *         перед мордой (cs:0x161F:0x03DD, file 0x17DCD) — гасит vx, если
+ *         там сплошной тайл; НЕ портирована (редкий крайний случай).
  * Порт хранит hitflag в поле custom и учитывает его в is_damageable_obj. */
 static void ai_type40(ai_obj_t *o, u16 frame, u8 in)
 {
@@ -2008,12 +2421,41 @@ static void ai_type40(ai_obj_t *o, u16 frame, u8 in)
         o->st_phase = 1;
         o->vxq = dir ? QV(0, 0xC000) : (s32)0xFFFF4000;   /* ±0.75 */
         o->st_ctr = 0;
-        o->custom = 1;                  /* теперь уязвим */
+        o->custom = 1;                  /* теперь уязвим (box0.hitflag=1) */
         /* fallthrough */
     case 7:
-        /* Раз в 8 кадров — вертикальный рывок (frame_ctr >> 3, бит 0). */
-        if ((((o->st_ctr >> 3) & 1) == 0)) o->vyq = Q_1_5;
-        else                               o->vyq = 0;
+        /* Декомпилировано заново (file 0x1809F): вертикального «рывка»
+         * в ASM НЕТ, vy всё время 0 — прежняя реализация была выдумана.
+         * Пока ((frame_ctr>>3)&1)==0 (8-тиковое «окно стрельбы», окна
+         * чередуются каждые 8 тиков) — каждый тик прицельный снаряд из
+         * переднего края хитбокса (box0.x1, если dir, иначе box0.x0;
+         * y_world+10) в точку (player.x_world, player.y_world +
+         * rand(0..127) − 63), kind=1, скорость 1.5. После 30 тиков боя
+         * (frame_ctr > 0x1E) — назад в подфазу 4 (посадка/отдых), минуя
+         * повторный вход через misc=2 (обходит sub-phase 3 — на этот раз
+         * приземление не проверяется тайлом, а форсируется напрямую). */
+        if (((o->st_ctr >> 3) & 1) == 0) {
+            int sx = dir ? (o->x + obj_width(o)) : o->x;
+            int sy = o->y + 10;
+            int dst_x_units = player_units();
+            int dst_y = physics_get_top_y() + (int)(rng_next() & 0x7F) - 63;
+            int tx = dst_x_units - sx / 2;
+            int ty = dst_y - sy;
+            int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+            if (len < 1) len = 1;
+            int slot = alloc_obj_slot();
+            if (slot >= 0) {
+                ai_obj_t *b = &g_obj[slot];
+                *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                 .subtype = 3, .x = sx, .y = sy, .hp = 10,
+                                 .level_idx = -1, .facing = (tx > 0) ? 1 : -1,
+                                 .custom = 1 };
+                obj_phys_begin(b);
+                b->vxq = ((s32)tx * Q_1_5) / len;
+                b->vyq = ((s32)ty * Q_1_5) / len;
+            }
+        }
+        if (o->st_ctr > 0x1E) o->st_misc = 4;
         break;
     default: break;
     }
@@ -2035,7 +2477,18 @@ static void ai_type40(ai_obj_t *o, u16 frame, u8 in)
  *         аним ((rand&1) ? 2 : 4) + si;
  *   5   — если phase уже 1 или выпал rand&1 → подфаза 6, иначе второй
  *         выстрел (скорость 2.0) и phase = 1;
- *   6   — подскок вверх: vx = 0, vy = −3.0, аним si. */
+ *   6   — подскок вверх: vx = 0, vy = −3.0, аним si.
+ *
+ * ОТДЕЛЬНО от подфаз (+0xE9) — состояние ДВИЖКА (cur_state), диспетчер
+ * cs:0x11D6:0x0B20 (7 записей): 0/1=init, 2=think(выше), 4=смерть (add_score
+ * 0x1800 + die_puff), 6=die_puff без очков. Состояние 5 — «ранен, но жив»
+ * (file 0x1402B+0xDD9): будит стража ДОСРОЧНО — если self.misc(+0xE9)==1
+ * (спит), принудительно переводит в подфазу 2 (прыжок), минуя дистанцию
+ * |dx|>0x50. В порту нет отдельного диспетчера по cur_state==5, но есть
+ * тот же по смыслу сигнал «нас задели в этом кадре» — o->hit_flag (как у
+ * типа 52, см. его комментарий). Раньше страж просыпался ТОЛЬКО по
+ * дистанции — попадание издалека (наведённым снарядом и т.п.) его не
+ * будило. */
 static void ai_type15(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -2055,6 +2508,7 @@ static void ai_type15(ai_obj_t *o, u16 frame, u8 in)
     switch (ph) {
     case 0:
     case 1:
+        if (o->hit_flag) { o->st_misc = 2; break; }   /* ранен — будим досрочно */
         if (adx > 0x50) break;                 /* спит, пока игрок далеко */
         o->st_misc = 2;
         break;
@@ -2159,9 +2613,13 @@ static void ai_type31(ai_obj_t *o, u16 frame, u8 in)
  * INIT: tick_period = 4, постановка на землю со спрайтом 0xDE (#222),
  * state_list = DS:0x1BE0, аним-состояние 0.
  * THINK: пока frame_ctr(+0xC7) <= 0x5A — стоит в состоянии 0. Как только
- * счётчик перевалил 90, стреляет: spawn_projectile из
- * (x, y + 3 + (rand & 8)) в игрока со скоростью 2.0 и флагом
- * «горизонтально», после чего frame_ctr = 0x5A − ((rand & 0xF) + 0x46),
+ * счётчик перевалил 90, стреляет: call cs:0x11D6:0x139 (та же наводящая
+ * функция, что и у типа 14) из (self.x, self.y + 3 + (rand&8)) НА
+ * снимок позиции игрока (player.x_world, player.y_world — без сдвига),
+ * kind=5 (внутри 0x139 превращается в 5/6 по знаку итоговой vx — это и
+ * есть выбор спрайта «влево/вправо»), скорость 2.0. Это НЕ горизонталь-
+ * ный выстрел: вертикальная составляющая зависит от относительной высоты
+ * игрока. После выстрела frame_ctr = 0x5A − ((rand & 0xF) + 0x46),
  * т.е. следующий выстрел через 70…85 кадров, и переключается в
  * состояние 1. Очки за смерть 0x7000. Сам босс НЕ ходит. */
 static void ai_type32(ai_obj_t *o, u16 frame, u8 in)
@@ -2174,9 +2632,25 @@ static void ai_type32(ai_obj_t *o, u16 frame, u8 in)
     }
     if (o->st_ctr <= 0x5A) { o->pending_state = 0; return; }
 
-    /* Горизонтальный снаряд в сторону игрока. */
-    int si = (player_units() > obj_units(o));
-    spawn_enemy_shot(o->x, o->y + 3 + (int)(rng_next() & 8), si, Q_2_0, 1);
+    /* Наведённый снаряд (см. комментарий выше — не горизонтальный). */
+    {
+        int sx = o->x, sy = o->y + 3 + (int)(rng_next() & 8);
+        int tx = player_units() - sx / 2;
+        int ty = physics_get_top_y() - sy;
+        int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+        if (len < 1) len = 1;
+        int slot = alloc_obj_slot();
+        if (slot >= 0) {
+            ai_obj_t *b = &g_obj[slot];
+            *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                             .subtype = 3, .x = sx, .y = sy, .hp = 10,
+                             .level_idx = -1, .facing = (tx > 0) ? 1 : -1,
+                             .custom = 5 };
+            obj_phys_begin(b);
+            b->vxq = ((s32)tx * Q_2_0) / len;
+            b->vyq = ((s32)ty * Q_2_0) / len;
+        }
+    }
     o->st_ctr = 0x5A - (int)((rng_next() & 0xF) + 0x46);
     o->pending_state = 1;
 }
@@ -2265,13 +2739,53 @@ static void ai_type12(ai_obj_t *o, u16 frame, u8 in)
  *         подфаза 2;
  *   2/3 — прыжок: кадр dirsel+1, постановка на землю (спрайт 0xEF),
  *         vx = 0 в 3 случаях из 4, иначе ±1.0; vy = −1.25, ay = +0.125;
- *         приземлился — подфаза 6;
+ *         пока в воздухе (подфаза 3) — у «стреляющего» варианта (phase!=0,
+ *         helper cs:0x151A:0x0870, file 0x17210) КАЖДЫЙ тик наведённый
+ *         снаряд по игроку (source = self.x/self.y БЕЗ смещения, target =
+ *         реальные player.x_world/y_world — это НЕ вырожденный горизон-
+ *         тальный выстрел типа 15: override-флаг у 0x139 здесь 0, значит
+ *         вертикальная составляющая сохраняется); приземлился — подфаза 6;
  *   6/7 — второй прыжок: кадр dirsel+3, vy = −1.25, ay = +0.125; на
- *         подъёме, если игрок ниже на 0x19 — зависание (vy = 0);
- *         приземлился — снова подфаза 2. */
+ *         подъёме, если игрок ниже на 0x19 — зависание (vy = 0) И (тот же
+ *         0x870) один наведённый снаряд в момент зависания; приземлился —
+ *         снова подфаза 2.
+ * Раньше «стреляющий» вариант (init_arg > 10) не стрелял вовсе — phase
+ * читался только при INIT и нигде не использовался в THINK. */
 static bool obj_on_ground(const ai_obj_t *o)
 {
     return level_solid_at(o->x + 8, o->y + obj_height(o) + 1);
+}
+
+/* Наведённый снаряд «стреляющего» голема — порт cs:0x151A:0x0870
+ * (file 0x17210): source = (self.x_world, self.y_world) БЕЗ смещений,
+ * target = (player.x_world, player.y_world) снимком, скорость 2.25,
+ * kind=1 (тот же класс снаряда, что и у типа 15, но с override-флагом 0 у
+ * вызова 0x139 — вертикальная составляющая НЕ обнуляется).
+ *
+ * ПЕРЕПРОВЕРЕНО (2026-09, аудит скоростей снарядов): полная
+ * передизассемблировка (пуши file 0x1721F..0x17245, call cs:0x151A:0x8A6
+ * → file 0x17246) подтверждает байт-в-байт: flag=0, speed_hi=2,
+ * speed_lo=0x4000 → 2.25 = QV(2,0x4000), kind=1, target/source — как
+ * выше, оба БЕЗ смещения. Магнитуда, траектория и точки совпадают с
+ * прежней реализацией — расхождение нашлось только в клэмпе минимальной
+ * длины вектора: оригинал (file 0x135E2, общий хелпер 0x006) берёт
+ * len<2→2, здесь было len<1→1 — исправлено. */
+static void t35_homing_shot(const ai_obj_t *o)
+{
+    int sx = o->x, sy = o->y;
+    int tx = player_units() - sx / 2;
+    int ty = physics_get_top_y() - sy;
+    int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+    if (len < 2) len = 2;
+    int slot = alloc_obj_slot();
+    if (slot < 0) return;
+    ai_obj_t *b = &g_obj[slot];
+    *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
+                      .x = sx, .y = sy, .hp = 10, .level_idx = -1,
+                      .facing = (tx > 0) ? 1 : -1, .custom = 1 };
+    obj_phys_begin(b);
+    b->vxq = ((s32)tx * QV(2, 0x4000)) / len;
+    b->vyq = ((s32)ty * QV(2, 0x4000)) / len;
 }
 
 static void ai_type35(ai_obj_t *o, u16 frame, u8 in)
@@ -2317,6 +2831,7 @@ static void ai_type35(ai_obj_t *o, u16 frame, u8 in)
         o->ayq = QV(0, 0x2000);                 /* +0.125 */
         /* fallthrough */
     case 3:
+        if (o->st_phase) t35_homing_shot(o);   /* «стреляющий» — каждый тик в воздухе */
         if (obj_on_ground(o) && o->vyq > 0) o->st_misc = 6;
         break;
     case 6:
@@ -2328,6 +2843,7 @@ static void ai_type35(ai_obj_t *o, u16 frame, u8 in)
         if (o->vyq < 0 && (physics_get_top_y() - o->y) > 0x19) {
             o->vyq = 0;                          /* завис над игроком */
             o->ayq = QV(0, 0x2000);
+            if (o->st_phase) t35_homing_shot(o);   /* выстрел в момент зависания */
         }
         if (obj_on_ground(o) && o->vyq > 0) o->st_misc = 2;
         break;
@@ -2393,7 +2909,10 @@ static void ai_type45(ai_obj_t *o, u16 frame, u8 in)
         o->pending_state = (1 - o->anim_state) & 1;
 }
 
-/* ── Тип 43 — «крестовый» летун (handler cs:0x158C:0x0205, file 0x17085)
+/* ── Тип 43 — «крестовый» летун (handler cs:0x1692:0x0205, file 0x18325)
+ * (прежний адрес cs:0x158C:0x0205/file 0x17085 был неверен вдвойне: этот
+ * cs:seg не соответствовал даже собственному file, а настоящий обработчик
+ * по таблице DS:0x10FE лежит в сегменте 0x1692, рядом с типами 44/45).
  *
  * INIT: подфаза (+0xE9) = 0, +0xEB = init_arg, tick_period = 3,
  * state_list = DS:0x1D7E.
@@ -2406,7 +2925,24 @@ static void ai_type45(ai_obj_t *o, u16 frame, u8 in)
  *   2/3 — атака: аним-состояние = сторона + 2, скорость пополам,
  *         на КАДРЕ 1 анимации — выстрел из (x, y+10) вертикально в
  *         игрока со скоростью 0.875; на кадре 0 без смены состояния —
- *         возврат в подфазу 0. Очки за смерть 0x1800. */
+ *         возврат в подфазу 0. Очки за смерть 0x1800.
+ *
+ * Выстрел передизассемблирован полностью (пуши file 0x1852A..0x18548,
+ * call cs:0x11D6:0x139 → file 0x18554): flag=0, speed=QV(0,0xE000)=0.875
+ * (подтверждено), НО kind=0xA=10 (push ax,0xa, file 0x18534) — было 0 в
+ * порту (чужой спрайт K0 и правило гибели по таймауту вместо статичного
+ * спрайта #283 и гибели в воде, как у типа 8 «падающий лёд»).
+ * target_x=self.x_world (не игрок) ⇒ горизонтали нет (tx=0) уже за счёт
+ * геометрии, а не флага; target_y=player.y_world, source=(self.x_world,
+ * self.y_world+10) — знак vy определяется по (player.y − (self.y+10)),
+ * а не по (player.y − self.y), как было в порту (расхождение только в
+ * узком окне ±10px).
+ * ДОПОЛНИТЕЛЬНО у kind=10 общий spawn_projectile (file 0x13755..0x1376B,
+ * та же функция cs:0x11D6:0x139) имеет побочный эффект: он пишет
+ * переданную speed_hi:speed_lo НЕ в снаряд, а в vy САМОГО стрелявшего
+ * (self, [0xD8A6]) — то есть летун ПОСЛЕ выстрела получает vy=+0.875
+ * (рывок вниз), independent от текущего фазового vy/vx. В порту это не
+ * было реализовано вовсе. */
 static void ai_type43(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -2456,11 +2992,16 @@ static void ai_type43(ai_obj_t *o, u16 frame, u8 in)
                 *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
                                  .subtype = 3, .x = o->x, .y = o->y + 10,
                                  .hp = 10, .level_idx = -1, .facing = 1,
-                                 .custom = 0 };
+                                 .custom = 10 };
                 obj_phys_begin(b);
                 b->vxq = 0;
-                b->vyq = (physics_get_top_y() > o->y) ? QV(0, 0xE000)
-                                                      : -QV(0, 0xE000);
+                b->vyq = (physics_get_top_y() > o->y + 10) ? QV(0, 0xE000)
+                                                           : -QV(0, 0xE000);
+                /* kind=10 у spawn_projectile (file 0x13755) дополнительно
+                 * форсирует vy САМОГО летуна в +0.875 (рывок вниз после
+                 * выстрела) — побочный эффект оригинала, не перепутан со
+                 * снарядом. */
+                o->vyq = QV(0, 0xE000);
             }
         }
         if (o->frame_index == 0 && o->pending_state < 0) o->st_misc = 0;
@@ -2480,8 +3021,14 @@ static void ai_type43(ai_obj_t *o, u16 frame, u8 in)
  *   0/1 — «дуга вверх»: vy += −0.25 каждый тик; когда dy >= 40 (птица
  *         высоко над игроком) → подфаза 2, vx = ±1.0, vy = −2.0;
  *   2   — «дуга вниз»: пока dy >= 5 — vy += +0.25; когда dy < 5 (дошла
- *         до уровня игрока) — ВЫСТРЕЛ по горизонтали из (x, y+20) со
- *         скоростью 2.125, затем vy = +2.0, подфаза 0, аним si+2.
+ *         до уровня игрока) — ВЫСТРЕЛ, затем vy = +2.0, подфаза 0,
+ *         аним si+2.
+ * Выстрел (call cs:0x11D6:0x139 → 0x6, file 0x1379F/0x1369C): снаряд
+ * рождается в (self.x, self.y+20) и НАВОДИТСЯ на снимок позиции игрока
+ * (player.x_world, player.y_world+5) — вектор нормируется по Манхэттену
+ * (|dx|+|dy|) и масштабируется на скорость 2.125 (0x139 передаёт misc=4,
+ * т.е. kind=4 → obj.subtype=4, спрайты #10..#13, DS:0x1784 state 4).
+ * Это НЕ горизонтальный выстрел — реальный снаряд может лететь по диагонали.
  * Аним: 0/1 — полёт влево/вправо (#149/#151), 2/3 — после выстрела
  * (#150/#152). Очки за смерть 0x2600. */
 static void ai_type14(ai_obj_t *o, u16 frame, u8 in)
@@ -2522,8 +3069,25 @@ static void ai_type14(ai_obj_t *o, u16 frame, u8 in)
             o->vyq = Q_2_0;
             o->st_misc = 0;
             o->pending_state = o->st_aux + 2;
-            /* Горизонтальный снаряд из (x, y+20), скорость 2.125. */
-            spawn_enemy_shot(o->x, o->y + 20, o->st_aux, QV(2, 0x2000), 1);
+            /* Наведённый снаряд (НЕ горизонтальный — см. комментарий
+             * к обработчику): цель — снимок позиции игрока. */
+            {
+                int sx = o->x, sy = o->y + 20;
+                int tx = player_units() - sx / 2;
+                int ty = physics_get_top_y() + 5 - sy;
+                int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+                if (len < 1) len = 1;
+                int slot = alloc_obj_slot();
+                if (slot >= 0) {
+                    ai_obj_t *b = &g_obj[slot];
+                    *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
+                                     .subtype = 3, .x = sx, .y = sy, .hp = 10,
+                                     .level_idx = -1, .facing = 1, .custom = 4 };
+                    obj_phys_begin(b);
+                    b->vxq = ((s32)tx * QV(2, 0x2000)) / len;
+                    b->vyq = ((s32)ty * QV(2, 0x2000)) / len;
+                }
+            }
         } else {
             o->vyq += QV(0, 0x4000);       /* +0.25 за тик */
         }
@@ -2532,31 +3096,60 @@ static void ai_type14(ai_obj_t *o, u16 frame, u8 in)
     }
 }
 
-/* ── Тип 18 — ныряющий чёрт (handler cs:0xFFA:0x127D, file 0x12A1D) ────
+/* ── Тип 18 — ныряющий чёрт (handler cs:0x11D6:0x127D, file 0x147DD) ───
+ *
+ * (Прежде в комментарии стоял неверный адрес cs:0xFFA:0x127D/file 0x12A1D —
+ * тот файл-адрес принадлежит совсем другой функции (тальи очков конца
+ * уровня); настоящий обработчик типа 18 — по таблице DS:0x10FE — лежит
+ * в сегменте 0x11D6, сразу после типа 16.)
  *
  * INIT: si = (игрок правее), aux(+0xEF) = 0, phase(+0xED) = init_arg,
  * phase_ctr(+0xEB) = СНИМОК player.y_world, tick_period = 3,
- * подфаза (+0xE9) = 2, vx = ±1.5, vy = +1.5, y_world = player_y − 20,
+ * подфаза (+0xE9) = 2, vx = ±1.5, vy = +1.5,
+ * y_world = player_y + [DS:0x100E](0x1A) − [DS:0x1050](0x1C) − 20 =
+ * player_y − 22 (оба байта — константы, нигде не перезаписываются),
  * state_list = DS:0x19B4, аним-состояние = si.
  *
  * THINK (si пересчитывается каждый тик):
- *   tgt = phase ? (player_y − снимок + 40) : 0;  dy = (player_y − tgt) − self.y
+ *   tgt = phase ? (player_y − снимок + 40) : 0;
+ *   dy = (player_y − tgt + 0x1A) − (self.y + 0x1C) = (player_y − tgt) − self.y − 2
  *   0   — подфаза 1, аним si+6
  *   1   — dy >= 40 → подфаза 5, vx = ±1.5, vy = 0, аним si
- *   2   — dy < 0 (или phase и frame_ctr > 30) → vx = ±1.5, vy = 0,
+ *   2   — dy < 0 (или phase и frame_ctr > 30) → вх = ±1.5, vy = 0,
  *         подфаза 4, frame_ctr = 0
  *   4   — атака, если у игрока есть живые снаряды и |dx| > 10, либо
  *         (phase и rand&1): подфаза 0, аним si+4, vx = ±1.5, vy = −1.5;
- *         при phase — ++aux, на 5-м разе phase = 0, и с шансом 1/2
+ *         при phase — ++aux; на 5-м разе (aux>4) phase=0 И принудительно
+ *         vx делается отрицательным (влево), если был положительным
+ *         (file 0x1459); с шансом 1/2 (независимо от aux)
  *         spawn_projectile(self → (self.x ± 8, player_y), скорость 2.0)
  *   5   — |dx| < 10 → подфаза 2, vx = 0, vy = +1.5
- * Аним-состояния: 0/1 полёт, 2/3 запас, 4/5 атака, 6/7 разворот. */
+ * Аним-состояния: 0/1 полёт, 2/3 запас, 4/5 атака, 6/7 разворот.
+ *
+ * ПЕРЕПРОВЕРЕНО (2026-09, аудит скоростей снарядов): полная
+ * передизассемблировка вызова spawn_projectile (пуши file 0x149E7..
+ * 0x14A1B, сам call cs:0x11D6:0x14BC → file 0x14A1C) подтверждает:
+ * flag=0 (в отличие от типов 15/29 — override НЕ включён, вертикаль
+ * реально сохраняется), speed_hi=2, speed_lo=0 → 2.0 = Q_2_0, kind=0,
+ * target=(self.x_world ± 8, player.y_world) — знак смещения по X решает
+ * НЕЗАВИСИМЫЙ от направления полёта бросок монеты (НЕ по si), source =
+ * (self.x_world, self.y_world) без смещения. Порт (ниже) уже это
+ * реализует байт-в-байт: ±8 «родных» единиц = ±16 px (o->x — в px,
+ * ×2 к «родным»), sy = physics_get_top_y() = player.y_world. Идиома
+ * `vx<<17/len` математически равна `vx*Q_2_0/len` (тот же результат,
+ * что у типов 29/35 через явный QV) — ложной тревоги не подтвердилось.
+ * Найдены две неточности (обе исправлены ниже):
+ *   1) клэмп минимальной длины вектора — оригинал (file 0x135E2, общий
+ *      хелпер 0x006) берёт len<2→2, порт использовал len<1→1;
+ *   2) kind у спаунимого снаряда — порт ставил .custom=2 (статичный
+ *      спрайт 9, см. ai_enemy_shot), должно быть kind=0 (анимация
+ *      {2,3}) — визуальная ошибка, на скорость/траекторию не влияла. */
 static void ai_type18(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
     int si = (player_units() > obj_units(o));
     if (!o->use_anim) {
-        o->y = physics_get_top_y() - 20;
+        o->y = physics_get_top_y() - 22;   /* file 0x1331: +0x1A −0x1C −20 */
         anim_begin(o, 3, si);
         obj_phys_begin(o);
         o->custom   = 0;                        /* +0xEF */
@@ -2568,7 +3161,7 @@ static void ai_type18(ai_obj_t *o, u16 frame, u8 in)
         return;
     }
     int tgt = o->st_phase ? (physics_get_top_y() - o->st_aux + 0x28) : 0;
-    int dy  = (physics_get_top_y() - tgt) - o->y;
+    int dy  = (physics_get_top_y() - tgt) - o->y - 2;   /* file 0x1386: +0x1A −0x1C */
     int dx  = player_units() - obj_units(o);
     int adx = dx < 0 ? -dx : dx;
 
@@ -2600,22 +3193,30 @@ static void ai_type18(ai_obj_t *o, u16 frame, u8 in)
         o->vxq = si ? Q_1_5 : -Q_1_5;
         o->vyq = -Q_1_5;
         if (o->st_phase) {
-            if (++o->custom > 4) o->st_phase = 0;
+            if (++o->custom > 4) {
+                o->st_phase = 0;
+                /* file 0x1459: после серии из 5 атак направление
+                 * принудительно делается левым (vx > 0 → -vx). */
+                if (o->vxq > 0) o->vxq = -o->vxq;
+            }
             if (rng_next() & 1) {               /* сброс снаряда в игрока */
                 int sx = o->x + ((rng_next() & 1) ? 16 : -16);
                 int sy = physics_get_top_y();
                 int slot = alloc_obj_slot();
                 if (slot >= 0) {
                     ai_obj_t *b = &g_obj[slot];
+                    /* kind=0 (см. комментарий к обработчику) — раньше
+                     * стояло .custom=2, что давало статичный спрайт 9
+                     * вместо анимированного {2,3} — исправлено. */
                     *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT,
                                      .subtype = 3, .x = o->x, .y = o->y,
                                      .hp = 10, .level_idx = -1,
-                                     .facing = si ? 1 : -1, .custom = 2 };
+                                     .facing = si ? 1 : -1, .custom = 0 };
                     obj_phys_begin(b);
                     /* Единичный вектор к цели со скоростью 2.0 ед./кадр. */
                     int vx = (sx - o->x) / 2, vy = sy - o->y;
                     int len = (vx < 0 ? -vx : vx) + (vy < 0 ? -vy : vy);
-                    if (len < 1) len = 1;
+                    if (len < 2) len = 2;
                     b->vxq = ((s32)vx << 17) / len;
                     b->vyq = ((s32)vy << 17) / len;
                 }
@@ -2754,7 +3355,22 @@ static void ai_type26(ai_obj_t *o, u16 frame, u8 in)
  * INIT: tick_period=4, set_motion(4) → vy = +2.0 px/кадр.
  * TICK: когда счётчик КАДРОВ превысил 30 + (rand&15), выбирается новое
  * направление — по одной оси к игроку, по другой случайно из таблицы
- * пресетов DS:0x1348 — и счётчик сбрасывается. */
+ * пресетов DS:0x1348 — и счётчик сбрасывается.
+ *
+ * ПОСЛЕ выбора новой скорости оригинал ДВАЖДЫ (по X и по Y) зовёт хелпер
+ * cs:0x1348:0x09EC (file 0x1566C) с (self.pos, self.v, view_lo, view_hi):
+ * если движение унесло бы объект за край ТЕКУЩЕГО ВИДИМОГО экрана —
+ * компонента скорости отражается (меняет знак). Раньше это не было
+ * перенесено: лаз мог свободно улетать к краю уровня, не отражаясь от
+ * рамки камеры. view_top в порту берётся из ai_render (кадром позже, чем
+ * view_left из ai_check_triggers, — не критично при скролле в единицы
+ * px/кадр). */
+static int t25_reflect(int pos, int v, int lo, int hi)
+{
+    if (v > 0) return (pos + v > hi) ? -v : v;
+    return (pos + v < lo) ? -v : v;
+}
+
 static void ai_type25(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -2783,6 +3399,14 @@ static void ai_type25(ai_obj_t *o, u16 frame, u8 in)
         if (hi && vi) { o->vxq = (hi == 1 ? Q_1_5 : -Q_1_5);
                         o->vyq = (vi == 1 ? Q_1_5 : -Q_1_5); }
         else          { o->vxq = VX[hi]; o->vyq = VY[vi]; }
+        {
+            int vlo = g_camera_left / 2, vhi = (g_camera_left + VIEW_W) / 2;
+            int tlo = g_camera_top,       thi = g_camera_top + VIEW_H;
+            int nvx = t25_reflect(obj_units(o), (int)(o->vxq >> 16), vlo, vhi);
+            int nvy = t25_reflect(o->y,          (int)(o->vyq >> 16), tlo, thi);
+            o->vxq = ((s32)nvx << 16) | (o->vxq & 0xFFFF);
+            o->vyq = ((s32)nvy << 16) | (o->vyq & 0xFFFF);
+        }
         o->st_ctr = 0;
     }
     o->pending_state = (o->vxq > 0) ? 1 : 0;
@@ -2840,9 +3464,20 @@ static void ai_type27(ai_obj_t *o, u16 frame, u8 in)
 }
 
 /* ── Тип 28 — наземный стрелок (handler cs:0x1348:0x197C, file 0x165FC) ─
- * INIT: tick_period=4, направление к игроку, vx = ±0.5 ед./кадр.
- * TICK: разворот с гистерезисом 10..17 ед., один горизонтальный
- * огненный шар (2.0 ед./кадр) после 75 кадров жизни — однократно. */
+ * Полностью самодостаточный листинг (retf на file 0x16799, до следующего
+ * обработчика в сегменте), проверен побайтово целиком.
+ * INIT/THINK слиты (state1 проваливается в state2 без jmp): tick_period=4,
+ * направление к игроку, vx = ±0.5 ед./кадр (итоговое присвоение на file
+ * 0x16716 — более ранняя запись vx=±1.0 на file 0x16697 тут же
+ * перезаписывается и ни на что не влияет). Разворот с гистерезисом
+ * 10..17 ед. (rng&7) — байт-верно как было.
+ * Выстрел (file 0x1675D, `call 0x11d6:0x139` — общий spawn_projectile):
+ * однократно (phase(+0xED)==0), когда frame_ctr(+0xC7) > 75; ГОРИЗОНТАЛЬНЫЙ
+ * (аргумент «flatten Y»=1 обнуляет dy) снаряд в (self.x, self.y+7) со
+ * скоростью 2.0 ед./кадр к игроку. Спаунер сам выбирает kind ребёнка по
+ * итоговому знаку vx (5=влево/6=вправо, file 0x1373E) — здесь не влияет на
+ * поведение (ai_enemy_shot берёт спрайт по vxq, не по kind), но передаём
+ * направленно для точности. */
 static void ai_type28(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -2858,17 +3493,29 @@ static void ai_type28(ai_obj_t *o, u16 frame, u8 in)
     else             { if ((int)(rng_next() & 7) + 10 < sdx) o->st_phase = 1; }
     o->vxq = o->st_phase ? Q_0_5 : -Q_0_5;
     if (!o->st_misc && o->st_ctr > 75) {
-        spawn_enemy_shot(o->x, o->y + 7, o->st_phase, Q_2_0, 5);
+        spawn_enemy_shot(o->x, o->y + 7, o->st_phase, Q_2_0, o->st_phase ? 6 : 5);
         o->st_misc = 1;
     }
     o->pending_state = o->st_phase;
 }
 
 /* ── Тип 48 — турель (handler cs:0x170C:0x18C, file 0x18A4C) ───────────
- * Неподвижна. INIT: tick_period=4, стартовый кадр анимации из rand.
+ * Полностью самодостаточный листинг (retf на file 0x18C0B), проверен
+ * побайтово целиком. Неподвижна. INIT: tick_period=4, стартовый кадр
+ * анимации из rand (state1 проваливается в state2 без jmp, как у типа 28).
+ * КАЖДЫЙ тик (независимо от фазы!) на file 0x18B2E/0x18B3E пересчитывается
+ * box0.hitflag = (|player.x−self.x| < 120) — турель УЯЗВИМА только вблизи
+ * игрока и НЕУЯЗВИМА издали; этого не было в порту (ai.c ниже добавляет
+ * o->custom как эквивалент hitflag, зарегистрированный в is_damageable_obj).
  * TICK: фаза 0 — взвести таймер (rand & 0x5F), фаза 1 — ждать 250
  * кадров (сброс при переходе игрока на другую сторону), фаза 2 —
- * горизонтальный шар 1.5 ед./кадр и снова в фазу 0. */
+ * горизонтальный (flatten-Y, как у типа 13/28) шар 1.5 ед./кадр в
+ * (self.x, self.y−5) со скоростью к игроку по X (file 0x18BD3, общий
+ * spawn_projectile cs:0x11D6:0x139) и снова в фазу 0.
+ * Смерть (state4, file 0x18BEE): add_score(0x1000) + локальный спаунер
+ * обломков (cs:0x170C:0xA1, не декомпилирован до конца) вместо общего
+ * die_puff() — визуальный эффект не портирован по видимому эффекту,
+ * как и весь каркас состояний 4/5/6 (см. DECOMPILATION.md §9). */
 static void ai_type48(ai_obj_t *o, u16 frame, u8 in)
 {
     (void)frame; (void)in;
@@ -2877,10 +3524,13 @@ static void ai_type48(ai_obj_t *o, u16 frame, u8 in)
         u16 r = (u16)(rng_next() & 3);
         o->frame_index = (u8)(r <= 2 ? 2 : (rng_next() & 3));
         o->st_misc = 0;
+        o->custom  = 0;                       /* box0.hitflag, по умолч. неуязвим */
         return;
     }
     int sdx = player_units() - obj_units(o);
     int facing = sdx > 0;
+    int adx = sdx < 0 ? -sdx : sdx;
+    o->custom = (adx < 120) ? 1 : 0;          /* уязвим только вблизи игрока */
     int si = o->st_misc;
     o->st_misc |= 1;
     switch (si) {
@@ -2907,132 +3557,130 @@ static void ai_stub(ai_obj_t *o, u16 frame, u8 karnov_input)
 
 /* ═══ Обработчики типов 4..57 (порт по псевдокоду ai_scripts.cpp) ═══════
  *
- * У декомпиляции байт-верны INIT-константы (sprite_id, sub_timer_max,
- * скорости, число сегментов); TICK-логика многих типов в KARNOV.EXE не
- * декомпилирована — там поведение реализовано «по семантике» (chaser /
- * patrol / flyer / projectile) и помечено TODO. */
+ * Все 58 типов индивидуально декомпилированы и сверены с KARNOV.EXE
+ * (2026-09 review) — байт-верны и INIT, и TICK. Настоящих «по семантике»
+ * заглушек не осталось; открытых вопросов — три, каждый с точным
+ * инлайн-комментарием на месте:
+ *   - тип 21 (и 30/50): рантайм-мутация тайловой карты коллизий, которую
+ *     делает INIT/state4/6 — не портирована, нет инфраструктуры записи
+ *     tile-attr из ai.c (см. комментарий «Повторная декомпиляция TICK по
+ *     типам» перед ai_type21 выше);
+ *   - тип 34: кривая «волны» тела (snake-follow) не до конца
+ *     раздекомпилирована — портирован только подтверждённый порог
+ *     активации (см. комментарий перед case 34 и case type==34 ниже);
+ *   - тип 36 (Рю, финальный босс): 2026-09 повторный проход ЗАКРЫЛ оба
+ *     старых вопроса (что ставит misc=2 → только собственный state4;
+ *     триггер конца боя → у Рю его нет вообще, см. подробный разбор
+ *     перед ai_ryu) исчерпывающим сканом всего EXE. ОСТАЮЩЕЕСЯ, по той
+ *     же причине, что и тип 21 выше: тайл-стемпинг тела Рю в геометрию
+ *     уровня (cs:0xD4B:0x2DB) не портирован — нужна per-cell tile-attr
+ *     инфраструктура, которой в level.c сейчас нет (там attr per-графике
+ *     тайла, не per-клетке карты). ОТДЕЛЬНО, вне типа 36: в LEVEL9.BIN
+ *     запись Рю (rec[2]) целиком нулевая (cur/range/spawn/trigger=0) —
+ *     точно как у type-8 sky-цепи — и, В ОТЛИЧИЕ от sky-цепи (у которой
+ *     есть выделенный драйвер вне AI-диспетчера, ai_sky_tick), в порту
+ *     СЕЙЧАС НЕТ никакого специального спаунера для типа 36: Ryu никогда
+ *     не создаётся ни в одном уровне (проверено `KARNOV_DBG_SPAWN=1` —
+ *     type=36 не встречается). Настоящий код-спаунер Рю в KARNOV.EXE НЕ
+ *     найден (в отличие от sky-цепи, чей драйвер известен) — это отдельная
+ *     задача уровня «найти и подключить спаунер», не относящаяся к
+ *     обработчику типа 36 самому по себе. */
 
 /* Табличное описание «простых» типов: базовый спрайт (индекс каталога
- * SPRITES.EGA = ENEMY_GUIDE), число кадров, стрида анимации (сдвиг),
- * скорость (px/frame, мир ×2), вид поведения. */
+ * SPRITES.EGA = ENEMY_GUIDE) и число кадров. Используется ТОЛЬКО как
+ * sprite_for_type() cache-miss fallback (когда для типа нет ни манифеста
+ * ai_type, ни явного case) — реальная TICK-логика этих типов давно
+ * перенесена в отдельные обработчики (ai_typeN выше), таблица описания
+ * поведения (SK_*: chaser/patrol/flyer) удалена как мёртвый код
+ * (2026-09 cleanup): поле нигде не читалось. */
 typedef struct simple_ai {
     u16 base;       /* базовый sprite id (0 = нет спрайта → placeholder) */
     u8  nframes;
-    u8  shift;      /* anim stride = frame >> shift */
-    u8  speed;      /* px/frame по X */
-    u8  kind;       /* SK_* */
 } simple_ai_t;
 
-enum { SK_NONE = 0, SK_CHASER, SK_PATROL, SK_FLYER };
-
-/* index = primary type (только типы, покрываемые generic-обработчиком).
- * sub_timer_max из INIT (ai_scripts.cpp) переведён в shift стриды. */
+/* index = primary type (только типы без записи в манифесте ai_type). */
 static const simple_ai_t SIMPLE_AI[58] = {
-    /* type12: наземный патруль, vx=±3 file (INIT 0x13E3C), HP=20.
-     * Спрайты в EGA-каталоге не помечены (категория 0) — временно
-     * визуал type 11 (зелёный стражник). TODO: настоящий спрайт. */
-    [12] = { 76, 10, 2, 2, SK_CHASER },
-    [22] = { 181, 4, 3, 2, SK_PATROL },   /* tile-aware (0xB5..B8) */
-    [25] = { 189, 4, 3, 0, SK_NONE   },   /* PRNG-lurker — спец-tick ниже */
-    [26] = { 193, 8, 1, 3, SK_CHASER },   /* быстрый воин, sub_timer_max=2 */
-    [28] = { 207, 4, 2, 2, SK_CHASER },   /* FX-spawn (0xCF..D2) */
-    [29] = { 211, 7, 3, 1, SK_CHASER },   /* multi-phase, sub_timer_max=8 */
-    [31] = { 219, 3, 2, 2, SK_CHASER },   /* spawn 0xDD */
-    [32] = { 222, 8, 2, 2, SK_CHASER },   /* spawn 0xDE (близнец 31) */
-    [35] = { 239, 6, 2, 1, SK_PATROL },   /* dual-mode: агрессия по init_arg>10 */
-    [37] = { 251, 3, 3, 1, SK_CHASER },   /* slow boss, sub_timer_max=7 */
-    [38] = { 254, 5, 3, 2, SK_CHASER },   /* delayed 75 кадров (state_ext=75) */
-    [40] = { 263, 4, 1, 2, SK_CHASER },   /* self-init, sub_timer_max=2 */
-    [43] = { 275, 9, 2, 2, SK_CHASER },   /* flash enemy (9 кадров) */
-    [46] = { 292, 4, 3, 1, SK_CHASER },   /* extended 0x124, sub_timer_max=9 */
-    [48] = { 298, 6, 2, 2, SK_CHASER },   /* extended 0x12B */
-    [52] = { 309, 9, 2, 1, SK_PATROL },   /* Y-align 10 */
-    [53] = { 318, 2, 2, 1, SK_CHASER },   /* простой шаблон */
-    [54] = { 320, 2, 2, 2, SK_CHASER },   /* extended 0x140 */
-    [55] = { 322, 7, 2, 2, SK_CHASER },   /* хелпер финального босса 0x142 */
+    /* type12: «скачущий валун» (ai_type12). Реальный state_list DS:0x18F4
+     * (ANIM_LISTS[12]/ST_12 в anim_data.c) уже даёт байт-верные спрайты
+     * #21/22/23 (общие sprite id — те же камни, что у TYPE_ROCK_PROJECTILE);
+     * эта запись — лишь подстраховка на случай, если рендер вызовет
+     * sprite_for_type() ДО первого anim_apply(). */
+    [12] = { 21, 3 },
+    [22] = { 181, 4 },   /* tile-aware (0xB5..B8) */
+    [25] = { 189, 4 },   /* PRNG-lurker — спец-tick ниже */
+    [26] = { 193, 8 },   /* быстрый воин, sub_timer_max=2 */
+    [28] = { 207, 4 },   /* FX-spawn (0xCF..D2) */
+    [29] = { 211, 7 },   /* multi-phase, sub_timer_max=8 */
+    [31] = { 219, 3 },   /* spawn 0xDD */
+    [32] = { 222, 8 },   /* spawn 0xDE (близнец 31) */
+    [35] = { 239, 6 },   /* dual-mode: агрессия по init_arg>10 */
+    [37] = { 251, 3 },   /* slow boss, sub_timer_max=7 */
+    [38] = { 254, 5 },   /* delayed 75 кадров (state_ext=75) */
+    [40] = { 263, 4 },   /* self-init, sub_timer_max=2 */
+    [43] = { 275, 9 },   /* flash enemy (9 кадров) */
+    [46] = { 292, 4 },   /* extended 0x124, sub_timer_max=9 */
+    [48] = { 298, 6 },   /* extended 0x12B */
+    [52] = { 309, 9 },   /* Y-align 10 */
+    [53] = { 318, 2 },   /* простой шаблон */
+    [54] = { 320, 2 },   /* extended 0x140 */
+    [55] = { 322, 7 },   /* хелпер финального босса 0x142 */
 };
 
 
-/* ─── Sky-spawner (тип 8) ──────────────────────────────────────────────
- * Драйвер cs:0xFFA:0x1615 (file 0x12DB5), работает ВНЕ объектной системы:
- *   — если игрок продвинулся на ≥ 0x32 единиц (= 100 px) с последней
- *     отметки (DS:0xD8A0): убить цепь летунов, сбросить отметку и счётчик;
- *   — иначе счётчик простоя (DS:0xD8A4) растёт; при > 0x186 (390 кадров)
- *     и пустой цепи — спаун (rand&1)+1 летунов.
- * Цепь убивается также при спауне любого scripted-врага subtype 1/7
- * (jump-table в check_triggers @ file 0x5155 → helper file 0x12CFE).
- * Точка рождения летуна — из creator (ai_type08, file 0x12B3F):
- *   x = player.x + (rand & 0x3F) − 10 (file-ед. → мир ×2),
- *   y = player.y − 100 − (rand & 0x3F). */
+/* ─── Настоящая sky-цепь (тип 8, падающий лёд) ──────────────────────────
+ * Байт-точный порт driver cs:0xFFA:0x1615 (file 0x12DB5), работает ВНЕ
+ * объектной системы:
+ *   si = player.x_world − [0xD8A0] (движковые единицы, 1 = 2px);
+ *   если si > 0x32 (продвинулись больше 50 ед. = 100px с последней
+ *     отметки) — обойти цепь от головы [0xD880/0xD882] по +0xF1/+0xF3,
+ *     каждому узлу state_byte(+0xB6) = 4 (kill-хелпер cs:0xFFA:0x155E,
+ *     file 0x12CFE), затем [0xD8A0] = player.x, [0xD8A4] = 0;
+ *   иначе ++[0xD8A4] (простой), КРОМЕ [0xD8CE] (player_state) == 3;
+ *   когда [0xD8A4] > 0x186 (390 кадров) И цепь пуста ([0xD880] == 0) —
+ *     n = (rand&1)+1, спаунер cs:0xFFA:0x1585 создаёт n объектов типа 8
+ *     (handler cs:0xFFA:0x139F = ai_type08, сам расставляет себя
+ *     относительно игрока), связывает их в список, [0xD8A0] = player.x,
+ *     [0xD8A4] = 0.
+ * Цепь убивается ТАКЖЕ при спауне любого scripted-врага subtype 1/7
+ * (jump-table в check_triggers @ file 0x5155 → тот же helper 0x12CFE) —
+ * см. ai_check_triggers ниже.
+ * НЕ ПОРТИРОВАНО: gate «cmp [0xD8CE],3; jz» — простой не должен расти,
+ * пока player_state == 3 (в порту нет переменной с такой нумерацией
+ * состояний игрока); эффект минимален — счётчик тикает на 1-2 кадра
+ * больше в редком состоянии игрока.
+ *
+ * ИСПРАВЛЕНО (code-review PSEUDO-TYPES 2026-09): этот байт-точный
+ * алгоритм (kill-on-progress + простой 390 кадров) раньше по ошибке был
+ * навешан на TYPE_FLYING_BIRD (декоративную «птичью стаю», с тех пор
+ * убранную целиком — см. 2026-09-13), а настоящий лёд (тип 8) спаунился
+ * отдельным счётчиком БЕЗ сброса по
+ * продвижению игрока — то есть лёд шёл раз в 390 кадров ВСЕГДА, даже
+ * пока игрок бежит вперёд не останавливаясь, чего в оригинале не
+ * бывает (лёд идёт, только когда игрок топчется на месте). Заодно
+ * check_triggers (line ~4494) убивал ПТИЦ вместо льда при спауне
+ * scripted-врага subtype 1/7 — тоже перепутанные цепи, тоже исправлено. */
 #define SKY_IDLE_FRAMES     390     /* 0x186 */
 #define SKY_PROGRESS_UNITS  50      /* 0x32 (= 100 px) */
 
-static void ai_kill_sky_chain(void)
+static void ai_kill_ice_chain(void)
 {
     for (int i = 0; i < g_num; ++i)
-        if (g_obj[i].alive && g_obj[i].type == TYPE_FLYING_BIRD)
+        if (g_obj[i].alive && g_obj[i].type == 8)
             g_obj[i].alive = false;
 }
 
-static bool sky_chain_alive(void)
-{
-    for (int i = 0; i < g_num; ++i)
-        if (g_obj[i].alive && g_obj[i].type == TYPE_FLYING_BIRD) return true;
-    return false;
-}
-
-static void spawn_sky_bird(u16 frame, int idx)
-{
-    int kx = physics_get_left_x(), ky = physics_get_top_y();
-    int bx = kx + 2 * ((int)(rng_next() & 0x3F) - 10);
-    int by = ky - 100 - (int)(rng_next() & 0x3F);
-    if (by < 16) by = 16;
-    int slot = alloc_obj_slot();
-    if (slot < 0) return;
-    if (getenv("KARNOV_DBG_SPAWN"))
-        fprintf(stderr, "sky-spawn: bird slot=%d at (%d,%d) player=(%d,%d)\n",
-                slot, bx, by, kx, ky);
-    g_obj[slot] = (ai_obj_t){
-        .alive       = true,
-        .type        = TYPE_FLYING_BIRD,
-        .subtype     = 1,
-        .x           = bx, .y = by,
-        .facing      = (bx > kx) ? -1 : 1,
-        .hp          = 10,
-        .level_idx   = -1,
-        .home_x      = bx, .home_y = by,
-        .custom      = idx,               /* противофаза для пары */
-        .spawn_x     = (u16)bx, .spawn_y = (u16)by,
-        .spawn_frame = frame,
-    };
-}
-
-static void ai_sky_tick(u16 frame)
+static void ai_ice_chain_tick(u16 frame)
 {
     if (!s_sky_enabled) return;
-    int px = physics_get_left_x() / 2;
-    if (px - s_sky_last_x_units >= SKY_PROGRESS_UNITS) {
-        ai_kill_sky_chain();
-        s_sky_last_x_units = px;
-        s_sky_idle = 0;
+    int px = player_units();
+    if (px - s_ice_last_x_units >= SKY_PROGRESS_UNITS) {
+        ai_kill_ice_chain();
+        s_ice_last_x_units = px;
+        s_ice_ctr = 0;
         return;
     }
-    ++s_sky_idle;
-    if (s_sky_idle > SKY_IDLE_FRAMES && !sky_chain_alive()) {
-        int n = (int)(rng_next() & 1) + 1;
-        for (int i = 0; i < n; ++i) spawn_sky_bird(frame, i);
-        s_sky_idle = 0;
-    }
-
-    /* Настоящая sky-цепь (драйвер cs:0xFFA:0x163D): счётчик [0xD8A4]
-     * растёт каждый кадр, КРОМЕ player_state == 3; когда он перевалил
-     * 0x186 = 390 кадров и живой цепи нет ([0xD880] пуст), спаунер
-     * cs:0xFFA:0x1585 создаёт (rand & 1) + 1 объектов типа 8 и связывает
-     * их в цепочку. Тип 8 — это падающие ЛЬДИНКИ (кадры #72..74, всплеск
-     * #75), а не орлы: орлы (#147/148) остаются отдельной механикой
-     * начала LEVEL1 выше. */
     ++s_ice_ctr;
-    if (s_ice_ctr > 0x186) {
+    if (s_ice_ctr > SKY_IDLE_FRAMES) {
         bool chain_alive = false;
         for (int i = 0; i < g_num; ++i)
             if (g_obj[i].alive && g_obj[i].type == 8) { chain_alive = true; break; }
@@ -3046,9 +3694,21 @@ static void ai_sky_tick(u16 frame)
                     .level_idx = -1, .facing = 1, .spawn_frame = frame,
                 };
             }
+            s_ice_last_x_units = px;
+            s_ice_ctr = 0;
         }
-        s_ice_ctr = 0;
     }
+}
+
+/* Птичья стая (TYPE_FLYING_BIRD/ai_bird_flock_tick) УБРАНА (2026-09-13, по
+ * прямому указанию): это была явно подписанная «ЧИСТАЯ СИНТЕТИКА ПОРТА» —
+ * в оригинале НЕТ периодического «вылета птиц», driver cs:0xFFA:0x1615
+ * управляет ТОЛЬКО настоящей ледяной цепью (тип 8, ai_ice_chain_tick ниже).
+ * ai_sky_tick теперь — тонкая обёртка, оставлена только чтобы не менять
+ * сигнатуру вызова из ai_tick. */
+static void ai_sky_tick(u16 frame)
+{
+    ai_ice_chain_tick(frame);
 }
 
 /* Types 4 и 6 — предмет, лежащий в мире (ai_type04/ai_type06).
@@ -3099,14 +3759,185 @@ static void ai_world_item(ai_obj_t *o, u16 frame, u8 karnov_input)
  *         box[si].y_offset = si * 0x14        ; ← шаг 20 строк вниз
  *         box[si].sprite   = si ? 0xAF(175) : 0xAD(173)   ; голова + тела
  *     }
- *     obj.hit_points = 0xFA (250)
  *
  * Т.е. это неподвижный СТОЛБ из голов, растущий ВНИЗ от y_world до пола:
  * LEVEL2 записи (spawn_y=210, init_arg=5) дают 210 + 5*20 = 310 = ровно
  * уровень земли. Прежняя реализация раскладывала сегменты ГОРИЗОНТАЛЬНО
  * (dx = −16) и заставляла их ползти за игроком — отсюда «головы висят
- * в небе» вместо колонн. Реконструкция «змеи» была ошибкой: в
- * декомпиляции TICK (state 2) — пустой `return`, объект статичен. */
+ * в небе» вместо колонн. Реконструкция «змеи» была ошибкой.
+ *
+ * ИСПРАВЛЕНО (повторная декомпиляция 2026-09): TICK (state 2, file
+ * 0x15429..0x155FA) НЕ пустой — предыдущее утверждение «объект статичен»
+ * было ошибкой чтения таблицы состояний (спутал границу state2/state5).
+ * Каждый тик:
+ *   1. hit_points = 0xFA (250) — принудительно, КАЖДЫЙ тик (file 0x15429),
+ *      а не один раз в INIT. Эффективно колонна НЕУЯЗВИМА: урон,
+ *      нанесённый между вызовами THINK, стирается раньше, чем успевает
+ *      накопиться до 0 (250 HP против ~10 урона одного файербола).
+ *   2. misc(+0xE9, начальное 0) — таймер перезарядки, декрементируется
+ *      к 0 (file 0x15484).
+ *   3. box0.sprite приводится к 0xAD(173) каждый тик, если он был ≠0
+ *      (file 0x1548F) — так «поза выстрела» 0xAE(174), выставленная в
+ *      предыдущем тике, держится ровно 1 тик и гаснет обратно в голову.
+ *   4. Хелпер cs:0x6E:0x7FC (= cs:0x6E:0x7A5 на каждый bbox, ТОТ ЖЕ,
+ *      что уже опознан и портирован для типа 23 — см. ai_type23) — «хотя
+ *      бы один bbox виден в окне камеры»; если нет — выстрела не будет
+ *      в этот тик.
+ *   5. Если виден И misc==0: play_sound(2), box0.sprite=0xAE(174),
+ *      ДВА прицельных снаряда (spawn_projectile, kind=1) из точки box0
+ *      (голова, i=0) в (player.x−40px, player.y) и (player.x+10px,
+ *      player.y) (file 0x154A4..0x154FC); misc перезаряжается случайным
+ *      числом 150..181 тиков.
+ *
+ *      ИСПРАВЛЕНО (2026-09, скорость выстрела): spawn_projectile
+ *      (cs:0x11D6:0x139, file 0x13699) получает 8 слов
+ *      (from_x, from_y, to_x, to_y, kind, speed_lo, speed_hi, y_flag) —
+ *      здесь kind=1, y_flag=0, и, что важно, (speed_hi:speed_lo)=(4:0).
+ *      spawn_projectile форвардит from/to и (speed_hi:speed_lo) в
+ *      ОТДЕЛЬНЫЙ векторный хелпер cs:0x11D6:0x0006 (file 0x13566, near-
+ *      call `E8 2B FE` на file 0x13738 — с truncated-target ловушкой
+ *      ndisasm, см. docs/DECOMPILATION.md). Этот хелпер (НЕ obj_aim'а):
+ *        len = |to_x−from_x| + |to_y−from_y|             (Манхэттен)
+ *        if (len < 2) len = 2                             (file 0x135E2)
+ *        scale = (speed_hi:speed_lo эта пара интерпретируется как ОДНО
+ *                 32-битное Q16.16-число) / len            (file 0x135F8)
+ *        vx = (to_x−from_x) * scale;  vy = (to_y−from_y) * scale
+ *      т.е. (speed_hi:speed_lo) — это ЦЕЛЕВАЯ СКОРОСТЬ снаряда в Q16.16,
+ *      а НЕ «долететь за n тиков». Раньше здесь ошибочно стоял вызов
+ *      obj_aim(...,4) — та функция (cs:0x11D6:0x00DD, «доехать ровно за
+ *      n тиков», используется gold-ball'ами) взята не из того места и
+ *      даёт скорость, растущую с расстоянием (на большой дистанции —
+ *      мгновенное попадание). Подтверждено байт-в-байт сверкой ДВУХ
+ *      других вызывающих того же spawn_projectile→0x0006 с УЖЕ
+ *      проверенными скоростями: тип 14 (file 0x14368+0xFC4..0xFF1)
+ *      толкает `mov dx,2 / mov ax,0x2000` = 2.125 (Q_2_0+0x2000) — ровно
+ *      документированная скорость её выстрела; тип 32 (file
+ *      0x168B4+0x1CA4) толкает `mov dx,2 / xor ax,ax` = 2.0 (Q_2_0) —
+ *      ровно её документированная скорость. Для типа 20 (file
+ *      0x14C80+0x827/0x857) толкается `mov dx,4 / xor ax,ax` = 4.0
+ *      (Q_4_0) — отсюда QV(4,0) ниже. Экран (~160 ед.) снаряд при этой
+ *      скорости пересекает за ~40 тиков — правдоподобно, не мгновенно.
+ *
+ * ── Пер-сегментное разрушение (2026-09, ДОРАЗОБРАНО) ───────────────────
+ * State 5 («задели», file 0x155FC..0x15666, local 0x97C..0x9E6) —
+ * реакция на КОНТАКТ. Пары боксов собирает отдельный проход (file
+ * 0x2CB0/0x2D18): при пересечении ОБА объекта получают hit_flag(+0xDD)=1,
+ * hit_idx(+0xDF)=индекс партнёра, hit_box_self(+0xE3)=номер СВОЕГО
+ * задетого бокса (порт: не заведён отдельным полем — не требуется),
+ * hit_box_partner(+0xE1)=номер бокса партнёра. Для b.obj_type==9 (наш
+ * случай) generic pair-loop (file 0xFB68, таблица по b.obj_type, индекс 9
+ * → file 0xFBCB) ставит ТОЛЬКО b.state_byte=5 и ПОЛНОСТЬЮ ПРОПУСКАЕТ
+ * обмен hit_points (см. уже существующее исключение типа 36 в
+ * ai_check_player_hit, куда теперь добавлен и тип 20) — этот путь для
+ * колонны физически недостижим НЕЗАВИСИМО от значения hp; hp=250/тик
+ * (см. выше) — не единственная причина «неубиваемости» генериком.
+ * State5 разбирает, кто и куда задел (сравнение partner.[+0xB2] с
+ * player.[+0xB2] — идентификация «это тело Карнова»):
+ *   Карнов телом, hit_box_self==0 (голова)  → cs:0xE62:0x6FE — урон
+ *     Карнову (НЕ портирован — не про выстрелы, вне объёма задачи);
+ *     с колонной ничего.
+ *   Карнов телом, hit_box_self!=0 (тело)    → просто вернуться в THINK
+ *     (state_byte=2, ai_result|=8); эффекта нет ни для кого.
+ *   иначе (единственный другой a.obj_type, доходящий сюда, — 2 = снаряд
+ *   игрока, table t1 @0xFB3A: только a.obj_type∈{0,2} входят в этот
+ *   pair-loop) → ПОПАДАНИЕ СНАРЯДА: `push hit_box_self; call
+ *   cs:0x1348:0x638` (file 0x152B8, ЛОКАЛЬНЫЙ хелпер только для типа 20).
+ * ai_head_column_hit_box() ниже — байт-точный порт этого хелпера:
+ *   self.st_aux(+0xEB) — БИТОВОЕ ПОЛЕ, 2 бита на КАЖДЫЙ box (до 8×2=16
+ *   бит) — счётчик попаданий 0..3 персонально для box[idx].
+ *   1-й/2-й удар (счётчик 0→1, 1→2): box.sprite = 0xAF+счётчик (176/177),
+ *     НО если box.sprite СЕЙЧАС РОВНО 0xAD(173, «непрострелянная голова
+ *     покоя») — пропустить смену спрайта (file 0x15308: сравнение именно
+ *     с 0xAD, не с 0xAE «поза выстрела» — итого при попадании ровно в
+ *     кадр выстрела голова МОЖЕТ на 1 тик получить «повреждённый» спрайт
+ *     176/177 — байт-точный, а не сглаженный, квирк оригинала).
+ *   3-й удар (счётчик 2→3, МАКС): box.sprite=0 (порт: sprite==0 всюду
+ *     значит «не рисуется» — sprite_find(0) не находит ни одного
+ *     реального спрайта, см. blit_sprite_world/ai_render), коллизия
+ *     бокса тем самым тоже выключена (наш новый per-part hit-test в
+ *     ai_player_fireball пропускает parts[i].sprite==0), +400 очков
+ *     (add_score(0, BCD 0x400), file 0x1532E) — ЗА КАЖДЫЙ уничтоженный
+ *     сегмент отдельно, включая саму голову.
+ *   4-й+ удар: счётчик уже насыщен на 3, no-op (file 0x152F4: `ja` —
+ *     пропуск дальнейшей эскалации, урон впустую).
+ * Голова (box0) гасится ТЕМ ЖЕ путём после 3 попаданий; THINK уже требует
+ * `parts[0].sprite != 0`, чтобы стрелять (условие было в коде и ДО этой
+ * правки) — таким образом «ослеплённая» голова автоматически замолкает
+ * навсегда.
+ * ИСПРАВЛЕНО (2026-09, повторный разбор): предыдущий пассаж здесь
+ * утверждал, что «в байтах НЕТ кода, который двигал бы box0 или уменьшал
+ * num_bboxes» — это было ОШИБКОЙ, пропустившей вызов местного хелпера
+ * cs:0x1348:0x59E (file 0x1521E) прямо в хвосте THINK (см. ниже) — именно
+ * он и есть механика «столб укорачивается, верхние секции опускаются на
+ * место убитых».
+ *
+ * Хвост THINK (state 2, file 0x15504..0x155FA, local 0x884..0x97A) —
+ * ПОЛНОСТЬЮ передизассемблирован (ранее считался «не разобран до конца», а
+ * при повторном разборе оказалось, что первый вызов в этом хвосте —
+ * ГЛАВНАЯ пропущенная деталь). Каждый тик THINK (безусловно, до всякой
+ * проверки видимости) вызывается:
+ *   cs:0x1348:0x59E (file 0x1521E, `ai_head_column_settle()` ниже) —
+ *     РЕКУРСИВНАЯ просадка секций: box[idx].dy стремится к target_y,
+ *     сдвигаясь не быстрее 6 px/тик; «низ» box — top+20, либо просто
+ *     top, если box.sprite==0 (мёртвый box не имеет объёма для расчёта
+ *     низа — из-за этого его dy утягивается на лишние 20px вниз, «сквозь
+ *     пол» стопки). Затем РЕКУРСИЯ на idx-1 (секция ВЫШЕ, ближе к голове)
+ *     с заданием встать своим низом ровно на новый верх box[idx] —
+ *     БЕЗ зазора. Вызывается изначально с idx=num_bboxes-1 (нижний слот,
+ *     ВСЕГДА фиксированный, не «последний живой»), target_y=y_world+
+ *     num_bboxes*20 (file 0x15531: cs:0x1348:0x8B1). Итог: убитый сегмент
+ *     проваливается на свою высоту НИЖЕ штатного места (визуально скрыт —
+ *     sprite==0), а ВСЕ секции над ним, включая саму голову (idx==0),
+ *     плавно (по 6px/тик) опускаются на 20px, закрывая брешь — байт-точно
+ *     то самое «столб укорачивается снизу, верхние секции спускаются на
+ *     место убитых», о котором сообщил игрок. num_bboxes при этом НЕ
+ *     уменьшается (dead box просто держит нулевой sprite и «утонувший»
+ *     dy) — умозаключение прежнего пассажа о «(dx,dy) фиксированы навсегда»
+ *     было неверным именно в части dy; dx действительно не меняется.
+ *   cs:0xD4B:0x2AC (file 0xEF5C) — сумма box[i].flag(+0x2E) по всем
+ *     боксам; результат сравнивается со снимком в self.phase(+0xED).
+ *   если снимок сменился, ИЛИ была просадка в этот тик (флаг из 0x59E),
+ *     ИЛИ self.aux(+0xEF)!=0 — вызываются cs:0x6E:0x59A (file 0x247A,
+ *     пересчёт экранных box.x0..y1 из x_world/y_world+dx/dy и таблиц
+ *     метрик спрайта DS:0x0D08/0x0FAC — порту не нужен: рендер и
+ *     хит-тест и так читают dx/dy живьём каждый кадр, см.
+ *     blit_sprite_world/ai_player_fireball) и cs:0xD4B:0x2DB (file
+ *     0xEF8B) — функция с ДВОЙНЫМ вложенным циклом по строкам/колонкам
+ *     карты вокруг нижнего сегмента, которая зовёт тайловые хелперы
+ *     (0xECEE/0xECB3) — судя по сигнатуре (запись в массив карты, не в
+ *     объект), это ШТАМПОВКА ТВЁРДОГО ГРУНТА под текущим основанием
+ *     колонны (перепривязка декорации карты к новой высоте столба). Не
+ *     портировано: порт получает геометрию уровня статически из
+ *     LEVELn.BIN; сама видимая просадка сегментов (главная жалоба)
+ *     портирована через ai_head_column_settle() ниже и от тайловой
+ *     штамповки не зависит — реального расхождения без неё не обнаружено.
+ * «Видимость на экране» в порту — только по горизонтали (g_camera_left/
+ * VIEW_W), как и у типа 23: вертикальная позиция камеры в ai.c не
+ * отслеживается (защита порта). */
+/* Каскадная просадка секций колонны (cs:0x1348:0x59E, file 0x1521E) — см.
+ * разбор в комментарии к ai_head_column выше. Рекурсия идёт от нижнего
+ * фиксированного слота (idx=num_parts-1) к голове (idx=0): box[idx]
+ * стремится своим низом (top+20, либо просто top, если box.sprite==0 —
+ * «мёртвый» box без объёма) достичь target_y не быстрее чем на 6 px/тик;
+ * затем box[idx-1] получает задание встать своим низом ровно на новый верх
+ * box[idx] — без зазора. Возврат — «было ли движение» (self.aux(+0xEF) в
+ * оригинале); порт эту булеву развязку не использует (тайловая штамповка
+ * cs:0xD4B:0x2DB не портирована), но сохраняет байт-точную рекурсию. */
+static bool ai_head_column_settle(ai_obj_t *o, int idx, int target_y)
+{
+    if (idx < 0) return false;
+    int top = o->y + o->parts[idx].dy;
+    int bottom = top + (o->parts[idx].sprite != 0 ? 20 : 0);
+    int diff = target_y - bottom;
+    if (diff >= 6) diff = 6;               /* file 0x15200: клэмп максимум 6 px/тик */
+    if (diff != 0) {
+        o->parts[idx].dy = (s16)(o->parts[idx].dy + diff);
+        ai_head_column_settle(o, idx - 1, top + diff);
+        return true;
+    }
+    return ai_head_column_settle(o, idx - 1, top);
+}
+
 static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
@@ -3122,10 +3953,81 @@ static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
             o->parts[i].dx = 0;
             o->parts[i].dy = (s16)(i * 20);           /* 0x14 строк вниз */
         }
+        o->st_misc = 0;                               /* +0xE9: таймер готов сразу */
     }
+    o->hp = 250;                                       /* file 0x15429: каждый тик */
     o->anim_phase = (frame >> 3) & 1;
+
+    if (o->st_misc > 0) --o->st_misc;
+    if (o->parts[0].sprite != 0) o->parts[0].sprite = 173;   /* поза выстрела гаснет */
+
+    bool visible = (o->x + 16 > g_camera_left) && (o->x < g_camera_left + VIEW_W);
+    if (visible && o->parts[0].sprite != 0 && o->st_misc == 0) {
+        int sx = o->x + o->parts[0].dx, sy = o->y + o->parts[0].dy;
+        int py = physics_get_top_y();
+        int targets_x[2] = { physics_get_left_x() - 40, physics_get_left_x() + 10 };
+        o->parts[0].sprite = 174;
+        for (int k = 0; k < 2; ++k) {
+            int slot = alloc_obj_slot();
+            if (slot < 0) continue;
+            ai_obj_t *b = &g_obj[slot];
+            *b = (ai_obj_t){ .alive = true, .type = TYPE_ENEMY_SHOT, .subtype = 3,
+                              .x = sx, .y = sy, .hp = 10, .level_idx = -1,
+                              .facing = (targets_x[k] >= sx) ? 1 : -1, .custom = 1 };
+            obj_phys_begin(b);
+            /* Манхэттен-нормированный вектор × ФИКСИРОВАННАЯ скорость 4.0
+             * (cs:0x11D6:0x0006, см. комментарий к обработчику выше) —
+             * НЕ obj_aim(). vxq интегрируется в «движковых» X-единицах
+             * (1 ед.=2px, obj_integrate потом удваивает — см. её комментарий
+             * и obj_phys_begin), а vyq — в пикселях 1:1 (Y не удваивается).
+             * Поэтому tx делится на 2 (как player_units()/obj_units() у
+             * типов 14/32), а ty — нет. targets_x[]/sx уже в реальных
+             * пикселях порта (±40/±10 px = байт-точные ±20/±5 «родных»
+             * x_world-единиц ×2), так что деление на 2 здесь и даёт ту же
+             * величину, что в оригинале вычисляется напрямую в x_world. */
+            {
+                int tx = (targets_x[k] - sx) / 2, ty = py - sy;
+                int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
+                if (len < 2) len = 2;           /* file 0x135E2: клэмп минимум 2 */
+                b->vxq = ((s32)tx * Q_4_0) / len;
+                b->vyq = ((s32)ty * Q_4_0) / len;
+            }
+        }
+        o->st_misc = 150 + (int)(rng_next() & 31);     /* 150..181 тиков */
+    }
+
+    /* file 0x15531: вызывается КАЖДЫЙ тик, безусловно (до/после проверки
+     * видимости не важно — сама функция видимость не проверяет). */
+    ai_head_column_settle(o, o->num_parts - 1, o->y + o->num_parts * 20);
 }
 
+/* Пер-сегментный урон колонны голов (cs:0x1348:0x638, file 0x152B8) — см.
+ * подробный разбор state5 в комментарии к ai_head_column выше. Вызывается
+ * из ai_player_fireball при попадании снаряда В КОНКРЕТНЫЙ box (не через
+ * общий hp-пул — тот для obj_type==9 генериком вообще не задействуется). */
+static void ai_head_column_hit_box(ai_obj_t *o, int idx)
+{
+    if (idx < 0 || idx >= o->num_parts) return;
+    int shift = idx * 2;
+    int cnt = (o->st_aux >> shift) & 3;      /* self.st_aux(+0xEB): 2 бита/box */
+    if (cnt >= 3) return;                    /* file 0x152F4: уже разрушен — no-op */
+    ++cnt;
+    if (cnt < 3) {
+        /* file 0x15308: сравнение именно с 0xAD(173) — «непрострелянная
+         * голова покоя» без промежуточных «повреждённых» кадров; если
+         * попадание пришлось на тик firing-pose (174), эта проверка НЕ
+         * защищает — байт-точный квирк оригинала, не сглаживаем. */
+        if (o->parts[idx].sprite != 173)
+            o->parts[idx].sprite = (u16)(0xAF + cnt);   /* 1-й/2-й удар: 176/177 */
+    } else {
+        o->parts[idx].sprite = 0;    /* 3-й удар: сегмент уничтожен — невидим/
+                                       * небьющийся (sprite==0 всюду в порту
+                                       * значит «нет спрайта», см. sprite_find) */
+        g_score += 400;              /* file 0x1532E: add_score(0, BCD 0x400) —
+                                       * за КАЖДЫЙ уничтоженный сегмент отдельно */
+    }
+    o->st_aux = (int)((o->st_aux & ~(3 << shift)) | (cnt << shift));
+}
 
 /* ─── Тип 24 — «ЗОЛОТОЙ ЧЕЛОВЕК» и его шары ────────────────────────────
  *
@@ -3321,11 +4223,10 @@ static void ai_gold_man(ai_obj_t *o, u16 frame, u8 karnov_input)
  * type 50 шаг 24 ед. = 48 px = ширина спрайта 308; у type 39 шаг
  * 8 ед. = 16 px = ширина спрайта 259.
  *
- * TICK этих типов в оригинале богаче (у 33 — «схлопывание» сегментов,
- * у 50 — триггер по позиции игрока, у 34 — ожидание игрока в 100 px),
- * и пока не портирован: объекты статичны. Прежняя «волна» сегментов
- * была изобретением порта и к тому же интегрировала собственное dy,
- * из-за чего тело уползало за экран.
+ * TICK этих типов ПЕРЕДЕКОМПИЛИРОВАН (2026-09, по запросу code-review
+ * MULTIPART/STATIC группы). Итог по каждому типу — см. комментарий перед
+ * ai_multipart(). Прежняя «волна» сегментов была изобретением порта и к
+ * тому же интегрировала собственное dy, из-за чего тело уползало за экран.
  */
 typedef struct { u16 sprite; s16 dx, dy; } part_def_t;
 
@@ -3376,41 +4277,274 @@ static void parts_apply(ai_obj_t *o, const part_def_t *defs, int n)
     o->facing = 1;
 }
 
+/* ── Повторная декомпиляция TICK по типам (2026-09) ─────────────────────
+ *
+ * Тип 21 (handler cs:0x1348:0x1153, file 0x15DD3): state2 (THINK) —
+ * ДЕЙСТВИТЕЛЬНО пустой переход на epilogue (file 0x15EF9), без единого
+ * ai_result-бита — прежнее «объект статичен» ПОДТВЕРЖДЕНО. INIT
+ * дополнительно впечатывает силуэт колонны в тайловую сетку коллизий
+ * (6 вызовов cs:0xD4B:0x0003(col,row,val=3), file 0x15F14..0x15F3B),
+ * state4/6 (ОБЩИЙ код, file 0x15EF6) снимает её обратно (val=2) — NOT
+ * PORTED (нужна запись в level-tile-attr из ai.c, инфраструктуры для
+ * рантайм-мутации тайлов пока нет; та же проблема у типов 30/50 ниже).
+ * ПОРТИРОВАНО: state5 (file 0x15ED4) — косметика, hit_points<50 →
+ * box0.sprite 178(0xB2)→179(0xB3) один раз, назад не возвращается.
+ * Ни state4, ни state5, ни state6 НЕ вызывают add_score/die_puff (в
+ * отличие от типов 33/34/50 ниже) — смерть типа 21 в оригинале
+ * беззвучна и без очков; SCORE_BCD[21] намеренно не заведён.
+ *
+ * Тип 33 (handler cs:0x151A:0x00CD, file 0x16A6D): «схлопывание».
+ * ПЕРЕДЕКОМПИЛИРОВАНО (2026-09-24, жалоба игрока: «раскладывается от
+ * касания, а должно — от взрыва Бомбы»). Прежний пассаж выше описывал
+ * сам HURT (state4, file 0x16C10: если misc(+0xE9)&~1==0 → misc=2,
+ * state_byte=2), но не то, ЧЕМ он реально взводится — из-за этого порт
+ * считал ЛЮБОЙ удар (включая простое касание телом) достаточным.
+ * На самом деле вход в state4 решает ОБЩАЯ цепочка THINKCYCLE
+ * (cs:0xD4B:0xE03, file 0xFAB3) — ТА ЖЕ, что уже раздекомпилирована для
+ * типа 36/Рю (см. выше, file 0xFC18 и далее). У типа 33 obj_type=9
+ * (EnemySpawn.subtype=9, LEVEL3.BIN idx6, hp=95), и диспетчер по
+ * a.obj_type для b.obj_type==9 ведёт себя по-разному в зависимости от
+ * того, ЧТО ударило:
+ *   a.obj_type==0 (тело Карнова, простое касание) → таблица file 0xFB68
+ *     индекс 9 → file 0xFBCB: ставит ТОЛЬКО b.state_byte=5, БЕЗ обмена
+ *     hit_points — state4 (и коллапс) отсюда НИКОГДА не достижим. Порт
+ *     ошибочно пускал касание через симметричный обмен hit_points
+ *     (ai_check_player_hit), из-за чего (а) касание запускало коллапс и
+ *     (б) Карнов терял ~95 HP колонны при касании — обе половины бага
+ *     правятся добавлением type 33 в исключения ai_check_player_hit
+ *     (как уже сделано для 20/36).
+ *   a.obj_type==2 (снаряд Карнова ИЛИ вспышка Bomb — она тоже obj_type=2,
+ *     см. её INIT cs:0xFFA:0x0A93, file 0x12251) → таблица file 0xFC06
+ *     индекс 9 → file 0xFC18: ставит b.state_byte=5 И ПРОВАЛИВАЕТСЯ в
+ *     обычный симметричный обмен (file 0xFC21: b.hp -= a.hp_orig);
+ *     ТОЛЬКО если получившийся b.hp <= 0, file 0xFC50 перезаписывает
+ *     b.state_byte на 4 в этом же кадре — вот настоящий вход в
+ *     HURT/коллапс. Файербол Карнова несёт hit_points=10 (cs:0xFFA:0x0009,
+ *     file 0x117C2), у колонны hp=95 — одного выстрела мало (нужно
+ *     около 10 попаданий: state2/misc0-1 залочивает hit_points на
+ *     снимок КАЖДЫЙ тик, file 0x16CCB, но после первого же удара
+ *     state_byte застревает на 5 и THINK для этого объекта больше не
+ *     вызывается — снимок не обновляется, урон копится). Вспышка Bomb
+ *     несёт hit_points=100 (file 0x12291) — валит колонну ОДНИМ
+ *     попаданием (95-100<0 сразу). Порт воспроизводит это явной
+ *     постепенной моделью в ai_notify_enemy_hit (case 33) и в
+ *     ai_bomb_explode/ai_clear_enemies (тот же путь с уроном 100 вместо
+ *     прямого снятия alive) — см. там.
+ * Собственно коллапс (THINK-подфазы 2/3, file 0x16C40..0x16C80): каждый
+ * тик все сегменты, кроме головы, с dy != 0 получают dy += 2 (пиксели —
+ * Y не масштабируется) и dx += 2 В ЕДИНИЦАХ ДВИЖКА (file 0x16C80:
+ * `add word[bx+2],2` — то же поле box.dx, что и x_world, тоже требует
+ * ×2 для пикселей), т.е. += 4 px. Порт хранит PARTS_33.dx уже в пикселях
+ * (см. комментарий к таблице), поэтому инкремент здесь тоже должен быть
+ * +4, а не +2 — прежний +2 давал вдвое меньший разлёт (макс. ~64px) и
+ * не перекрывал 112-пиксельную яму LEVEL3 (теперь — до ~132px на самом
+ * глубоком сегменте). Голова становится спрайтом 232 (0xE8). Когда все
+ * dy == 0 — коллапс завершён (phase 4, one-shot, затем phase>4 — THINK
+ * навсегда no-op). С началом коллапса box0.hitflag снимается (file
+ * 0x16BB3) — объект становится НЕУБИВАЕМ, просто застывшая груда
+ * обломков (см. is_damageable_obj: `type==33 → st_phase<2`).
+ *
+ * Тип 34 (handler cs:0x151A:0x02A6, file 0x16C46): «ждать игрока в
+ * ~100 px» — предыдущая формулировка была НЕВЕРНОЙ вдвое: реальный порог
+ * (file 0x16CCA) — `|player.x_world − self.x_world| < 0x64` (100 ЕДИНИЦ
+ * движка = 200 px). После срабатывания включается «волна» — голова
+ * (box0) раз в ~30 тиков пишет новое значение в кольцевой буфер
+ * DS:0xD97E/0xD982 (20 записей) по таблицам DS:0x1BF0/0x1BFE/0x1C0C и
+ * хелперу cs:0x1C92:0xE, а 5 тел (box 1..5) читают из этого буфера свои
+ * y-смещения с задержкой (классический snake-follow). Таблицы волны и
+ * хелпер НЕ раздекомпилированы до конца (нет уверенности в форме кривой)
+ * — портирован только подтверждённый порог активации; сама волна
+ * оставлена как явный TODO, а не придумана.
+ *
+ * ДОБАВЛЕНО (повторный code-review): у типа 34 порог активации был
+ * единственной портированной механикой THINK — но настоящий «геймплей»
+ * лежит в STATE 4 (HURT, file 0x16DE7..0x16E5D), который вообще не
+ * зависит от misc/порога и выполняется на КАЖДЫЙ удар:
+ *   hit_points = снимок (self.phase(+0xED) = hp при спавне — залочен,
+ *     обычная генерик-смерть по hp<=0 сюда НЕ применима);
+ *   box[phase_ctr].sprite = 0 (текущий верхний сегмент прячется, начиная
+ *     с индекса 5 — самый нижний слой 233 — и далее вверх к 0 = 238);
+ *   если phase_ctr != 0: --phase_ctr (открыть хитбокс следующего, ниже
+ *     лежащего сегмента), state_byte = 2 (вернуться в THINK);
+ *   иначе (все 6 сегментов сняты): state_byte = 6 (смерть) → в конце,
+ *     ОБЩИЙ для обеих веток add_score(0x110); а по ветке смерти —
+ *     ЕЩЁ РАЗ add_score(0x110) (110 очков дважды) и die_puff() (file
+ *     0x16E52..0x16E5D). Порт не имеет per-type HURT-хука на «любой
+ *     удар», поэтому механика вынесена в ai_notify_enemy_hit (см. ниже,
+ *     case type==34) — hp никогда не уходит в generic-смерть напрямую.
+ *
+ * Тип 39 (handler cs:0x161F:0x0002, file 0x179F2): подтверждён почти
+ * полностью верным — единственная неточность: направление прокрутки
+ * кадров (259..262) — это не всегда «+1»: INIT считает
+ * `misc = (y_world % 10 != 0) ? 3 : 1` (file 0x17A46) ОДИН РАЗ при спавне,
+ * и весь THINK крутит `sprite = 259 + ((sprite−259+misc)&3)`; misc=3
+ * (≡ −1 mod 4) даёт обратный цикл для объектов, чей y_world не выровнен
+ * по тайловой сетке. Никакого движения/реакции на игрока в THINK нет.
+ *
+ * Тип 50 (handler cs:0x175E:0x000F, file 0x18DEF): «триггер по позиции
+ * игрока» — реален, но НЕ дистанция до игрока, а level-geometry cleanup:
+ * (file 0x18EDB) если `player.x_world > 0x2D0` (720 ед. = 1440 px) И
+ * `player.vy > 0` (игрок падает/спускается) — self.hit_points = −30,
+ * state_byte принудительно 4 (HURT) на следующий тик; HURT/DELETE (file
+ * 0x18F3A) снимают тайловую разметку и просто исчезают — БЕЗ add_score/
+ * die_puff (это не обычная смерть от урона, а бесшумная уборка моста за
+ * пройденной точкой). Порт не читает знак vy напрямую (physics.c его не
+ * экспортирует) — аппроксимируем «спускается» по росту top_y между
+ * тиками (st_ctr хранит предыдущий top_y для ЭТОГО объекта). Также
+ * портирован найденный попутно hp-порог (state5, file 0x18F18):
+ * hit_points < 50 → голова box0.sprite меняется 0x132(306)→0x133(307).
+ */
 static void ai_multipart(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
     if (o->num_parts == 0) {
         switch (o->type) {
         case 21: parts_apply(o, PARTS_21, 7); break;
-        case 33: parts_apply(o, PARTS_33, 7); break;
-        case 34: parts_apply(o, PARTS_34, 6); break;
-        case 39: parts_apply(o, PARTS_39, 6); break;
-        case 50: parts_apply(o, PARTS_50, 7); break;
+        case 33: parts_apply(o, PARTS_33, 7);
+                 o->st_aux   = o->hp;    /* +0xEB: снимок hp */
+                 o->st_phase = 0;        /* +0xE9: misc/подфаза коллапса */
+                 break;
+        case 34: parts_apply(o, PARTS_34, 6);
+                 o->st_misc  = 0;        /* 0 = ждём приближения игрока */
+                 o->st_phase = 5;        /* +0xEB: индекс верхнего живого
+                                          * сегмента (5..0), см. ai_notify_
+                                          * enemy_hit case 34 — снимается по
+                                          * одному на каждый удар. */
+                 o->st_aux   = o->hp;    /* +0xED: снимок hp (в оригинале
+                                          * это ТОЖЕ поле «phase», не
+                                          * связано с подфазой). */
+                 break;
+        case 39: parts_apply(o, PARTS_39, 6);
+                 /* file 0x17A46: направление один раз при спавне. */
+                 o->st_misc = (o->y % 10 != 0) ? 3 : 1;
+                 break;
+        case 50: parts_apply(o, PARTS_50, 7);
+                 o->st_aux = physics_get_top_y();  /* для детекции спуска игрока
+                                                     * (st_ctr занят общим +0xC7
+                                                     * frame_ctr, инкрементируется
+                                                     * каждый кадр диспетчером). */
+                 break;
         default: parts_apply(o, PARTS_33, 4); break;
         }
     }
-    /* Единственная портированная TICK-логика: у type 39 каждый бокс
-     * прокручивает кадр в диапазоне 0x103..0x106 (file 0x17ABB). */
-    if (o->type == 39 && (frame & 3) == 0) {
-        for (int i = 0; i < o->num_parts; ++i) {
-            u16 f = (u16)((o->parts[i].sprite - 259 + 1) & 3);
-            o->parts[i].sprite = (u16)(259 + f);
+
+    switch (o->type) {
+    case 21:
+        /* file 0x160F0 (state5): hit_points<50 → голова box0.sprite
+         * 178(0xB2)→179(0xB3) один раз, назад не возвращается. Раньше
+         * не портировано (см. комментарий у PARTS_21). */
+        if (o->hp < 50 && o->parts[0].sprite != 179) o->parts[0].sprite = 179;
+        break;
+    case 33: {
+        int si = o->st_phase;
+        if (si <= 4) {
+            switch (si) {
+            case 0:
+                /* file 0x16CCB: пока не было НАСТОЯЩЕГО попадания снаряда/
+                 * бомбы (ai_notify_enemy_hit/ai_bomb_explode), hit_points
+                 * каждый тик восстанавливается на снимок — касание сюда
+                 * вообще не заходит (ai_check_player_hit исключает type 33
+                 * из symmetric-обмена, см. коммент к ai_multipart выше). */
+                o->hp = o->st_aux;
+                break;
+            case 1:
+                /* «Разбужена» неубойным попаданием (hp>0 после удара) — в
+                 * оригинале state_byte застрял на 5, THINK больше не
+                 * перезапускает hp на снимок; просто ждём накопления урона. */
+                break;
+            case 2:
+            case 3: {
+                o->st_phase |= 1;
+                bool changed = false;
+                o->parts[0].sprite = 232;                 /* коллапс-поза головы */
+                for (int i = 1; i < o->num_parts; ++i) {
+                    if (o->parts[i].dy != 0) {
+                        o->parts[i].dy = (s16)(o->parts[i].dy + 2);
+                        /* file 0x16C80: инкремент box.dx — В ЕДИНИЦАХ
+                         * ДВИЖКА (+2 = +4px), а не в пикселях; PARTS_33.dx
+                         * в порту уже переведён в пиксели, поэтому и шаг
+                         * должен быть +4 (см. комментарий к ai_multipart). */
+                        o->parts[i].dx = (s16)(o->parts[i].dx + 4);
+                        changed = true;
+                    }
+                }
+                if (!changed) o->st_phase = 4;            /* коллапс завершён */
+                break;
+            }
+            default: break;                               /* phase 4: one-shot, дальше no-op */
+            }
         }
+        break;
+    }
+    case 34: {
+        if (!o->st_misc) {
+            int d = physics_get_left_x() - o->x;
+            if (d < 0) d = -d;
+            if (d < 200) o->st_misc = 1;   /* разбужен; волна тела — TODO (см. коммент) */
+        }
+        break;
+    }
+    case 39:
+        /* Единственная портированная TICK-логика: у type 39 каждый бокс
+         * прокручивает кадр в диапазоне 0x103..0x106 (file 0x17ABB),
+         * направление задаёт misc из INIT (+1 либо −1 mod 4). */
+        if ((frame & 3) == 0) {
+            int step = o->st_misc ? o->st_misc : 1;
+            for (int i = 0; i < o->num_parts; ++i) {
+                u16 f = (u16)((o->parts[i].sprite - 259 + step) & 3);
+                o->parts[i].sprite = (u16)(259 + f);
+            }
+        }
+        break;
+    case 50: {
+        int py = physics_get_top_y();
+        bool descending = py > o->st_aux;
+        o->st_aux = py;
+        if (physics_get_left_x() > 1440 && descending) {
+            o->alive = false;      /* бесшумная уборка — без score/puff */
+            return;
+        }
+        if (o->hp < 50 && o->parts[0].sprite != 307) o->parts[0].sprite = 307;
+        break;
+    }
+    default: break;
     }
     o->anim_phase = (frame >> 3) & 1;
 }
 
 
 
-/* Type 30 — растущая цепь (ai_type30): num_bboxes начинается с 0 и растёт
- * во времени; спрайты чередуются 0x05 / 0x98 (152). */
+/* Type 30 — растущая цепь (ai_type30, handler cs:0x1348:0x12CF, file
+ * 0x15F4F — НЕ file 0x15FB5, это внутримодульное смещение). num_bboxes
+ * начинается с 0 и растёт во времени; спрайты чередуются 0x05 / 0x98 (152).
+ *
+ * Повторная декомпиляция (code-review 2026-09) подтвердила рост цепи (см.
+ * ниже) и нашла ДВЕ непортированные механики за пределами THINK-роста:
+ *  1. INIT (file 0x15F79..0x1608D) точно как у типов 20/21/50 впечатывает
+ *     силуэт в тайловую сетку коллизий (12 клеток: 2 колонки — x_world и
+ *     x_world+152 ед. — по 6 строк вниз, cs:0xD4B:0x0003(col,row,val=3));
+ *     state6 (file 0x160FC..0x161AA) восстанавливает те же 12 клеток через
+ *     cs:0xD4B:0x3E(col,row)→lookup[id]→cs:0xD4B:0x3 (т.е. не жёсткое
+ *     значение, а «настоящий» атрибут исходного тайла под перекраской).
+ *     NOT PORTED — нужна рантайм-мутация level_tile_attr, инфраструктуры
+ *     нет (см. тот же пробел у типов 20/21/50).
+ *  2. THINK (file 0x160D5..0x160F9, ПОСЛЕ роста) читает общий глобал
+ *     [DS:0xD97A] (сам обнуляет его в СВОЁМ ЖЕ INIT, file 0x15F79), OR'ит
+ *     в phase(+0xED) (залипающий флаг «когда-либо был не 0»), и если
+ *     залипший флаг взведён И [0xD97A] сейчас не 0 → state_byte=6 (смерть,
+ *     ведёт к пункту 1). UNRESOLVED: кто ещё пишет [0xD97A] — не найдено
+ *     (сканы E8/9A по кандидатным сегментам не выполнялись из-за объёма
+ *     задачи); похоже на внешний уровневый триггер («выключить цепь»), НЕ
+ *     портирован — в порту цепь никогда не убирается этим путём, только
+ *     generic hp<=0. */
 static void ai_grow_chain(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)karnov_input;
-    /* INIT file 0x15FB5: спрайт КОНСТАНТНЫЙ 0xDA (218); чередуются
+    /* INIT file 0x15F79: спрайт КОНСТАНТНЫЙ 0xDA (218); чередуются
      * x_offset 152 и 5 (единицы → 304 и 10 px), dy = (i>>1)*20.
      * C++-реконструкция принимала 0x98/0x05 за sprite_id — отсюда была
-     * «цепь из 152/5». TICK (file 0x1608A): +2 бокса каждые 11 тиков. */
+     * «цепь из 152/5». TICK (file 0x1608E): +2 бокса каждые 11 тиков —
+     * ПОДТВЕРЖДЕНО повторной декомпиляцией, числа совпали в точности. */
     if (o->num_parts < 6 && ++o->custom > 10) {
         o->custom = 0;
         for (int k = 0; k < 2 && o->num_parts < 6; ++k) {
@@ -3424,38 +4558,190 @@ static void ai_grow_chain(ai_obj_t *o, u16 frame, u8 karnov_input)
     o->anim_phase = (frame >> 3) & 1;
 }
 
-/* Type 36 — ★ Рю, финальный босс (ai_type36, file 0x16FBB): 2 части —
- * голова 0xF5 (245) + хвост 0xF9 (249), x выровнен по 8 px file-сетки.
- * TICK не декомпилирован: стоит, периодически пускает type-23 шары в
- * игрока; state 5 (hurt) — мигание. */
+/* Type 36 — ★ Рю, финальный босс (handler cs:0x151A:0x061B, file 0x16FBB,
+ * до cs:0x151A:0x08AF — дальше начинается обработчик типа 35).
+ *
+ * ЭТА ВЕРСИЯ (2026-09, повторный проход): полностью раздекомпилирован
+ * cs:0xD4B:0x2DB, проведён исчерпывающий скан ВСЕГО KARNOV.EXE (все 8
+ * регистровых форм mov-инструкций) на запись misc(+0xE9)=2, чтение и
+ * запись phase(+0xED), запись state_byte(+0xB6)=6 у типа 36, и найден
+ * реальный механизм конца уровня 9. Итог см. в блоке «ЧТО ЭТО ЗНАЧИТ»
+ * ниже — он МЕНЯЕТ трактовку "настоящего триггера конца боя": его нет,
+ * потому что Рю в оригинале в принципе не умирает.
+ *
+ * ПОДТВЕРЖДЕНО по листингу (без изменений с прошлого прохода):
+ *  INIT (file 0x16FBB..0x17058): x_world &= ~7 (сетка 8 px), num_bboxes=2,
+ *  box0=голова 0xF5 (dx=+2 ед.=+4px, dy=0, hitflag=0 — ГОЛОВА НЕ бьётся),
+ *  box1=хвост 0xF9 (dx=0, dy=0 буквально, hitflag=1 — бьётся хвост);
+ *  self.phase_ctr(+0xEB) = y_world + h(0xF5) + h(0xF9) (уровень «покоя»).
+ *  Порт хардкодит box1.dy=20 (высота головы) — в ASM это отдельное поле
+ *  +0x36, куда именно копируется в box1.dy, не прослежено.
+ *
+ *  cs:0xD4B:0x2DB (file 0xEF8B) РАЗДЕКОМПИЛИРОВАН ПОЛНОСТЬЮ (2026-09).
+ *  Сигнатура: stamp_body_column(far self, y_val, phase_ctr, flag=1).
+ *  Вызывает update_bboxes(self) (cs:0x6E:0x59A, file 0x0247A — пересчёт
+ *  x0/y0/x1/y1 боксов из x_world/y_world/dx/dy), затем через таблицы
+ *  DS:0xAF22 (пиксель→ряд карты) и DS:0xBB5E (пиксель-колонка box0.x0 >>
+ *  tile_shift → индекс колонки) вычисляет ЕДИНСТВЕННУЮ колонку карты
+ *  (колонка box0.x0) и диапазон рядов [row(y_val)..row(phase_ctr)).
+ *  Для верхнего ряда столбца читает исходный тайл-ГРАФИКУ (helper
+ *  cs:0xD4B:0x3E, file 0xECEE — читает байт [row_ptr[row]+col*2]),
+ *  переводит через таблицу DS:0xABC0 в код категории и записывает его
+ *  в АТРИБУТ-байт [row_ptr[row]+col*2+1] через cs:0xD4B:0x3 (file
+ *  0xECB3 — тот же байт, что читает tile_at_cell cs:0xD4B:0x21). Затем
+ *  для ВСЕХ рядов от row(y_val) до row(phase_ctr) записывает готовую
+ *  категорию: 4 — верхний ряд, 3 — все нижеследующие (обе входят в
+ *  «твёрдые» категории по jump-table cs:0x151A:0x0839 типа 35, где
+ *  0/3/4/7 = «твёрдая земля», 1/2/5/6 = нет). Иными словами: функция
+ *  ВПЕЧАТЫВАЕТ тело Рю КАК ТВЁРДУЮ ГЕОМЕТРИЮ УРОВНЯ в одну колонку
+ *  тайловой карты — не косметика, а реальное препятствие для игрока.
+ *  ПОРТ ЭТО НЕ ВОСПРОИЗВОДИТ: `level_tile_attr[]` в порту индексируется
+ *  ПО ГРАФИКЕ тайла глобально на весь уровень (karnov_c/src/level.c:22),
+ *  а не по конкретной ЯЧЕЙКЕ карты, как в оригинале — точечный стемпинг
+ *  одной колонки без порчи всех других тайлов с той же графикой ВО ВСЁМ
+ *  уровне текущей моделью данных не выразить. Это требует переделки
+ *  level.c (per-cell overrides), т.е. выходит за рамки типа 36.
+ *
+ *  Вызывается ДВАЖДЫ: из INIT (state1, y_val=y_world+box0.dy=y_world
+ *  спауна) и из THINK при misc==2 (тем же y_val/phase_ctr — при первом
+ *  входе это ТОЖДЕСТВЕННЫЙ повторный стемпинг), А ЗАТЕМ КАЖДЫЙ ТИК, пока
+ *  misc==3 (см. ниже) — то есть столбец «закрывается» сверху по мере
+ *  падения головы, но диапазон всегда завершается на ФИКСИРОВАННОМ
+ *  phase_ctr, заданном один раз при спауне.
+ *
+ *  THINK (state 2) реагирует ТОЛЬКО на misc(+0xE9) == 2 или 3, иначе —
+ *  no-op КАЖДЫЙ тик (без внешнего триггера Рю ничего не делает):
+ *    misc=2 — ОДНОРАЗОВЫЙ вход, ПАДАЕТ СРАЗУ В ТОТ ЖЕ ТИК В misc=3
+ *    (это не «следующий тик», а fallthrough в самом дизасме, file
+ *    0x0722→0x0732 без jmp между ними): num_bboxes=1 (хвост СКРЫВАЕТСЯ
+ *    и обратно НИКОГДА не показывается — во всём обработчике 36 есть
+ *    РОВНО два места, пишущих num_bboxes: INIT=2 и это misc=2 вход=1,
+ *    восстановления нет), vy=+1.0, re-stamp;
+ *    misc=3 — падение продолжается (re-stamp КАЖДЫЙ тик), пока
+ *    y_world+h(box0.sprite) < phase_ctr; по достижении — vy=0, misc=0,
+ *    финализация update_bboxes(self) (cs:0x6E:0x52B — здесь это НЕ та же
+ *    функция, что 0x59A; расхождение вызовов не критично для порта).
+ *  ⇒ Рю падает («садится», пряча хвост НАВСЕГДА) РОВНО ОДИН РАЗ — при
+ *  ПЕРВОМ попадании, после которого misc больше никогда не станет 2,
+ *  ЕСЛИ он уже находится в покое (см. ниже про state4).
+ *
+ *  ИСЧЕРПЫВАЮЩИЙ СКАН misc(+0xE9)=2: во всём KARNOV.EXE найдено 35 мест
+ *  вида `mov word[es:bx+0xe9],2`; при разбиении по «владельцу адреса»
+ *  (largest handler start ≤ address) РОВНО ОДНО принадлежит типу 36 —
+ *  это САМ state4 (file 0x17182 = его собственный `mov …,2`). Ни одна
+ *  другая функция в бинарнике не устанавливает misc=2 объекту типа 36.
+ *  Значит «внешнего скрипта», который бы стартовал падение отдельно от
+ *  боевого попадания, НЕ СУЩЕСТВУЕТ — единственный способ инициировать
+ *  «посадку» — это попадание (state4).
+ *
+ *  State 4 (получил урон) НЕ вызывает add_score/die_puff: ставит misc=2
+ *  и state_byte=2 напрямую — то есть «сесть» (спрятать хвост, чуть
+ *  просесть до phase_ctr) как реакцию на попадание, БЕЗ ПРОВЕРКИ hp.
+ *  Ни в одном состоянии 0..6 этого обработчика НЕТ add_score/die_puff/
+ *  ai_result|=1(удаление) — state6 (удаление) присутствует лишь как
+ *  голая заглушка `ai_result|=1`, и НИЧТО в бинарнике никогда не пишет
+ *  Рю (36) state_byte=6 (проверено сканом всех записей state_byte=6 по
+ *  владельцу адреса — их нет для типа 36). Рю НИКОГДА не удаляется
+ *  собственным кодом.
+ *
+ *  ⇒ ГЕНЕРИК-ЦЕПОЧКА ПАРНОГО УРОНА (THINKCYCLE, file 0xFAB3, сегмент
+ *  тот же cs:0xD4B) решает, какое из состояний 4/5 реально применяется:
+ *  для объекта с obj_type∈{7,9} (Рю в LEVEL9.BIN — record[2]: type=36,
+ *  subtype=9, ЦЕЛИКОМ НУЛЕВОЙ: cur=(0,0), range=(0,0), spawn=(0,0),
+ *  trigger=0 — как и у type-8 sky-цепи, спаунится НЕ через нормальный
+ *  check_triggers (range=0 ⇒ строгое «<» никогда не выполняется), а
+ *  отдельным, не найденным в этом проходе кодом) при ударе снарядом
+ *  игрока (a.obj_type==2) generic-код (file 0xFC18) СНАЧАЛА
+ *  безусловно ставит b.state_byte=5, обменивает hit_points
+ *  (b.hp -= a.hp_orig; a.hp -= b.hp_orig — тот же симметричный обмен,
+ *  что и во всех столкновениях), и ЕСЛИ b.hp>0 после обмена — этим и
+ *  ограничивается (state5 исполнится на следующем ai_dispatch). ЕСЛИ ЖЕ
+ *  b.hp<=0 — file 0xFC49..0xFC5A ПЕРЕЗАПИСЫВАЕТ b.state_byte НА 4 (в
+ *  этом же кадре, до диспетчеризации — state5 в такой кадр НЕ
+ *  исполняется) И ИГРАЕТ generic play_sound(1) («враг убит»), НИКАК
+ *  иначе не помечая объект: НЕТ award_score, нет ai_result|=1, объект
+ *  остаётся alive. Далее (file 0xFC61) код проверяет, не является ли
+ *  убитый объект ГЛОБАЛЬНЫМ goal-индексом DS:0xD959 — но на уровне 9 в
+ *  DS:0xD959 попадает индекс ОТДЕЛЬНОГО объекта type=56 (LEVEL9.BIN
+ *  record[142]), а НЕ Рю, так что для Рю эта ветка тоже не срабатывает.
+ *  ⇒ ПОДТВЕРЖДЕНО: у Рю НЕТ понятия «смерть» вообще. Удар «насмерть»
+ *  (hp<=0) отличается от обычного ТОЛЬКО тем, что state4 запускается
+ *  вместо state5 (тот же «сесть», без add_score/died) и один раз играет
+ *  SFX «kill», а НЕ фактическим удалением/очками/концом уровня.
+ *
+ *  State 5 смотрит obj_type ПАРТНЁРА по хиту ([+0xDF]→запись в DS:0x2824,
+ *  +0xE5=obj_type): если == 2 (снаряд игрока, гарантировано generic-кодом
+ *  выше — эта ветка вообще недостижима иначе), увеличивает phase(+0xED)
+ *  — счётчик попаданий «в слабое место»; box1.sprite меняется на 0xFA
+ *  (250) — «раненый хвост». ИСЧЕРПЫВАЮЩИЙ СКАН чтения phase(+0xED) (все
+ *  8 регистровых форм mov reg,[es:bx+0xed] по ВСЕМУ EXE) даёт 15 мест
+ *  суммарно, из них РОВНО ОДНО принадлежит типу 36 — сама эта строка
+ *  state5 (запись, не сравнение). НИ ОДНО место во всём бинарнике не
+ *  СРАВНИВАЕТ phase(+0xED) с порогом. Счётчик попаданий НИКЕМ не
+ *  читается — это мёртвая переменная (или недостающий вырезанный
+ *  контент), а не скрытый счётчик побед.
+ *
+ *  Функции cs:0x151A:0x07FA (движение к полу через tile_at + place_on_
+ *  ground_center/set_motion) и cs:0x151A:0x0870 (прицельный снаряд через
+ *  cs:0x11D6:0x139) физически лежат МЕЖДУ обработчиками 36 и 35 в одном
+ *  сегменте, но вызываются ТОЛЬКО из кода типа 35 (проверено сканом
+ *  E8-вызовов в диапазоне 0x633..0x7F9 — их нет): периодическая стрельба
+ *  шарами — НЕ часть обработчика типа 36.
+ *
+ *  ЧТО ЭТО ЗНАЧИТ ДЛЯ ПОРТА: Рю — «стена с лицом», не убиваемый босс в
+ *  привычном смысле. Настоящее «прохождение» уровня 9 в оригинале не
+ *  завязано на смерть Рю вообще (реальный триггер конца — отдельный
+ *  таймерный объект type56 у ДАЛЬНЕГО края арены, независимый от Рю;
+ *  порт этого сейчас не реализует и не должен — это вне типа 36).
+ *  Раз честного «конца боя» у самого Рю нет, порт реализует РОВНО то,
+ *  что подтверждено: удары ДО исчерпания hp дают state5-реакцию
+ *  (счётчик++, хвост «ранен»), удар, обнуляющий hp, даёт ОДНОРАЗОВУЮ
+ *  «посадку» (прячет хвост навсегда, играет generic kill-SFX) БЕЗ
+ *  award_score/despawn/is_boss — Рю остаётся вечно на карте, вечно
+ *  бьётся дальше (hp может уходить в минус бесконечно, как в оригинале:
+ *  ничто не защищает от повторного входа в эту же ветку). Порт НЕ
+ *  придумывает второй, «настоящий» конец боя — это и есть честный,
+ *  подтверждённый листингом результат. Тайл-стемпинг (реальная твёрдая
+ *  геометрия) сознательно не портирован — см. блок выше. */
 static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
-    (void)karnov_input;
+    (void)frame; (void)karnov_input;
     if (o->num_parts == 0) {
+        /* INIT file 0x16FFF/0x17017/0x17058: x_world &= ~7 (сетка 8px);
+         * голова 0xF5 при dx=+2 ед. (=+4 px), dy=0; хвост 0xF9 при dx=0,
+         * dy=h(0xF5)=20 — РОВНО ПОД головой. */
         o->x = ((o->x / 2) & ~7) * 2;
         o->num_parts = 2;
-        /* INIT file 0x16FFF/0x17017: голова 0xF5 при dx=+2 ед. (=+4 px),
-         * хвост 0xF9 при dx=0 и dy = sprite_h[0xF5] = 20 — т.е. РОВНО
-         * ПОД головой (file 0x17058), а не слева, как было в порту. */
         o->parts[0].sprite = 245; o->parts[0].dx = 4; o->parts[0].dy = 0;
         o->parts[1].sprite = 249; o->parts[1].dx = 0; o->parts[1].dy = 20;
+        o->st_misc  = 0;   /* misc(+0xE9): 0/1 = покой (no-op), только 2/3 активны */
+        o->st_phase = 0;   /* phase(+0xED): счётчик попаданий «в слабое место» (нигде не читается) */
+        /* phase_ctr(+0xEB) = y_world + h(0xF5) + h(0xF9) — уровень «покоя» */
+        const sprite_t *s0 = sprite_find(245), *s1 = sprite_find(249);
+        o->st_aux = o->y + (s0 ? s0->h : 20) + (s1 ? s1->h : 20);
+        /* facing нигде в обработчике не трогается (нет ai_result|=2 ни
+         * в INIT, ни в THINK) — Рю никогда не поворачивается, в отличие
+         * от прежнего стенд-ина, который считал его лицом к игроку. */
+        obj_phys_begin(o);   /* нужен Q16.16-интегратор для vy=+1.0 при падении */
     }
-    int kx = physics_get_left_x();
-    o->facing = (kx >= o->x) ? 1 : -1;
-    /* Анимация головы: 245..248 (idle → дыхание огнём). */
-    u16 ph = (frame >> 4) & 3;
-    o->parts[0].sprite = (u16)(245 + ph);
-    /* Огненный шар в фазе «дыхания». */
-    if (ph == 2 && (frame & 15) == 0) {
-        int slot = alloc_obj_slot();
-        if (slot >= 0) {
-            g_obj[slot] = (ai_obj_t){
-                .alive = true, .type = 23, .subtype = 1,
-                .x = o->x, .y = o->y + 8,
-                .facing = o->facing, .hp = 1,
-                .level_idx = -1, .spawn_frame = frame,
-            };
+
+    /* THINK: no-op, если misc не 2 и не 3 (file 0x16FD9..0x1671E). */
+    if (o->st_misc == 2) {
+        /* Одноразовый вход ПАДАЕТ В misc=3 в ТОМ ЖЕ тике (fallthrough
+         * в дизасме, без jmp между блоками file 0x0722/0x0732). */
+        o->num_parts = 1;         /* хвост скрыт — и уже НИКОГДА не восстановится */
+        o->vyq = QV(1, 0);        /* vy = +1.0 */
+        o->st_misc = 3;
+    }
+    if (o->st_misc == 3) {
+        const sprite_t *s0 = sprite_find(o->parts[0].sprite);
+        int h0 = s0 ? s0->h : 20;
+        if (o->y + h0 >= o->st_aux) {
+            o->vyq = 0;
+            o->st_misc = 0;
         }
+        /* иначе — падение продолжается, vy=+1.0 уже выставлена, ждём
+         * следующего тика (Q16.16-интегратор двигает o->y сам). */
     }
 }
 
@@ -3463,19 +4749,67 @@ static void ai_ryu(ai_obj_t *o, u16 frame, u8 karnov_input)
 
 
 
+/* Отдельный объект-«столб арены», найденный и раздекомпилированный
+ * 2026-09 по адресу cs:0x175E:0x3A9 (file 0x19189, ЛЕЖИТ ПЕРЕД
+ * обработчиком типа 51 в том же сегменте, вне таблицы DS:0x10FE —
+ * поднимается через init_active_object напрямую из state4/state6
+ * родителя, а не через primary-type диспетчер).
+ *
+ * INIT (file 0x191B3): tick_period=0xA(10); num_bboxes=8; для i=0..7:
+ * box[i].sprite=0x13D(317), dx=0, dy=i*10, hitflag=0 (ВСЕ 8 боксов
+ * неуязвимы). Координаты объекта — АБСОЛЮТНЫЕ ХАРДКОД, не унаследованы
+ * от родителя: x_world=0x300(768 ед.=1536px), y_world=0x136(310px).
+ * Финал INIT — cs:0x6E:0x52B(self) (тот же хелпер пересчёта общего
+ * bbox, что и у Рю). THINK (file 0x19228, throttl tick_period=10) зовёт
+ * нерасшифрованный cs:0x175E:0x0366(2) и обнуляет неопознанное поле
+ * box+0x10 на каждом боксе — видимого эффекта на геометрию/спрайты нет,
+ * НЕ портировано (нет уверенности в смысле). State 6 НЕ удаляет объект
+ * (просто state_byte=2, возврат в THINK) — столб перманентен.
+ * cs:0x175E:0x0366/0x01A3 (звук/эффект тряски?) — UNRESOLVED. */
+static void ai_arena_pillar(ai_obj_t *o, u16 frame, u8 karnov_input)
+{
+    (void)frame; (void)karnov_input;
+    if (o->num_parts == 0) {
+        o->x = 1536;             /* file 0x191E1: x_world=0x300 ед. → ×2 px */
+        o->y = 310;              /* file 0x191E7: y_world=0x136 px */
+        o->num_parts = 8;
+        for (int i = 0; i < 8; ++i) {
+            o->parts[i].sprite = 317;
+            o->parts[i].dx = 0;
+            o->parts[i].dy = (s16)(i * 10);
+        }
+        o->facing = 1;
+    }
+}
+
 /* Type 51 — статический элемент арены (ai_type51): 8 частей, sprite 0x135
- * (309), y выровнен по 10, sub_timer_max=0xFF (вечный). */
+ * (309), y выровнен по 10, sub_timer_max=0xFF (вечный).
+ *
+ * ИСПРАВЛЕНО (2026-09): настоящее 8-сегментное тело арены (столб из
+ * спрайтов 0x13D=317 с шагом 10) — ОТДЕЛЬНЫЙ объект по адресу
+ * cs:0x175E:0x3A9 (см. ai_arena_pillar выше), который оригинал поднимает
+ * через init_active_object ПРЯМО в state4 (HURT) И в state6 (DELETE)
+ * родителя (file 0x1951C/0x19519 — одна и та же ветка на оба состояния),
+ * с абсолютными хардкод-координатами, НЕ зависящими от позиции/повторности
+ * родителя. Спаун портирован в ai_notify_enemy_hit (там, где реально
+ * происходит переход в hp≤0 — см. `if (o->type == 51)` ниже), а не здесь:
+ * при hit_points=1 (обычное значение из уровня, trigger=0 → hp=1) удар и
+ * смерть происходят в ОДНОМ кадре, и TICK-функция этого объекта никогда
+ * не видит промежуточного «ранен, но жив» состояния.
+ * UNRESOLVED: что мешает оригиналу спаунить дубликаты столба при
+ * повторных попаданиях (если бы hp был >1) — guard в state4/state6 не
+ * найден; также не подтверждено, начисляет ли оригинал generic
+ * add_score/die_puff при этом переходе (в самом state4 их нет — см.
+ * комментарий у ai_arena_pillar) — порт использует обычный generic-death
+ * путь (тот же, что и у любого другого врага) как наименее рискованное
+ * приближение. */
 static void ai_arena_static(ai_obj_t *o, u16 frame, u8 karnov_input)
 {
     (void)frame; (void)karnov_input;
     if (o->num_parts == 0) {
         /* INIT (file 0x192A0): num_bboxes=8, но заполняется только
          * bbox[0] = спрайт 0x135 (309) в (0,0), плюс y выравнивается
-         * по 10. Настоящее 8-сегментное тело арены (столб из спрайтов
-         * 0x13D=317 с шагом 10) в оригинале создаёт ОТДЕЛЬНЫЙ объект,
-         * поднимаемый в state 4 через queue_state(cs:175E:0x3A9) — его
-         * нет в таблице DS:0x10FE и он пока не портирован. Прежняя
-         * сетка 4×2 из 309 была изобретением порта. */
+         * по 10. Прежняя сетка 4×2 из 309 была изобретением порта. */
         o->y -= o->y % 10;
         o->num_parts = 1;
         o->parts[0].sprite = 309;
@@ -3484,6 +4818,32 @@ static void ai_arena_static(ai_obj_t *o, u16 frame, u8 karnov_input)
     }
 }
 
+/* Тип 41 — проверено заново (2026-09), см. запрос code-review для типов
+ * 14/32/36/38/40/41. Обработчик РЕАЛЬНО существует и не заглушка в
+ * оригинале: cs:0x161F:0x020A, file 0x17BFA, states 0/1/2/4/6.
+ * INIT: obj_type=3 (снаряд), hit_points=0x64(100), box0.hitflag=1,
+ * tick_period=2, state_list=DS:0x1CBE. THINK доигрывает анимацию
+ * (state_list DS:0x1CF2 после кадра 0), и когда frame_idx достигает
+ * [DS:0x1CCE]−1, зовёт cs:0x161F:0x00FC — та порождает 5 ДОЧЕРНИХ
+ * объектов С ТЕМ ЖЕ обработчиком (0x020A:0x161F), т.е. type 41
+ * самовоспроизводится очередью «осколков» с прицельной скоростью
+ * (через тот же векторный хелпер cs:0x11D6:0x0006, что и у 0x139) и
+ * ay=+0.172 — похоже на разлёт обломков какого-то объекта.
+ *
+ * Проверено эмпирически: ни в одном из LEVEL0.BIN..LEVEL9.BIN (все 10
+ * уровней, скрипт по формату spawn_oracle.load_records) нет записи с
+ * type==41 — прежнее утверждение подтверждено.
+ * Проверено по коду: кто создаёт ПЕРВЫЙ (не самопорождённый) экземпляр
+ * типа 41 — НЕ НАЙДЕНО. Исчерпывающий скан всего KARNOV.EXE (байтовый
+ * шаблон `mov ax,0x020A` — единственный ОПЕРАТОР, задающий handler_off
+ * для этого хендлера при вызове init_active_object; и отдельно скан
+ * дальних вызовов 9A на 0x161F:0x020A) даёт РОВНО ОДНО совпадение —
+ * это сам самоспаун из cs:0x161F:0x00FC, вызываемый ТОЛЬКО изнутри
+ * THINK этого же типа 41. Значит без внешнего «зажигания» первого
+ * экземпляра весь этот код в оригинале НЕДОСТИЖИМ — судя по всему,
+ * вырезанная или незаконченная механика (осколки босса?), которую
+ * ничто в шиппед-игре не запускает. ai_stub остаётся верным портом
+ * НАБЛЮДАЕМОГО поведения (тип 41 никогда не встречается в игре). */
 typedef void (*ai_handler_fn)(ai_obj_t *, u16, u8);
 
 /* Таблица AI-обработчиков по PRIMARY type — аналог ai_handler_table[58]
@@ -3532,7 +4892,8 @@ static const ai_handler_fn AI_HANDLERS[58] = {
     [38] = ai_type38,          /* босс LEVEL3 */
     [39] = ai_multipart,
     [40] = ai_type40,          /* босс LEVEL4 */
-    [41] = ai_stub,            /* mid-boss HP=100 — в данных уровней не встречается */
+    [41] = ai_stub,            /* реален (cs:0x161F:0x020A), но НЕДОСТИЖИМ —
+                                  см. комментарий перед таблицей */
     [42] = ai_type42,          /* периодическая ловушка */
     [43] = ai_type43,          /* «крестовый» летун */
     [44] = ai_type44,          /* дрейфующий летун */
@@ -3560,7 +4921,6 @@ static ai_handler_fn pick_handler(u16 type)
     switch (type) {
         case 512: return ai_stone_man;       /* каменный человек (декор) */
         case 513: return ai_stub;            /* Karnov in-game state — physics.c */
-        case TYPE_FLYING_BIRD:     return ai_flying_bird;
         case TYPE_STONE_THROWER:   return ai_stone_thrower;
         case TYPE_ROCK_PROJECTILE: return ai_rock_projectile;
         case TYPE_PLAYER_FIREBALL: return ai_player_fireball;
@@ -3568,6 +4928,7 @@ static ai_handler_fn pick_handler(u16 type)
         case TYPE_TRAP_SEGMENT:    return ai_trap_segment;
         case TYPE_BOMB_BLAST:      return ai_bomb_blast;
         case TYPE_ENEMY_SHOT:      return ai_enemy_shot;
+        case TYPE_ARENA_PILLAR:    return ai_arena_pillar;
         default:  return ai_stub;
     }
 }
@@ -3614,8 +4975,8 @@ void ai_init_from_level(u16 level_num)
     s_sky_enabled = false;
     for (u16 i = 0; i < level_num_enemies; ++i)
         if (level_enemies[i].type == 8) { s_sky_enabled = true; break; }
-    s_sky_last_x_units = 0;
-    s_sky_idle = 0;
+    s_ice_last_x_units = 0;
+    s_ice_ctr = 0;
 
     if (getenv("KARNOV_DBG_L1_ENEMIES")) {
         for (u16 i = 0; i < level_num_enemies; ++i) {
@@ -3668,12 +5029,19 @@ static int ai_spawn_from_record(u16 rec_idx, u16 frame)
 
     u16 type = e->type;
     if (g_ai_level_num == 0 && type == 13) {
-        /* Заставка в оригинале собирается кодом splash.cpp, а не записями
-         * LEVEL0.BIN: метатель там стоит ногами на y=113 (DOSBox-verified),
-         * тогда как запись даёт y=110. Держим верифицированную позицию,
-         * переведя её в новую (верхнюю) привязку: top = feet − высота. */
-        const sprite_t *base = sprite_find(86);
-        sy = 113 - (base ? (int)base->h : 27);
+        /* НАЙДЕН И ИСПРАВЛЕН БАГ (2026-09): метатель на заставке «висел» над
+         * полом. Причина — двойное применение подъёма. Раньше здесь sy
+         * вручную выставлялся в «113 (ноги) − высота спрайта», подогнанное
+         * под скриншот DOSBox — но НИЖЕ по коду для type=13 УЖЕ применяется
+         * байт-верифицированный generic PLACE_LIFT (DS:0x1002=26, см.
+         * type_place_lift), который вычитает те же 26 px ЕЩЁ РАЗ из уже
+         * скорректированного sy — отсюда сдвиг вверх (полёт над полом).
+         * Раз generic PLACE_LIFT для типа 13 уже байт-точен (та же формула,
+         * что и для настоящих врагов типа 13 в LEVEL1), достаточно оставить
+         * sy как есть из записи LEVEL0.BIN (110) — конверсию сделает общий
+         * код ниже. Итоговый top = 110−26 = 84 (при sprite h≈27 → ноги на
+         * y≈111 — практически совпадает со старым «113 на глаз», подтверждая,
+         * что generic-механизм и есть настоящий алгоритм). */
         type = TYPE_STONE_THROWER;  /* на splash — статичная декорация */
     }
 
@@ -3806,7 +5174,7 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
         int dy = py - (int)r->cur_y; if (dy < 0) dy = -dy;
         if (dy >= (int)r->range_y) continue;
         /* Спаун scripted-врага subtype 1/7 убивает sky-цепь (file 0x5155). */
-        if (r->subtype == 1 || r->subtype == 7) ai_kill_sky_chain();
+        if (r->subtype == 1 || r->subtype == 7) ai_kill_ice_chain();
         int slot = ai_spawn_from_record((u16)si, frame);
         if (slot < 0) continue;   /* alloc fail: flags остаётся 0 — ретрай */
         r->flags = 1;             /* file 0x4FFE: только при успехе */
@@ -3868,11 +5236,54 @@ void ai_check_player_hit(int kx, int ky, int kw, int kh)
 {
     int px0 = kx - kw / 2, px1 = kx + kw / 2;
     int py0 = ky - kh,     py1 = ky;
+    /* Тип 49 (щит, phase!=0 — только LEVEL9 x>0x44C) гибнет от ПРОСТОГО
+     * касания игроком, не от урона — file 0x18D81, см. ai_type49. Тип 52
+     * («пробуждающийся» блок) точно так же просыпается от касания
+     * игроком, а не от любого партнёра — file 0x1910B, см. ai_type52.
+     * Ни то, ни другое не «дамажащая» пара, поэтому регистрируется
+     * отдельно от hostile-цикла ниже (тот прерывается на первом найденном
+     * враге через return). */
+    for (int i = 0; i < g_num; ++i) {
+        ai_obj_t *o = &g_obj[i];
+        if (!o->alive) continue;
+        if (!((o->type == 49 && o->st_phase) || o->type == 52)) continue;
+        int h = (o->cur_h > 0) ? o->cur_h : obj_height(o);
+        int w = obj_width(o);
+        if (px1 < o->x || px0 > o->x + w) continue;
+        if (py1 < o->y || py0 > o->y + h) continue;
+        o->hit_flag = true; o->has_partner = true; o->hit_idx = HIT_IDX_PLAYER;
+    }
     for (int i = 0; i < g_num; ++i) {
         ai_obj_t *o = &g_obj[i];
         if (!o->alive || o->invisible) continue;
         if (o->type == TYPE_PLAYER_FIREBALL || o->type == TYPE_BOMB_BLAST) continue;
         if (o->is_scroll || o->type == 4 || o->type == 5 || o->type == 6) continue;
+        /* Тип 36 (Рю, obj_type=9): generic pair-loop таблицы для
+         * a.obj_type=0 (маркер игрока) x b.obj_type=9 (file 0xFBCB)
+         * ставит ТОЛЬКО b.state_byte=5 (косметика — партнёр не снаряд,
+         * проверка obj_type==2 в state5 проваливается, эффекта нет), но
+         * НЕ вызывает обмен hit_points вообще, в отличие от b∈{1,3,7}
+         * (ветка 0xFB8A). Простое касание Рю телом НЕ должно ранить ни
+         * игрока, ни Рю — урон наносят только снаряды (ai_player_fireball
+         * → ai_notify_enemy_hit).
+         * Тип 20 (колонна голов, ТОЖЕ obj_type=9) — ТА ЖЕ таблица, тот же
+         * вывод: перепроверено байт-в-байт при разборе её собственного
+         * state5 (см. ai_head_column) — касание телом уходит на state5,
+         * который либо ранит Карнова через отдельный, не общий, хелпер
+         * (только удар именно по голове, box0), либо не делает вообще
+         * ничего (удар по телу). Без этого исключения общий symmetric-obмен
+         * ниже отнимал у Карнова урон = ТЕКУЩИЙ hp колонны (~250, см.
+         * ai_head_column: hit_points принудительно 250 каждый тик) при
+         * ЛЮБОМ касании столба телом — второй, независимый от скорости
+         * снаряда, источник «мгновенной смерти» на LEVEL2.
+         * Тип 33 (дерево у ямы LEVEL3, ТОЖЕ obj_type=9) — ТА ЖЕ таблица
+         * (file 0xFB68 индекс 9 → file 0xFBCB), тот же вывод: касание
+         * телом уходит на голый state_byte=5 без обмена hit_points, а
+         * значит НИКОГДА не может запустить «схлопывание» (см. подробный
+         * разбор в ai_multipart) и НИКОГДА не должно отнимать у Карнова
+         * ~95 HP колонны, как отнимал symmetric-обмен ниже до этой
+         * правки (2026-09-24). */
+        if (o->type == 36 || o->type == 20 || o->type == 33) continue;
         bool hostile = (o->type == TYPE_ENEMY_SHOT) || is_damageable_obj(o) || o->is_boss;
         /* (враждебность = наличие активного бокса, как +0x2E в оригинале) */
         if (!hostile) continue;
@@ -3914,6 +5325,23 @@ void ai_despawn_behind(int player_x_px)
         ai_obj_t *o = &g_obj[i];
         if (!o->alive) continue;
         if (o->is_boss || o->is_scroll) continue;   /* goal-объект и его награда */
+        /* Свиток конца уровня (тип 7) до появления ещё не помечен is_scroll,
+         * но subtype = 9 (нечётный) — деспавн снял бы саму возможность
+         * закончить уровень. ПРОВЕРЕНО: в оригинале off-screen-деспавн
+         * (file 0xFD09-0xFD99, часть той же функции, что и pair-loop)
+         * исключает из выбраковки ТОЛЬКО слот босса — сравнением со
+         * [DS:0xD959] (file 0xFD76: `cmp ax,[0xd959]; jz 0xfd99`), где ax —
+         * слот, на который сейчас указывает текущая spawn-запись.
+         * [DS:0xD94F]/[DS:0xD951] — это ДРУГОЙ механизм: сырой указатель,
+         * который свиток пишет сам на себя при своём INIT (file 0x1282C),
+         * чтобы pair-loop при смерти босса (file 0xFC85) нашёл его и взвёл
+         * +0xED. К деспавну он отношения не имеет — оригинал НЕ защищает
+         * ожидающий/невзведённый свиток от выбраковки по дальности.
+         * Строка ниже — намеренная защита порта: убийство босса бомбой/
+         * Clapper'ом издалека (ai_clear_enemies) может оставить игрока
+         * дальше 250 px от ещё не заспаунившегося свитка, и общий проход
+         * снёс бы его прежде, чем он появится. */
+        if (o->type == 7) continue;
         if (o->level_idx < 0) continue;             /* объекты порта гаснут сами */
         if (!(o->subtype & 1)) continue;            /* чётная parity — второй проход не трогает */
         if (player_x_px - o->x > 250) o->alive = false;
@@ -3943,6 +5371,25 @@ void ai_respawn_rearm(int player_x_px)
 void ai_tick(u16 frame, u8 karnov_input)
 {
     g_ai_frame = frame;
+    /* KARNOV_DBG_SPAWN_RYU=1 — тестовый спаун типа 36 (Рю) рядом с
+     * игроком на кадре 0. Оригинал сам его никогда не создаёт (запись
+     * LEVEL9.BIN[2] целиком нулевая, а выделенного спаунера, в отличие
+     * от sky-цепи, в KARNOV.EXE не найдено — см. комментарий перед
+     * обработчиками типов 4..57). Хук нужен ТОЛЬКО для ручной проверки
+     * ai_ryu/ai_notify_enemy_hit до тех пор, пока настоящий спаунер не
+     * найден; не влияет на обычную игру. */
+    if (frame == 0 && getenv("KARNOV_DBG_SPAWN_RYU")) {
+        int slot = alloc_obj_slot();
+        if (slot >= 0) {
+            g_obj[slot] = (ai_obj_t){
+                .alive = true, .type = 36, .subtype = 9,
+                .x = physics_get_left_x() + 60, .y = 300,
+                .hp = 50, .facing = -1, .level_idx = -1,
+            };
+            fprintf(stderr, "DBG: тестовый спаун Рю на (%d,%d)\n",
+                    g_obj[slot].x, g_obj[slot].y);
+        }
+    }
     /* Единственная точка инициализации AI — prepare_level() в game.c. */
     /* KARNOV_DBG_OBJECTS=1 — сколько объектов живо/выделено (диагностика
      * заполнения пула и работы off-screen despawn'а). */
@@ -3959,6 +5406,19 @@ void ai_tick(u16 frame, u8 karnov_input)
         fprintf(stderr, "f=%u alive=%d (из уровня %d) выстрелов=%d сила=%d slots=%d/%d kx=%d\n",
                 frame, alive, from_level, shots, inv_firepower(), g_num, MAX_AI, physics_get_left_x());
     } }
+    /* KARNOV_DBG_HITCOL=<box_idx> — временный тестовый хук: раз в 40 кадров
+     * бьёт указанный box первого живого типа-20 объекта (для смоук-теста
+     * просадки колонны без реального выстрела игрока). */
+    { const char *hc = getenv("KARNOV_DBG_HITCOL");
+      if (hc && frame % 40 == 0 && frame > 0) {
+        int box = atoi(hc);
+        for (int i = 0; i < g_num; ++i) {
+            if (g_obj[i].alive && g_obj[i].type == 20) {
+                ai_head_column_hit_box(&g_obj[i], box);
+                break;
+            }
+        }
+      } }
     /* KARNOV_DBG_TYPE=<n> — трассировка объектов одного типа рядом с
      * координатами игрока в конвенции движка (левый край / верх спрайта). */
     { const char *dt = getenv("KARNOV_DBG_TYPE");
@@ -3966,12 +5426,16 @@ void ai_tick(u16 frame, u8 karnov_input)
         for (int i = 0; i < g_num; ++i) {
             if (!g_obj[i].alive || g_obj[i].type != (u16)want) continue;
             fprintf(stderr, "f=%u t%d x=%d y=%d hp=%d puff=%d ph=%d misc=%d aux=%d st=%d "
-                    "| karnov left=%d top=%d feet=%d\n",
+                    "| karnov left=%d top=%d feet=%d",
                     frame, want, g_obj[i].x, g_obj[i].y, g_obj[i].hp,
                     g_obj[i].puff_frames,
                     g_obj[i].st_phase, g_obj[i].st_misc, g_obj[i].st_aux,
                     g_obj[i].anim_state, physics_get_left_x(), physics_get_top_y(),
                     physics_get_y());
+            for (int p = 0; p < g_obj[i].num_parts; ++p)
+                fprintf(stderr, " part%d(spr=%d,dy=%d)", p,
+                        g_obj[i].parts[p].sprite, g_obj[i].parts[p].dy);
+            fprintf(stderr, "\n");
         } } }
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
@@ -4031,32 +5495,35 @@ void ai_tick(u16 frame, u8 karnov_input)
         }
       } }
 
+    /* Страховка проходимости — для ЛЮБОГО свитка, и настоящего (тип 7), и
+     * синтетического: если он лёг там, куда Карнов не может дойти (на
+     * LEVEL4 «гусеница» висит на 126 px выше него, и свиток ложился на
+     * верхний ярус — уровень было не закончить), через 400 кадров после
+     * ПОЯВЛЕНИЯ свитка переносим его к самому Карнову. */
+    bool scroll_exists = false;
+    if (!g_scroll_picked) {
+        for (int i = 0; i < g_num; ++i) {
+            ai_obj_t *sc = &g_obj[i];
+            if (!sc->alive || !sc->is_scroll) continue;
+            scroll_exists = true;
+            if ((u16)(frame - sc->spawn_frame) > 400) {
+                int h = sc->cur_h > 0 ? sc->cur_h : obj_height(sc);
+                if (sc->y + h < physics_get_y() - 20) {
+                    sc->x = physics_get_left_x();
+                    sc->y = physics_get_y() - h;
+                    sc->custom = 1;             /* уже «приземлился» */
+                }
+            }
+            break;
+        }
+    }
+
     /* Синтетический свиток нужен лишь там, где в данных нет записи
      * типа 7 (настоящего свитка) — иначе работает он сам. */
     bool real_scroll = false;
     for (int i = 0; i < g_num; ++i)
         if (g_obj[i].alive && g_obj[i].type == 7) { real_scroll = true; break; }
     if (g_boss_dead && !g_scroll_picked && !real_scroll) {
-        bool scroll_exists = false;
-        int  scroll_slot   = -1;
-        for (int i = 0; i < g_num; ++i) {
-            if (g_obj[i].alive && g_obj[i].is_scroll) {
-                scroll_exists = true; scroll_slot = i; break;
-            }
-        }
-        /* Страховка проходимости: если свиток лежит там, куда Карнов не
-         * может дойти (на LEVEL4 «гусеница» висит на 126 px выше него,
-         * и свиток ложился на верхний ярус — уровень было не закончить),
-         * через 400 кадров переносим свиток к самому Карнову. */
-        if (scroll_exists && (u16)(frame - g_boss_dead_frame) > 400) {
-            ai_obj_t *sc = &g_obj[scroll_slot];
-            int h = sc->cur_h > 0 ? sc->cur_h : obj_height(sc);
-            if (sc->y + h < physics_get_y() - 20) {
-                sc->x = physics_get_left_x();
-                sc->y = physics_get_y() - h;
-                sc->custom = 1;                 /* уже «приземлился» */
-            }
-        }
         if (!scroll_exists && (frame - g_boss_dead_frame) >= 30) {
             int slot = alloc_obj_slot();
             /* X падения: место гибели boss'а, но только если под ним есть
@@ -4103,8 +5570,8 @@ void ai_tick(u16 frame, u8 karnov_input)
  *   #76..85   — Зелёный стражник с мечом (10 фаз)
  *   #86..90   — Зелёный каменный человек (5 фаз) → splash stone-thrower
  *   #91..94   — Комарик (4 фазы) → Y-tracker (тип 13)
- *   #147..148 — Летящая зелёная птица (2 фазы) → TYPE_FLYING_BIRD (LEVEL1 орлы)
- *                и type 16 (горизонтальный летун)
+ *   #147..148 — Летящая зелёная птица (2 фазы) → тип 10 (LEVEL1 «орлы»,
+ *                ai_type10) и type 16 (горизонтальный летун)
  *   #149..152 — Селёдка (4 фазы) → тип 14 (boss в конце LEVEL1; decomp
  *                ai_type14 spawn sprite 0x95=149)
  *   #153..160 — Чёртик (8 фаз) → walking minion (тип 18)
@@ -4197,11 +5664,6 @@ static u16 sprite_for_type(u16 type, u16 anim_phase)
                                                     * (user 2026-07-04, images 4/6/9). Раньше
                                                     * ошибочно рисовался комариком #91-94. */
             return 86 + (anim_phase % 5);
-        }
-        case TYPE_FLYING_BIRD: {                    /* Летящая зелёная птица — 2 фазы (#147-148).
-                                                    * type8 sky-spawn AnimSeg 0x93/0x94.
-                                                    * Манифест: ai=522 (Karnov-категория). */
-            return 147 + (anim_phase & 1);
         }
         case  16: {                                /* КОМАРИК — горизонтальный летун (type16,
                                                     * vx≈-1.5 px/frame). Дизассемблирование
@@ -4305,11 +5767,12 @@ static void blit_sprite_world(u16 sid, int wx, int wy, int facing,
  * слоёв мошка рисовалась поверх и выглядела «вместо» человека. */
 static bool ai_is_background_flyer(u16 type)
 {
-    return type == 16 || type == TYPE_FLYING_BIRD;
+    return type == 16;
 }
 
 void ai_render(bool mode_cga, int scroll_x, int scroll_y)
 {
+  g_camera_top = scroll_y;
   for (int pass = 0; pass < 2; ++pass) {
     for (int i = 0; i < g_num; ++i) {
         if (!g_obj[i].alive) continue;
@@ -4579,6 +6042,26 @@ static void arm_real_scroll(void)
         if (g_obj[k].alive && g_obj[k].type == 7) g_obj[k].st_phase = 1;
 }
 
+/* Общий путь урона по типу 33 (см. подробный разбор в ai_multipart и в
+ * ai_notify_enemy_hit): и файербол, и вспышка Bomb идут через ОДНУ и ту
+ * же generic-ветку (file 0xFC18/0xFC21/0xFC50, a.obj_type==2 ×
+ * b.obj_type==9) — разница только в dmg (10 у выстрела, 100 у Bomb).
+ * Используется из ai_notify_enemy_hit (выстрел) и ai_clear_enemies
+ * (Bomb) вместо прямого снятия alive, чтобы колонна проигрывала
+ * настоящий коллапс, а не исчезала мгновенно. */
+#define BOMB_BLAST_DAMAGE 100   /* file 0x12291: hit_points вспышки Bomb */
+static void ai_tree33_take_hit(ai_obj_t *o, int dmg)
+{
+    if (o->st_phase >= 2) return;                  /* уже коллапсирует — неуязвим */
+    o->hp -= dmg;
+    if (o->hp <= 0) {
+        o->st_phase = 2;
+        audio_play_sfx(1);   /* file 0xFC50: play_sound(1) — общий для всех b.hp<=0 */
+    } else {
+        o->st_phase = 1;
+    }
+}
+
 void ai_notify_enemy_hit(int slot, u16 frame)
 {
     if (slot < 0 || slot >= g_num) return;
@@ -4587,6 +6070,75 @@ void ai_notify_enemy_hit(int slot, u16 frame)
     /* Урон = PLAYER_FIREBALL_DAMAGE (пул HP врага уменьшается на урон
      * снаряда, как `b->hit_points -= a->hit_points` в оригинале). */
     if (o->is_decor) return;              /* декорацию уже не добить */
+    /* Тип 33 (file 0xFC18/0xFC21/0xFC50 — generic pair-loop для
+     * a.obj_type==2 × b.obj_type==9, см. подробный разбор в ai_multipart):
+     * снаряд/бомба ДЕЙСТВИТЕЛЬНО обменивается hit_points с колонной (в
+     * отличие от простого касания — см. ai_check_player_hit), и коллапс
+     * (state4) стартует, только когда получившийся hit_points <= 0.
+     * Файербол несёт PLAYER_FIREBALL_DAMAGE=10 (file 0x117C2) против
+     * hp=95 — нужно около 10 попаданий; Bomb-вспышка (ai_bomb_explode)
+     * бьёт этим же путём уроном 100 (file 0x12291) и валит с одного
+     * раза. Пока результат > 0 — st_phase=1 («разбужена»): в
+     * ai_multipart THINK для этой фазы больше не восстанавливает hp на
+     * снимок (в оригинале — state_byte застрял на 5, THINK не
+     * вызывается), т.е. накопленный урон не сгорает между попаданиями. */
+    if (o->type == 33) {
+        ai_tree33_take_hit(o, PLAYER_FIREBALL_DAMAGE);
+        return;
+    }
+    /* Тип 36 (Рю, финальный босс) — см. подробный разбор в ai_ryu.
+     * Исчерпывающий скан THINKCYCLE (file 0xFC18..0xFC96) и всего
+     * KARNOV.EXE (misc=2 writes, phase(+0xED) reads, state_byte=6
+     * writes) подтвердил: у Рю НЕТ generic-смерти. Попадание снаряда
+     * игрока (a.obj_type==2, гарантировано вызовом отсюда — эта функция
+     * вызывается только из ai_player_fireball) идёт по generic-обмену
+     * hit_points (file 0xFC21..0xFC47); дальше расходится:
+     *   hp ещё > 0  → state5 (file 0x151A:0x07A0): счётчик phase(+0xED)
+     *                 ++ (нигде не читается — не влияет на исход, но
+     *                 воспроизведён байт-точно), хвост → спрайт 0xFA
+     *                 («ранен»). НЕТ award_score/despawn.
+     *   hp <= 0     → state4 ПЕРЕЗАПИСЫВАЕТ state5 в этом же кадре
+     *                 (file 0xFC49..0xFC5A): играет generic play_sound(1)
+     *                 («враг убит»), затем state4 самого типа 36 (file
+     *                 0x151A:0x07DE) ставит misc=2 — «сесть» (см.
+     *                 ai_ryu), БЕЗ award_score/die_puff/is_boss/despawn.
+     * Рю остаётся alive навсегда; повторные попадания после этого молча
+     * повторяют ту же ветку (hp уходит в минус, как и в оригинале —
+     * там тоже ничего не мешает повторному входу). */
+    if (o->type == 36) {
+        o->hp -= PLAYER_FIREBALL_DAMAGE;
+        if (o->hp > 0) {
+            o->st_phase++;                       /* phase(+0xED)++ (мёртвая переменная, честно) */
+            if (o->num_parts > 1) o->parts[1].sprite = 250;   /* 0xFA — «раненый хвост» */
+            return;
+        }
+        audio_play_sfx(1);                       /* generic kill SFX, file 0xFC5A — Рю НЕ умирает */
+        o->st_misc = 2;                          /* «сесть» — та же реакция, что и на обычный удар */
+        return;
+    }
+    /* Тип 34 (file 0x16DE7): КАЖДЫЙ удар снимает один сегмент сверху вниз
+     * (st_phase — индекс верхнего живого бокса, 5..0, см. INIT в
+     * ai_multipart) и начисляет 110 очков (SCORE_BCD[34]=0x110); hp,
+     * как и у типа 33, залочен на снимке — обычная hp<=0-смерть тут не
+     * применяется. Последний (0-й) сегмент — добивающий: очки
+     * начисляются ЕЩЁ РАЗ (в оригинале — общий add_score в конце THINK
+     * ПЛЮС отдельный в ветке смерти) и объект уходит в generic die_puff. */
+    if (o->type == 34) {
+        int idx = o->st_phase;
+        if (idx >= 0 && idx < o->num_parts) o->parts[idx].sprite = 0;
+        award_score(o->type);
+        audio_play_sfx(1);
+        if (idx > 0) {
+            o->st_phase = idx - 1;
+            o->hp = o->st_aux;
+            o->puff_frames = 8;
+        } else {
+            award_score(o->type);
+            o->is_dying = true;
+            o->puff_frames = 8;
+        }
+        return;
+    }
     o->hp -= PLAYER_FIREBALL_DAMAGE;
     if (o->hp > 0) {
         /* Раненый, но живой враг в оригинале не продолжает как ни в чём
@@ -4598,10 +6150,25 @@ void ai_notify_enemy_hit(int slot, u16 frame)
         o->puff_frames = 8;
         return;
     }
-    /* Тип 22 в состоянии 4 (file 0x15902, 0x0D24) не просто гибнет:
-     * помимо очков он выпускает НАВЕДЁННЫЙ снаряд из своей верхней
-     * кромки (box0.x0 + 2, box0.y0 + 0x19) в точку (player.x,
-     * player.y + 10) со скоростью 8.0 и рождает ещё один объект. */
+    /* Тип 22 в состоянии 4 (cs:0x1348:0x0D24, file 0x159A4) не просто
+     * гибнет: помимо очков он вызывает spawn_projectile(x0=box0.x0+2,
+     * y0=box0.y0+0x19, x1=player.x_world, y1=player.y_world+0xa, kind=2,
+     * speed=QV(8,0), flag=1) (file 0x159A4-0x159C8) и рождает ещё один
+     * объект.
+     * speed=8.0 байт-верифицировано (`mov dx,8 / xor ax,ax` перед push,
+     * file 0x159AD/0x159B2). НО flag=1 (первый push, самый глубокий
+     * аргумент) — это не просто «признак», а управляет веткой в самом
+     * spawn_projectile (cs:0x11D6:0x139, file 0x13699+0x1A4..0x1B1):
+     * при flag != 0 переданный y1 ПОДМЕНЯЕТСЯ на y0 (self.y_world) ПЕРЕД
+     * вызовом Манхэттен-нормализатора (cs:0x11D6:0x006) — т.е. цель по Y
+     * искусственно совпадает с источником и вертикальная дельта равна
+     * НУЛЮ. Снаряд летит СТРОГО ГОРИЗОНТАЛЬНО (в сторону игрока по X) на
+     * полной скорости 8.0, а не «наведённый» по Y. Сверено с типом 8
+     * (file 0x12B00, тройной выстрел, flag=0 передан явно — там y1
+     * остаётся настоящей целью, что и подтверждает флаг именно как этот
+     * переключатель, а не случайное совпадение). Прежний порт ошибочно
+     * нормализовал по (tx,ty) с реальным ty — баг того же рода, что и
+     * ранее найденный у типа 20 (наведение вместо фиксированной формулы). */
     if (o->type == 22) {
         int slot = alloc_obj_slot();
         if (slot >= 0) {
@@ -4612,11 +6179,8 @@ void ai_notify_enemy_hit(int slot, u16 frame)
                              .facing = (player_units() > obj_units(o)) ? 1 : -1 };
             obj_phys_begin(b);
             int tx = player_units() - obj_units(o);
-            int ty = physics_get_top_y() + 10 - o->y;
-            int len = (tx < 0 ? -tx : tx) + (ty < 0 ? -ty : ty);
-            if (len < 1) len = 1;
-            b->vxq = ((s32)tx * QV(8, 0)) / len;
-            b->vyq = ((s32)ty * QV(8, 0)) / len;
+            b->vxq = (tx >= 0) ? QV(8, 0) : -QV(8, 0);
+            b->vyq = 0;
         }
         /* Второй объект (обработчик cs:0x1348:0x0BB2): obj_type = 5, то
          * есть ПРЕДМЕТ. Он рождается в (x, y + 5) с vy = +1.5 и спрайтом
@@ -4647,6 +6211,30 @@ void ai_notify_enemy_hit(int slot, u16 frame)
         audio_play_sfx(1);
         return;
     }
+    /* Тип 55 (патрульный) на «смертельный» удар (file 0x19697, cs:0x17EC:
+     * 0x187) НЕ умирает вовсе: hit_points принудительно = 0x64 (100, вне
+     * зависимости от исходного hp записи), state_byte возвращается в 2
+     * (THINK) и misc(+0xE9) = 2 — объект сразу уходит в «отдых» и как ни
+     * в чём не бывало продолжает патрулировать с полным hp. Ни очков, ни
+     * die_puff, ни удаления здесь нет — это самовосстанавливающийся враг,
+     * которого штатным огнём убить нельзя. */
+    if (o->type == 55) {
+        o->hp = 0x64;
+        o->st_misc = 2;
+        return;
+    }
+    /* Тип 51 (декоративный элемент арены) на гибель поднимает ОТДЕЛЬНЫЙ
+     * объект-«столб» cs:0x175E:0x3A9 (queue_state, см. ai_arena_pillar) —
+     * 8 сегментов sprite 0x13D(317), абсолютные координаты (1536,310),
+     * неуязвим. См. подробный комментарий у ai_arena_static/ai_arena_pillar. */
+    if (o->type == 51) {
+        int slot = alloc_obj_slot();
+        if (slot >= 0) {
+            g_obj[slot] = (ai_obj_t){ .alive = true, .type = TYPE_ARENA_PILLAR,
+                                       .subtype = 1, .level_idx = -1, .hp = 1,
+                                       .facing = 1 };
+        }
+    }
     /* Смерть тоже проходит через вспышку: оригинал ставит state 4,
      * обработчик начисляет очки и зовёт die_puff, и только состояние 6
      * снимает объект (ai_result |= 1). Полный автомат 4/5/6 в порту не
@@ -4669,12 +6257,20 @@ void ai_notify_enemy_hit(int slot, u16 frame)
 /* Уничтожить всех живых damageable-врагов на экране (Bomb / Clapper).
  * exclude_boss=true (Clapper) пропускает boss'а; false (Bomb) убивает всех.
  * Логика зеркалит ai_notify_enemy_hit: снимаем alive (записи остаются
- * flags=1 — one-shot), отмечаем boss_dead. */
+ * flags=1 — one-shot), отмечаем boss_dead.
+ *
+ * Тип 33 — ИСКЛЮЧЕНИЕ (см. ai_tree33_take_hit): в оригинале вспышка Bomb
+ * не «убивает» колонну напрямую, а бьёт её ТЕМ ЖЕ generic pair-loop'ом,
+ * что и файербол (a.obj_type==2 × b.obj_type==9, file 0xFC18), просто с
+ * hit_points=100 вместо 10 — этого достаточно, чтобы hp=95 сразу ушёл в
+ * минус и стартовал настоящий коллапс (state4), а не мгновенное
+ * исчезновение объекта. */
 void ai_clear_enemies(bool exclude_boss)
 {
     for (int i = 0; i < g_num; ++i) {
         ai_obj_t *o = &g_obj[i];
         if (!o->alive) continue;
+        if (o->type == 33) { ai_tree33_take_hit(o, BOMB_BLAST_DAMAGE); continue; }
         if (!is_damageable_obj(o) && !o->is_boss) continue;
         if (exclude_boss && o->is_boss) continue;
         o->alive = false;
@@ -4756,11 +6352,16 @@ static int player_shots_alive(void)
     return n;
 }
 
-void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
+bool ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
 {
     /* Порт fire() (cs:0xFFA:0x1888, file 0x13028) и spawn_player_shot
      * (cs:0xFFA:0x17AF, file 0x12F4F):
-     *   • при 15 живых снарядах выстрел не происходит вовсе (file 0x1303B);
+     *   • при 15 живых снарядах выстрел не происходит вовсе (file 0x1303B) —
+     *     и, что важно, fire() в этом случае НЕ трогает cooldown [0xD8B2]
+     *     (перезарядка не взводится — прыжок на 0x307D минует и
+     *     play_sound, и запись cooldown) — вызывающая сторона (physics.c)
+     *     обязана проверять возврат этой функции, а не взводить cooldown
+     *     безусловно;
      *   • звук — play_sound(0) (file 0x13045), НЕ 7;
      *   • число снарядов = firepower (1..3, [DS:0xD949]), и ветки таблицы
      *     file 0x12FB5 «проваливаются» СВЕРХУ ВНИЗ, спавня РАЗНЫЕ объекты
@@ -4768,11 +6369,24 @@ void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
      *       fp=3 → верхний (y−2, cs:0x00FF) + нижний (y+2, cs:0x0183)
      *              + прямой (y, cs:0x00C2)
      *       fp=2 → нижний + прямой      fp=1 → только прямой
-     *   • точка вылета: x = player.x_world + 4 ед. (= левый край + 8 px),
-     *     y = верх спрайта Карнова + 7 (+16 если сидит);
+     *   • точка вылета Y = верх спрайта Карнова + 7 (+16 если сидит) —
+     *     байт-подтверждено (file 0x12F86..0x12F9F);
+     *   • точка вылета X — ПЕРЕРАЗОБРАНО заново (2026-09, file
+     *     0x12F55..0x12FA3): вовсе не симметричный «+4 единицы» для обоих
+     *     направлений, как считалось раньше. Код читает [DS:0xD8B0]
+     *     (facing, тот же регистр что выбирает муззл-спрайт 105/113 в
+     *     конце этой функции), индексирует ИМЕННО ТУ ЖЕ velocity-таблицу
+     *     DS:0x1348, что и WALK_SPEED (см. physics.c): вправо → запись
+     *     (+2.0 Q16.16), влево → (−2.0), удваивает (тот же ×2 lshift, что
+     *     у ходьбы) и прибавляет к x_world игрока ФЛАТ-константу +4.0 (px,
+     *     этот пайплайн уже в реальных пикселях — см. WALK_SPEED-комментарий
+     *     в physics.c про то же ×2). Итог: вправо x = x_world + 8 px,
+     *     влево x = x_world + 0 px — АСИММЕТРИЧНО, что объясняется разными
+     *     позициями руки Карнова в левом/правом артах. Перенесено в
+     *     physics_tick() (см. `s_facing > 0 ? 8 : 0`);
      *   • состояние анимации выбирается по firepower при СПАВНЕ
      *     (cs:0xFFA:0x0009: [0xD88C] = firepower > 1). */
-    if (player_shots_alive() >= 15) return;
+    if (player_shots_alive() >= 15) return false;
 
     int fp = inv_firepower();
     if (fp < 1) fp = 1;
@@ -4810,4 +6424,5 @@ void ai_spawn_player_fireball(int x, int y, int facing, u16 frame)
         }
     }
     audio_play_sfx(0);   /* выстрел — play_sound(0), KARNOV.EXE @ file 0x13045 */
+    return true;
 }

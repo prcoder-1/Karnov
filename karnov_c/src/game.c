@@ -99,13 +99,29 @@ static int g_scroll_x = 0;
 static int g_scroll_y = 0;
 
 /* ─── Level-end (взятие свитка) ────────────────────────────────────────
- * KARNOV.EXE type56 (ТРИГГЕР ЗАВЕРШЕНИЯ УРОВНЯ, cs:0x17EC:0x03B2): при
- * подборе свитка-сокровища вызывает play_sound(9) + level-completion jingle
- * (music track 2 = DS:0x06FC), проигрывает анимацию (Karnov садится) на
- * ~50+ тиков (внутренний счётчик +0xC7 до 0x32), затем переходит на
- * следующий уровень. Здесь: запускаем jingle, кормим Karnov'у INP_D (он
- * садится в crouch-позу #103/#111) и держим сцену пока не доиграет jingle,
- * но не короче LEVEL_END_MIN_TICKS (чтобы посадка была видна). */
+ * KARNOV.EXE type56 (ТРИГГЕР ЗАВЕРШЕНИЯ УРОВНЯ, cs:0x17EC:0x03B2, file
+ * 0x19A72): при подборе свитка-сокровища вызывает play_sound(9) +
+ * level-completion jingle (music track 2 = DS:0x06FC), проигрывает
+ * анимацию (Karnov садится), затем переходит на следующий уровень.
+ *
+ * Первая фаза байт-верифицирована (2026-09), file 0x19BD4-0x19BE7:
+ *   mov word[es:bx+0xc7],0                ; frame_ctr := 0 (сброс при входе)
+ *   ...
+ *   cmp word[es:bx+0xc7],byte 0x32 ; jg → следующая подфаза
+ *                                  ; else jmp (остаться, ждать ещё)
+ * т.е. подфаза длится, пока frame_ctr НЕ станет СТРОГО БОЛЬШЕ 50 — ровно
+ * 51 кадр (не «~50+» на глаз). После этого — ЕЩЁ несколько подфаз
+ * (file 0x19BF4..0x19C88), которые ждут не по счётчику кадров, а пока
+ * frame_idx (+0xC5) анимации сидения дойдёт до конца соответствующего
+ * AnimScript (таблицы DS:0x1F34/0x1F48/0x1F62), и в конце — случайный
+ * выбор 1-из-3 (call cs:0x1ce7:0x17, div 3) перед удалением триггер-
+ * объекта. Эти дальнейшие подфазы НЕ портированы байт-в-байт (нужны
+ * данные AnimScript-таблиц сидения и семантика RNG-вызова) — порт
+ * приближает их через «ждать окончания jingle», что по духу совпадает
+ * (тоже «жди пока не доиграет анимация/музыка»), но не по кадру. Здесь:
+ * запускаем jingle, кормим Karnov'у INP_D (он садится в crouch-позу
+ * #103/#111) и держим сцену пока не доиграет jingle, но не короче
+ * LEVEL_END_MIN_TICKS (чтобы посадка была видна). */
 static bool s_level_end       = false;
 /* Level select: нажата «L» при активном чите — ждём цифру (file 0x3DB0). */
 static bool s_level_select_armed = false;
@@ -113,15 +129,25 @@ static u16  s_level_end_start = 0;
 /* Максимальный достигнутый прогресс игрока по X (в 2px-единицах) —
  * аналог DS:0xD8CC; участвует в выборе региона респауна после смерти. */
 static int  s_max_progress_units = 0;
-/* Жизни Karnov'а (KARNOV.EXE: 3 в начале — «begins each game with three
- * lives»; var DS:0xCF4E, game-over при <=0). Death: -1; K-Mark / завершение
- * уровня («символ жизни выпадает»): +1. */
-#define KARNOV_START_LIVES 4    /* 4 запасных жизни (кроме текущей), user-verified */
+/* Жизни Karnov'а. Байт-верифицировано (2026-09), инициализация DS:0xCF4E:
+ *   file 0x6A37: mov word[0xcf50],1
+ *   file 0x6A3D: cmp word[0xcdec],0 ; jz 0x6A66     («in_game» ещё 0 при
+ *                                                     старте новой игры)
+ *   file 0x6A66: mov ax,[0x35a] ; add [0xcf50],ax   ; DS:0x35A = 1 (файл,
+ *                                                     initialized data)
+ *   file 0x6B17-0x6B1A: mov ax,[0xcf50] ; mov [0xcf4e],ax
+ * т.е. DS:0xCF50 = 1 + [0x35A](=1) = 2, копируется в DS:0xCF4E (lives).
+ * game-over — когда DS:0xCF4E ДОХОДИТ до 0 после декремента при смерти
+ * (file 0x6821/0x68D7 — dec word[0xcf4e]; file 0x6825 — cmp …,0). Раз
+ * CF4E считает «жизни СВЕРХ текущей», 2 = ровно manual'ьное «three
+ * lives» (1 текущая + 2 про запас) — прежнее значение 4 (5 суммарных)
+ * было user-угадано неверно. */
+#define KARNOV_START_LIVES 2    /* байт-верифицировано: DS:0xCF50 = 1+DS:0x35A(1) → DS:0xCF4E */
 #define KARNOV_MAX_LIVES   9
 #define LIFE_ICON_SPRITE   0x32 /* белый череп-иконка жизни */
 static int  s_lives = KARNOV_START_LIVES;
 static bool s_game_over = false;
-#define LEVEL_END_MIN_TICKS 55    /* ~2 сек @ 27.5fps — минимум на «посадку» */
+#define LEVEL_END_MIN_TICKS 51    /* байт-верифицировано: frame_ctr > 0x32 (file 0x19BDF) */
 #define LEVEL_END_MAX_TICKS 165   /* ~6 сек — потолок, чтобы не зависнуть если jingle не сигналит конец */
 
 static void update_scroll(int karnov_x, int karnov_y)
@@ -144,6 +170,9 @@ static void update_scroll(int karnov_x, int karnov_y)
     } else {
         g_scroll_y = 0;
     }
+    /* physics.c нужен текущий scroll_y для байт-точного порога «скрыть
+     * тело гибели за экраном» (death_tick, [0xCC94]+0x64 в оригинале). */
+    physics_set_scroll_y(g_scroll_y);
 }
 
 /* ─── Draw level tiles ─────────────────────────────────────────────── */
@@ -343,8 +372,6 @@ static int prepare_level(u16 level_num, bool load_demo)
     level_phys_t ph = level_phys_for(level_num);
     palette_set_level(level_num);
     physics_set_world_bounds(ph.min_x, ph.max_x, ph.ground_y, ph.ceiling_y);
-    physics_set_level0_splash(level_num == 0);
-    physics_set_level1_dragon_platform(level_num == 1);
     /* DEBUG: KARNOV_START_X env var override (для headless screenshot-теста). */
     const char *dbg_start_x = getenv("KARNOV_START_X");
     int sx = dbg_start_x ? atoi(dbg_start_x) : ph.spawn_x;
@@ -516,8 +543,21 @@ int splash_run(const splash_options_t *opt)
     /* Заставка загрузки перед первым уровнем. */
     bool quit = run_loader_screen(audio_running);
 
-    /* Interactive main loop. tick_ms=36 ≈ 27.5 FPS (байт-верифицированная
-     * частота из KARNOV.EXE think_cycle wait-loop). */
+    /* Interactive main loop. Точный период оригинала — 36.367 мс (27.4977 Гц),
+     * байт-подтверждено заново 2026-09-14: PIT-канал 0 перепрограммирован на
+     * divisor 0x1530 (file 0xE3FF, cs:0xCB9:0x4C) → ISR 1193182/5424 =
+     * 219.9819 Гц; главный цикл (file 0x69E9-0x69FF) busy-wait'ит ровно 8
+     * тиков этого ISR перед следующим кадром: 219.98/8 = 27.4977 Гц. Целых
+     * 36мс (используется ниже) короче примерно на 1% — не годится ровно, но
+     * фиксировать дробный тик не стали: это НЕ основная причина ощущения
+     * «слишком быстро» (высота прыжка не зависит от FPS вовсе, см. правку
+     * от того же числа). Важнее другое: 27.5 Гц в оригинале — это ПОТОЛОК
+     * busy-wait'а, не гарантированная частота; на реальном XT (4.77 МГц)
+     * AI/отрисовка вполне могли не укладываться в 8 тиков и код УХОДИЛ
+     * МЕДЛЕННЕЕ потолка — порт же на современном железе всегда попадает
+     * точно в потолок, отсюда стабильно «быстрее», чем помнится по XT.
+     * Честно смоделировать это без cycle-accurate тайминга 8088-кода
+     * нельзя — не делаем (см. план code-review-floating-moth.md). */
     u16 frame = 0;
     u16 s_demo_done_frame = 0;
     bool prev_start = false;
@@ -564,22 +604,50 @@ int splash_run(const splash_options_t *opt)
         }
         u32 now = SDL_GetTicks();
         if (now - last_tick >= tick_ms) {
+            /* Никогда не "досогонять" несколько тиков подряд без задержки
+             * между ними — иначе после любой просадки кадра (рендер
+             * притормозил, окно свернули/растянули, ОС отвлеклась) движок
+             * какое-то время симулирует игру БЫСТРЕЕ реального времени
+             * (следующая проверка `now - last_tick >= tick_ms` сразу же
+             * снова истинна, и очередной тик выполняется без SDL_Delay).
+             * Оригинал на реальном железе физически не мог обогнать
+             * таймер PIT — он либо успевал 27.5 кадров в секунду, либо
+             * тормозил, но никогда не ускорялся. Поэтому здесь режем
+             * накопившееся отставание до одного tick_ms перед тем как
+             * снова его прибавлять — симуляция может отставать от
+             * реального времени, но никогда не обгоняет его. */
+            if (now - last_tick > tick_ms) last_tick = now - tick_ms;
             last_tick += tick_ms;
             demo_tick(frame);
             u8 demo_inp = demo_input_state();
             u8 kbd_only = 0;
             input_poll(&kbd_only);
-            u8 inp = (kbd_only != 0) ? kbd_only : demo_inp;
+            /* Во время демо-показа (аттракт-режим либо between-level демка) игра
+             * должна управляться ИСКЛЮЧИТЕЛЬНО записью .MOV — клавиатура не должна
+             * подмешиваться в inp. `kbd_only` при этом всё равно опрашивается и
+             * доступен ниже как есть (ENTER/START-переход в интерактив, ESC, чит
+             * ZEEK — всё это читает kbd_only/сырые SDL-события напрямую, не inp,
+             * поэтому этим фиксом не затрагивается). */
+            bool in_attract = demo_record_count() > 0;
+            u8 inp = (kbd_only != 0 && !in_attract) ? kbd_only : demo_inp;
 
             /* Во время финальной секвенции (взят свиток) игрок не управляет:
              * Karnov сидит (INP_D → crouch-поза), пока играет level-end jingle. */
             if (s_level_end) {
                 inp = INP_D; kbd_only = 0;              /* INP_D блокирует движение (сидит на месте) */
                 physics_set_sit_scroll(true);           /* поза «сидит со свитком» #0x60-0x62 */
-            } else if (current_level >= 1 && ai_boss_dead() && !ai_scroll_picked()) {
-                /* Босс убит: Karnov неуязвим. СНАЧАЛА свиток должен начать
-                 * выпадать, и ТОЛЬКО ПОТОМ Karnov авто-идёт к нему. Пока свиток
-                 * не заспавнился — Karnov стоит на месте (inp=0). */
+            } else if (current_level >= 1 && ai_scroll_spawned() && !ai_scroll_picked()) {
+                /* Авто-секвенция начинается с ПОЯВЛЕНИЯ свитка, а не со смерти
+                 * босса. В оригинале обработчик игрока подменяется на
+                 * cs:0xE62:0x0CF6 внутри самого свитка (ai_type07), когда тот
+                 * проявляется; до этого игрок управляется как обычно.
+                 *
+                 * Гейт по ai_boss_dead() приводил к дедлоку: настоящий свиток
+                 * (запись типа 7) проявляется, только если игрок ближе 0x50
+                 * единиц (160 px), а управление отбиралось уже в момент гибели
+                 * босса — Карнов не мог подойти, свиток не выпадал и уровень
+                 * было не закончить (LEVEL1: свиток на x=3408, бой идёт на
+                 * 3242…3282, порог появления — правее 3248). */
                 physics_set_invuln(true);
                 kbd_only = 0;
                 /* Идём к свитку ТОЛЬКО когда он упал в видимую область экрана. */
@@ -592,7 +660,6 @@ int splash_run(const splash_options_t *opt)
                 }
             }
 
-            bool in_attract = demo_record_count() > 0;
             bool demo_done = in_attract &&
                              demo_current_index() >= demo_record_count();
             if (demo_done) {
@@ -655,13 +722,12 @@ int splash_run(const splash_options_t *opt)
                  * всё, что не полностью позади точки возрождения, оживает. */
                 ai_respawn_rearm(physics_get_x());
             }
-            if (audio_running) {
-                if (physics_just_died()) {
-                    audio_play_music(5, /*loop=*/false);
-                } else if (was_dying && !physics_is_dying()) {
-                    audio_play_music(0, /*loop=*/true);
-                }
-            }
+            /* Трек 5 «смерть Karnov» запускает сама physics (INIT обработчика
+             * гибели, KARNOV.EXE 0x1838). Здесь — только возврат к фоновой
+             * музыке после респауна: оригинальный post-death (cs:0x4E4:0x18D)
+             * гасит канал A вызовом play_music(0xFFFF, …). */
+            if (audio_running && was_dying && !physics_is_dying())
+                audio_play_music(0, /*loop=*/true);
             ai_try_pickup(physics_get_x(), physics_get_y());
             /* Pair-loop: касание врага ранит Карнова (file 0xFB7A). */
             ai_check_player_hit(physics_get_x(), physics_get_y(), 16, 26);
