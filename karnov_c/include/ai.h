@@ -31,9 +31,14 @@ void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
  * goal-объектом, снимаются. Вызывается из ai_tick. */
 void ai_despawn_behind(int player_x_px);
 
-/* Rearm после смерти игрока (file 0x1015A): снять все активные объекты и
- * перевзвести записи по правилу flags = (cur_x + range_x < player_x)?1:0.
- * player_x_px — позиция Karnov'а ПОСЛЕ респауна (в пикселях). */
+/* Rearm-цикл (file 0x1015A): снять все активные объекты и перевзвести
+ * записи по правилу flags = (cur_x + range_x < player_x)?1:0. В оригинале
+ * гоняется НЕ ТОЛЬКО после смерти игрока, а на КАЖДОМ входе в уровень
+ * (file 0x10019, единственный вызов из file 0x6966, который сам вызывается
+ * и по смерти, и по "level complete" — см. cs:0x6C14/0x6C37). Поэтому
+ * зовётся и из prepare_level() при свежей загрузке уровня, и после
+ * респауна после смерти. player_x_px — позиция Karnov'а ПОСЛЕ размещения
+ * (в пикселях). */
 void ai_respawn_rearm(int player_x_px);
 
 /* Прокачивает все живые AI-объекты по своим хендлерам. */
