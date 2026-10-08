@@ -59,16 +59,52 @@ typedef struct {
 #define ST_P(o, t, n)       t *n;
 #define ST_C(o, n)          farfn n;
 
+/* Элемент списка аним-состояний: far-указатели на массив кадров
+ * (слово 0 — число кадров, далее номера спрайтов) и на смещения
+ * кадров (пары dx, dy). */
+#define STATEENTRY_FIELDS(R, A, P, C) \
+    P(0x00, s16, anim)          \
+    P(0x04, s16, offs)
+typedef struct StateEntry {
+    STATEENTRY_FIELDS(ST_R, ST_A, ST_P, ST_C)
+} StateEntry;
+#define StateEntry_SIZE 8
+extern const Layout StateEntry_layout;
+
+/* Скорость и ускорение (Q16.16) — таблица motion_table, DS:0x1348. */
+typedef struct { s32 vx, vy, ax, ay; } Motion;
+#define Motion_SIZE 16
+
+/* Результат move_with_collision: маски проходимости по направлениям
+ * (0 вверх, 1 вправо, 2 вниз, 3 влево, 4 — проба «ступни») и до 3 упоров. */
+#define COLLRES_FIELDS(R, A, P, C) \
+    P(0x00, s16, masks)         \
+    R(0x04, s16, any)           \
+    R(0x06, s16, n)             \
+    A(0x08, s16, dir, 3)        \
+    A(0x0E, s16, x, 3)          \
+    A(0x14, s16, y, 3)          \
+    A(0x1A, s16, col, 3)        \
+    A(0x20, s16, attr, 3)
+typedef struct CollRes {
+    COLLRES_FIELDS(ST_R, ST_A, ST_P, ST_C)
+} CollRes;
+#define CollRes_SIZE 0x26
+extern const Layout CollRes_layout;
+
 /* Бокс спрайта в объекте (18 байт, +0x20 + 18*i). */
 typedef struct {
     s16 sprite, dx, dy, x0, y0, x1, y1, hitflag, was_vis;
 } SpriteBox;
 
-/* ActiveObject — 245 байт, all_objects[] в DS:0x2824. */
+/* ActiveObject — 245 байт, all_objects[] в DS:0x2824.
+ * Свободный объект хранит в x_screen/y_screen far-указатель (off, seg)
+ * на следующий свободный той же parity-цепочки. stamped — объект
+ * впечатан в фон (список stamp_list) и не перерисовывается покадрово. */
 #define OBJ_FIELDS(R, A, P, C) \
     R(0x00, s16, x_screen)      \
     R(0x02, s16, y_screen)      \
-    R(0x04, s16, f04)           \
+    R(0x04, s16, self_idx)           \
     R(0x06, u16, x_lo)          \
     R(0x08, s16, x_world)       \
     R(0x0A, u16, y_lo)          \
@@ -83,9 +119,9 @@ typedef struct {
     R(0x1C, s16, ay_hi)         \
     R(0x1E, s16, num_bboxes)    \
     A(0x20, SpriteBox, box, 8)  \
-    R(0xB0, s16, alive)         \
-    R(0xB2, s16, next_idx)      \
-    R(0xB4, s16, prev_idx)      \
+    R(0xB0, s16, stamped)         \
+    R(0xB2, s16, active_pos)      \
+    R(0xB4, s16, stamp_pos)      \
     R(0xB6, u8,  state_byte)    \
     C(0xB7, handler)            \
     C(0xBB, ai_init)            \
@@ -95,15 +131,15 @@ typedef struct {
     R(0xC7, s16, frame_ctr)     \
     R(0xC9, s16, tick_period)   \
     R(0xCB, s16, throttle)      \
-    P(0xCD, u8,  state_anim)    \
-    P(0xD1, u8,  state_offs)    \
-    P(0xD5, u8,  state_list)    \
+    P(0xCD, s16, state_anim)    \
+    P(0xD1, s16, state_offs)    \
+    P(0xD5, StateEntry, state_list) \
     R(0xD9, s16, next_state_id) \
     R(0xDB, s16, active)        \
     R(0xDD, s16, hit_flag)      \
     R(0xDF, s16, hit_idx)       \
-    R(0xE1, s16, hit_box_self)  \
-    R(0xE3, s16, hit_box_other) \
+    R(0xE1, s16, hit_box_other)  \
+    R(0xE3, s16, hit_box_self) \
     R(0xE5, s16, obj_type)      \
     R(0xE7, s16, hit_points)    \
     R(0xE9, s16, misc)          \
@@ -118,6 +154,28 @@ typedef struct ActiveObject {
 #define ActiveObject_SIZE 0xF5
 extern const Layout ActiveObject_layout;
 
+/* Записи уровня в куче (не в DS). */
+typedef struct {            /* 20 байт, отсортированы по x */
+    s16 type;               /* AI-тип: индекс ai_handlers */
+    s16 kind;               /* → obj_type; бит 0 — parity-цепочка */
+    s16 x, y;               /* точка триггера */
+    s16 rx, ry;             /* полуразмеры зоны срабатывания */
+    s16 wx, wy;             /* стартовые x_world/y_world объекта */
+    u8  init_arg, hp;
+    s16 spawned;
+} EnemySpawn;
+
+#define Demo_SIZE 0x304
+typedef struct {            /* демо: 0x304 байта в DS */
+    s16 pos;                /* следующее событие (по кругу 256) */
+    s16 count;              /* конец */
+    u8  ev[0x300];          /* события по 3 байта: маска, кадр (слово) */
+} Demo;
+
+typedef struct {            /* 12 байт */
+    s16 w0, w2, w4, w6, w8, wA;
+} ObjRegion;
+
 /* --- глобалы ------------------------------------------------------ */
 
 #define DSV(t, n, a)        extern t n;
@@ -127,7 +185,8 @@ extern const Layout ActiveObject_layout;
 #define DSPA(t, n, a, k)    extern t *n[k];
 #define DSF(n, a)           extern farfn n;
 #define DSFA(n, a, k)       extern farfn n[k];
-#define DSX(t, n, a, k)     extern t n[k];
+#define DSX(t, n, a, k, o)  extern t n[k];
+#define DSVX(t, n, a, o)    extern t n;
 #include "orig/ds_vars.h"
 #undef DSV
 #undef DSA
@@ -137,6 +196,7 @@ extern const Layout ActiveObject_layout;
 #undef DSF
 #undef DSFA
 #undef DSX
+#undef DSVX
 
 /* --- реестр ------------------------------------------------------- */
 
@@ -152,6 +212,10 @@ void ds_init(void);
 /* Образ DS перевода; mask[i] = 1 там, где байт описан реестром. */
 void ds_snapshot(u8 *img, u8 *mask);
 
+/* fmemcpy между диапазоном DS и буфером в раскладке оригинала. */
+void ds_copy_out(u16 addr, u16 n, u8 *dst);
+void ds_copy_in(u16 addr, u16 n, const u8 *src);
+
 /* far-указатели: seg:off (seg в старшем слове) ↔ C-указатель. */
 void *ds_resolve(u32 segoff);
 u32   ds_unresolve(const void *p);
@@ -159,6 +223,14 @@ farfn fn_resolve(u32 segoff);
 u32   fn_unresolve(farfn f);
 
 #define DS_SEG 0x1D99u
+
+/* Скрипты музыки по адресам DS. */
+#define MUSIC(addr) (&music_data[(addr) - 0x04CE])
+#define music_loader MUSIC(0x0A6A)
+
+/* Скрипт-«стоп» для play_music/play_sfx (в оригинале far-указатель 0000:FFFF). */
+extern u8 snd_stop_marker;
+#define SND_STOP (&snd_stop_marker)
 
 /* Реестр функций (генерируется tools/gen_fn.py в fnreg.c). */
 typedef struct { u16 seg, off; farfn fn; const char *name; } FnReg;

@@ -26,7 +26,6 @@ F 015F:0494 detect_video_mode
 F 015F:0646 bk_init
 ; --- 0x020F ввод
 F 020F:000A read_key
-F 020F:001A peek_key
 F 020F:005C read_joystick
 F 020F:00DA read_keyboard
 F 020F:02FB DOCONTROLS
@@ -48,7 +47,6 @@ F 041D:09BE option_pickup
 F 04E4:000B draw_text
 F 04E4:018D post_death_respawn
 F 04E4:0326 main_loop
-F 04E4:0400 show_end_screen
 F 04E4:04FA print_int
 ; --- 0x054B демо
 F 054B:0009 is_demo_at_end
@@ -80,7 +78,6 @@ F 0CB9:0191 silence_chA
 F 0CB9:019E advance_script_chA
 F 0CB9:0298 music_tick
 F 0CB9:02C9 sfx_tick
-F 0CB9:0314 chA_dispatch
 F 0CB9:03CC timer_isr
 ; --- 0x0D4B ядро
 F 0D4B:0003 map_cell_set

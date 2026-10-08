@@ -17,7 +17,10 @@ IGNORE = [(0xCC9C, 0xCCA0)]
 def symbols():
     vars_, objf = [], {}
     t = open(os.path.join(KC, "include/orig/ds_vars.h"), encoding="utf-8").read()
-    for m in re.finditer(r"^DS(V|A|S|P|PA|F|FA|X)\(([^)]*)\)", t, re.M):
+    gen = os.path.join(KC, "include/orig/ds_anim.h")
+    if os.path.exists(gen):
+        t += open(gen, encoding="utf-8").read()
+    for m in re.finditer(r"^DS(V|A|S|P|PA|F|FA|X|VX)\(([^)]*)\)", t, re.M):
         a = [x.strip() for x in m.group(2).split(",")]
         k = m.group(1)
         if k in ("F", "FA"):
@@ -26,12 +29,20 @@ def symbols():
             vars_.append((addr, name, 4, cnt, None))
             continue
         typ, name, addr = a[0], a[1], int(a[2], 16)
-        cnt = int(a[3], 0) if len(a) > 3 else 1
-        size = {"u8": 1, "s8": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4}.get(typ, 4 if k in ("P", "PA") else None)
-        if k == "S":
-            size = 0xF5 if typ == "ActiveObject" else None
-        vars_.append((addr, name, size or 1, cnt, typ if k == "S" else None))
+        cnt = int(a[3], 0) if len(a) > 3 and k != "VX" else 1
+        size = 4 if k in ("P", "PA") else \
+            {"u8": 1, "s8": 1, "char": 1, "u16": 2, "s16": 2, "u32": 4, "s32": 4}.get(typ)
+        if k == "VX":
+            size = int(a[3], 0)
+        if k == "X":
+            size = int(a[4], 0)
+        stype = typ if k in ("S", "A") and size is None else None
+        vars_.append((addr, name, size or 1, cnt, stype))
     h = open(os.path.join(KC, "include/orig/ds.h"), encoding="utf-8").read()
+    for i, (a, n, size, cnt, typ) in enumerate(vars_):
+        m = re.search(r"#define %s_SIZE (0x[0-9A-Fa-f]+|\d+)" % (typ or "@@"), h)
+        if m:
+            vars_[i] = (a, n, int(m.group(1), 0), cnt, typ)
     for m in re.finditer(r"^\s+[RAPC]\((0x[0-9A-F]+),\s*(?:[\w ]+,\s*)?(\w+)", h, re.M):
         objf[int(m.group(1), 16)] = m.group(2)
     return vars_, objf

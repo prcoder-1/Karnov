@@ -439,7 +439,7 @@ def annotate(i, seg, syms, data):
             v = dsdiff.name_of(disp, *data["__vars__"])
             if v != "?":
                 notes.append(f"&{v}[{disp:04X}]+idx")
-        elif seg_r == X.X86_REG_ES and base == X.X86_REG_BX:
+        elif seg_r == X.X86_REG_ES and base == X.X86_REG_BX and disp:
             fn = field_name(disp)
             if fn:
                 notes.append("obj." + fn)

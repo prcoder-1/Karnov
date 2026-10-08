@@ -15,15 +15,17 @@ int ds_check(void)
 {
     unsigned i, f, k;
     int bad = 0;
-    u32 prev_end = 0;
     for (i = 0; i < ds_nvars; i++) {
         const DsVar *v = &ds_vars[i];
         u32 end = v->addr + (u32)v->count * v->orig_size;
-        if (v->addr < prev_end)
-            bad |= fail("пересечение/порядок", v->name);
+        unsigned j;
+        for (j = 0; j < ds_nvars; j++) {
+            const DsVar *w = &ds_vars[j];
+            if (j != i && w->addr >= v->addr && w->addr < end)
+                bad |= fail("пересечение", w->name);
+        }
         if (end > 0x10000)
             bad |= fail("выход за DS", v->name);
-        prev_end = end;
         if (v->lay) {
             u16 at = 0;
             for (f = 0; f < v->lay->nf; f++) {

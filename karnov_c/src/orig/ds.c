@@ -13,7 +13,8 @@
 #define DSPA(t, n, a, k)    t *n[k];
 #define DSF(n, a)           farfn n;
 #define DSFA(n, a, k)       farfn n[k];
-#define DSX(t, n, a, k)     t n[k];
+#define DSX(t, n, a, k, o)  t n[k];
+#define DSVX(t, n, a, o)    t n;
 #include "orig/ds_vars.h"
 #undef DSV
 #undef DSA
@@ -23,6 +24,7 @@
 #undef DSF
 #undef DSFA
 #undef DSX
+#undef DSVX
 
 /* --- раскладки структур */
 #define FD_R(o, t, n)    { o, sizeof(t), K_RAW, offsetof(LAYOUT_T, n) },
@@ -36,6 +38,18 @@ const Layout ActiveObject_layout = {
     obj_fields, sizeof obj_fields / sizeof obj_fields[0], ActiveObject_SIZE };
 #undef LAYOUT_T
 
+#define LAYOUT_T StateEntry
+static const FieldDesc se_fields[] = { STATEENTRY_FIELDS(FD_R, FD_A, FD_P, FD_C) };
+const Layout StateEntry_layout = {
+    se_fields, sizeof se_fields / sizeof se_fields[0], StateEntry_SIZE };
+#undef LAYOUT_T
+
+#define LAYOUT_T CollRes
+static const FieldDesc cr_fields[] = { COLLRES_FIELDS(FD_R, FD_A, FD_P, FD_C) };
+const Layout CollRes_layout = {
+    cr_fields, sizeof cr_fields / sizeof cr_fields[0], CollRes_SIZE };
+#undef LAYOUT_T
+
 /* --- реестр */
 #define DSV(t, n, a)     { #n, a, 1, sizeof(t), sizeof(t), K_RAW, NULL, &n },
 #define DSA(t, n, a, k)  { #n, a, k, sizeof(t), sizeof(t), K_RAW, NULL, n },
@@ -44,7 +58,8 @@ const Layout ActiveObject_layout = {
 #define DSPA(t, n, a, k) { #n, a, k, 4, sizeof(void *), K_FARDATA, NULL, n },
 #define DSF(n, a)        { #n, a, 1, 4, sizeof(farfn), K_FARCODE, NULL, &n },
 #define DSFA(n, a, k)    { #n, a, k, 4, sizeof(farfn), K_FARCODE, NULL, n },
-#define DSX(t, n, a, k)  { #n, a, k, sizeof(t), sizeof(t), K_NOCMP, NULL, n },
+#define DSX(t, n, a, k, o) { #n, a, k, o, sizeof(t), K_NOCMP, NULL, n },
+#define DSVX(t, n, a, o) { #n, a, 1, o, sizeof(t), K_NOCMP, NULL, &n },
 const DsVar ds_vars[] = {
 #include "orig/ds_vars.h"
 };
@@ -97,7 +112,9 @@ void ds_init(void)
                     break;
                 for (k = 0; k < sl[s].size && k < sizeof tmp; k++)
                     tmp[k] = a + k < ds_init_size ? ds_init_image[a + k] : 0;
-                if (sl[s].kind == K_FARDATA) {
+                if (sl[s].kind == K_NOCMP) {
+                    continue;
+                } else if (sl[s].kind == K_FARDATA) {
                     void *p = ds_resolve(rd32(tmp));
                     memcpy(sl[s].c, &p, sizeof p);
                 } else if (sl[s].kind == K_FARCODE) {
@@ -126,7 +143,7 @@ void ds_snapshot(u8 *img, u8 *mask)
             for (s = 0; s < n; s++) {
                 u32 a = base + slot_off(v, s);
                 u8 tmp[512];
-                if (a + sl[s].size > 0x10000)
+                if (a + sl[s].size > 0x10000 || sl[s].kind == K_NOCMP)
                     continue;
                 if (sl[s].kind == K_FARDATA) {
                     void *p;
@@ -220,9 +237,7 @@ farfn fn_resolve(u32 segoff)
     for (i = 0; i < fn_nreg; i++)
         if (fn_reg[i].seg == segoff >> 16 && fn_reg[i].off == (u16)segoff)
             return fn_reg[i].fn;
-    fprintf(stderr, "fn_resolve: %04X:%04X не переведена\n",
-            (unsigned)(segoff >> 16), (unsigned)(u16)segoff);
-    return NULL;
+    return NULL;    /* ещё не переведена — в сверке проявится расхождением */
 }
 
 u32 fn_unresolve(farfn f)
@@ -235,3 +250,58 @@ u32 fn_unresolve(farfn f)
             return (u32)fn_reg[i].seg << 16 | fn_reg[i].off;
     return 0xFFFFFFFFu;
 }
+
+/* Копирование диапазона DS в байты в раскладке оригинала и обратно
+ * (перевод fmemcpy между DS и буфером). Байты вне реестра не трогаются. */
+static void ds_copy(u16 addr, u16 n, u8 *buf, int in)
+{
+    static Slot sl[64];
+    unsigned i, e, s, k;
+    u32 lo = addr, hi = (u32)addr + n;
+    for (i = 0; i < ds_nvars; i++) {
+        const DsVar *v = &ds_vars[i];
+        u32 vend = v->addr + (u32)v->count * v->orig_size;
+        if (vend <= lo || v->addr >= hi)
+            continue;
+        for (e = 0; e < v->count; e++) {
+            u8 *elem = (u8 *)v->ptr + e * v->c_size;
+            u32 base = v->addr + (u32)e * v->orig_size;
+            unsigned ns = var_slots(v, e, elem, sl);
+            for (s = 0; s < ns; s++) {
+                u32 a = base + slot_off(v, s);
+                u8 tmp[512];
+                if (a < lo || a + sl[s].size > hi || sl[s].kind == K_NOCMP)
+                    continue;
+                if (in) {
+                    memcpy(tmp, buf + (a - lo), sl[s].size);
+                    if (sl[s].kind == K_FARDATA) {
+                        void *p = ds_resolve(rd32(tmp));
+                        memcpy(sl[s].c, &p, sizeof p);
+                    } else if (sl[s].kind == K_FARCODE) {
+                        farfn f = fn_resolve(rd32(tmp));
+                        memcpy(sl[s].c, &f, sizeof f);
+                    } else {
+                        memcpy(sl[s].c, tmp, sl[s].size);
+                    }
+                } else {
+                    if (sl[s].kind == K_FARDATA) {
+                        void *p;
+                        memcpy(&p, sl[s].c, sizeof p);
+                        wr32(tmp, ds_unresolve(p));
+                    } else if (sl[s].kind == K_FARCODE) {
+                        farfn f;
+                        memcpy(&f, sl[s].c, sizeof f);
+                        wr32(tmp, fn_unresolve(f));
+                    } else {
+                        memcpy(tmp, sl[s].c, sl[s].size);
+                    }
+                    for (k = 0; k < sl[s].size; k++)
+                        buf[a - lo + k] = tmp[k];
+                }
+            }
+        }
+    }
+}
+
+void ds_copy_out(u16 addr, u16 n, u8 *dst) { ds_copy(addr, n, dst, 0); }
+void ds_copy_in(u16 addr, u16 n, const u8 *src) { ds_copy(addr, n, (u8 *)src, 1); }
