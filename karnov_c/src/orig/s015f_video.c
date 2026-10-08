@@ -226,16 +226,16 @@ void redraw_rect(const s16 *r)
     s16 v[4], c0, c1, r0, r1, si, di;
     u16 off;
     rect_intersect(r, world_rect, v);
-    c0 = px_to_col[v[0]];
-    r0 = px_to_trow[v[1]];
-    c1 = px_to_col[v[2] - 1] + 1;
-    r1 = px_to_trow[v[3] - 1] + 1;
+    c0 = PX_COL(v[0]);
+    r0 = PX_TROW(v[1]);
+    c1 = PX_COL(v[2] - 1) + 1;
+    r1 = PX_TROW(v[3] - 1) + 1;
     off = vb_row_off[v[1]] + v[0];
     for (di = r0; di < r1; di++)
         for (si = c0; si < c1; si++)
             draw_tile(si, di);
     vb_present_rect(off, v[2] - v[0], v[3] - v[1]);
-    ds_copy_in(0xBA70, 8, (const u8 *)view_rect);   /* fmemcpy(prev_view, view_rect, 8) */
+    rtl_fmemcpy(prev_view, view_rect, 8);
 }
 
 /* @015F:0296 file:03086 SCROLLVIEW — фаза 8: дорисовать тайлы,
@@ -247,14 +247,14 @@ void SCROLLVIEW(void)
     s16 from, to, px, py, w, h, si, di;
     rect_intersect(prev_view, world_rect, old_vis);
     rect_intersect(view_rect, world_rect, new_vis);
-    oc0 = px_to_col[old_vis[0]];
-    or0 = px_to_trow[old_vis[1]];
-    oc1 = px_to_col[old_vis[2] - 1] + 1;
-    or1 = px_to_trow[old_vis[3] - 1] + 1;
-    nc0 = px_to_col[new_vis[0]];
-    nr0 = px_to_trow[new_vis[1]];
-    nc1 = px_to_col[new_vis[2] - 1] + 1;
-    nr1 = px_to_trow[new_vis[3] - 1] + 1;
+    oc0 = PX_COL(old_vis[0]);
+    or0 = PX_TROW(old_vis[1]);
+    oc1 = PX_COL(old_vis[2] - 1) + 1;
+    or1 = PX_TROW(old_vis[3] - 1) + 1;
+    nc0 = PX_COL(new_vis[0]);
+    nr0 = PX_TROW(new_vis[1]);
+    nc1 = PX_COL(new_vis[2] - 1) + 1;
+    nr1 = PX_TROW(new_vis[3] - 1) + 1;
     if (dx != 0) {
         if (dx > 0) {
             from = oc1; to = nc1;

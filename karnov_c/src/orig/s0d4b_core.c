@@ -8,6 +8,7 @@
  * Состояния: 0, 1 — вход (1 — с переключением на ai_next), 2 — работа,
  * 3, 5 — ..., 4 — ранен, 6 — удаление. */
 #include "orig/fn.h"
+#include "orig/hw.h"
 #include "orig/todo.h"
 
 #define NO_STATE 0x3E7
@@ -15,26 +16,26 @@
 /* @0D4B:0003 file:0ECB3 map_set_attr */
 void map_set_attr(s16 col, s16 row, s16 attr)
 {
-    map_row[row][(u16)(col * 2) + 1] = (u8)attr;
+    MAP_WR(row, (u16)(col * 2) + 1, attr);
 }
 
 /* @0D4B:0021 file:0ECD1 map_attr */
 s16 map_attr(s16 col, s16 row)
 {
-    return map_row[row][(u16)(col * 2) + 1];
+    return MAP_RD(row, (u16)(col * 2) + 1);
 }
 
 /* @0D4B:003E file:0ECEE map_tile */
 s16 map_tile(s16 col, s16 row)
 {
-    return map_row[row][(u16)(col * 2)];
+    return MAP_RD(row, (u16)(col * 2));
 }
 
 /* @0D4B:005A file:0ED0A attr_at — атрибут клетки под точкой (x_world, y) */
 s16 attr_at(s16 x, s16 y)
 {
-    u8 *row = map_row[px_to_trow[y]];
-    return row[(u16)(px_to_col[x >> tile_shift] * 2) + 1];
+    s16 row = PX_TROW(y);
+    return MAP_RD(row, (u16)(PX_COL(x >> tile_shift) * 2) + 1);
 }
 
 /* @0D4B:008D file:0ED3D set_motion — скорости cur_obj из motion_table */
@@ -63,7 +64,7 @@ void snap_to_ground(ActiveObject *o, s16 sprite, u16 mask, s16 col, s16 row)
     u16 hit = 0;
     while (hit == 0) {
         si++;
-        hit = attr_props[map_attr(col, si)] & mask;
+        hit = ATTR_PROP(map_attr(col, si)) & mask;
     }
     o->y_world = si * 10 - sprite_h[sprite];
 }
@@ -71,16 +72,16 @@ void snap_to_ground(ActiveObject *o, s16 sprite, u16 mask, s16 col, s16 row)
 /* @0D4B:019F file:0EE4F place_on_ground — по левому краю */
 void place_on_ground(ActiveObject *o, s16 sprite, s16 kind)
 {
-    snap_to_ground(o, sprite, attr_props[kind], px_to_col[o->x_world >> tile_shift],
-                   px_to_trow[o->y_world] - 1);
+    snap_to_ground(o, sprite, ATTR_PROP(kind), PX_COL(o->x_world >> tile_shift),
+                   PX_TROW(o->y_world) - 1);
 }
 
 /* @0D4B:01DE file:0EE8E place_on_ground_center — по середине спрайта */
 void place_on_ground_center(ActiveObject *o, s16 sprite)
 {
     snap_to_ground(o, sprite, 0x89,
-                   px_to_col[(s16)((sprite_w[sprite] >> 1) + o->x_world) >> tile_shift],
-                   px_to_trow[o->y_world] - 1);
+                   PX_COL((s16)((sprite_w[sprite] >> 1) + o->x_world) >> tile_shift),
+                   PX_TROW(o->y_world) - 1);
 }
 
 /* @0D4B:0229 file:0EED9 center_on_column */
@@ -121,13 +122,13 @@ void stamp_solid(ActiveObject *o, s16 y0, s16 y1, s16 ncols)
 {
     s16 r0, r1, c0, c1, si, di, attr;
     update_bboxes(o);
-    r0 = px_to_trow[y0];
-    r1 = px_to_trow[y1];
-    c0 = px_to_col[o->box[0].x0 >> tile_shift];
+    r0 = PX_TROW(y0);
+    r1 = PX_TROW(y1);
+    c0 = PX_COL(o->box[0].x0 >> tile_shift);
     c1 = c0 + ncols;
-    for (di = px_to_trow[o->y_world] - 1; di < r0; di++)
+    for (di = PX_TROW(o->y_world) - 1; di < r0; di++)
         for (si = c0; si < c1; si++)
-            map_set_attr(si, di, (s16)tile_attr[map_tile(si, di)]);
+            map_set_attr(si, di, (s16)TILE_ATTR(map_tile(si, di)));
     di = r0;
     attr = 4;
     for (; di < r1; di++) {
@@ -237,12 +238,12 @@ static s16 probe_tile(s32 x, s32 y, s32 dx, s32 dy, s32 xlim, s32 ylim, u16 mask
     cy = (s32)((u32)(u16)yh << 16 | (u16)cy);
     for (;;) {
         attr = attr_at((s16)(cx >> 16), (s16)(cy >> 16));
-        props = attr_props[attr];
+        props = ATTR_PROP(attr);
         if ((props & mask) != props) {
             *out_attr = attr;
-            *out_col = px_to_col[(s16)(cx >> 16) >> tile_shift];
+            *out_col = PX_COL((s16)(cx >> 16) >> tile_shift);
             *out_x = *out_col * 8;
-            *out_y = px_to_trow[(s16)(cy >> 16)] * 10;
+            *out_y = PX_TROW((s16)(cy >> 16)) * 10;
             return 1;
         }
         cx += dx;
@@ -385,7 +386,9 @@ void ai_dispatch(void)
     ai_result = 0;
     pending_state = NO_STATE;
     if (cur_state == 2) {
-        if (o->active != 0 && ++o->frame_idx >= o->state_anim[0])
+        /* state_anim == NULL: оригинал читает 0000:0000 (вектор INT 0) */
+        if (o->active != 0 &&
+            ++o->frame_idx >= FAR_W(o->state_anim, 0))
             o->frame_idx = 0;
     } else {
         switch (cur_state) {
@@ -424,9 +427,9 @@ void ai_dispatch(void)
         o->frame_idx = 0;
     }
     if (ai_result & 4) {
-        o->box[0].sprite = o->state_anim[o->frame_idx + 1];
-        o->box[0].dx = o->state_offs[o->frame_idx * 2];
-        o->box[0].dy = o->state_offs[o->frame_idx * 2 + 1];
+        o->box[0].sprite = FAR_W(o->state_anim, o->frame_idx + 1);
+        o->box[0].dx = FAR_W(o->state_offs, o->frame_idx * 2);
+        o->box[0].dy = FAR_W(o->state_offs, o->frame_idx * 2 + 1);
     }
     if (ai_result & 8) {
         cur_obj = handoff_obj;
@@ -558,7 +561,7 @@ void play_sound(s16 n)
 void level_clear_state(void)
 {
     goal_idx = -1;
-    lvl_D880 = 0;
-    lvl_D886 = 0;
+    sky_chain = NULL;
+    t51_obj = NULL;
     goal_watch = NULL;
 }

@@ -7,7 +7,7 @@
 
 CC      ?= gcc
 CFLAGS  ?= -std=c99 -pedantic -Wall -Wextra -Wno-unused-parameter -O2 -Iinclude -D_DEFAULT_SOURCE
-CFLAGS  += -MMD -MP
+override CFLAGS += -MMD -MP
 LDLIBS  ?= -lSDL2 -lpthread -lm
 PYTHON  ?= python3
 

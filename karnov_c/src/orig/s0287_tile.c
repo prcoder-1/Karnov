@@ -19,7 +19,7 @@ static void copy_rows(u8 *bank, u16 di, const u8 **src, s16 n, u16 step)
 /* @0287:0006 file:04076 draw_tile */
 void draw_tile(s16 col, s16 row)
 {
-    u8 t = map_row[row][(u16)(col * 2)];
+    u8 t = MAP_RD(row, (u16)(col * 2));
     const u8 *src;
     u16 di = vb_trow_off[row] + vb_col_off[col];
     if (level_mode == 0 || level_mode == 2) {

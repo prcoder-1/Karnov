@@ -184,7 +184,7 @@ void push_key(s16 key)
             player_ptr->y_world = 0;
             player_ptr->x_world = 0;
             current_level = k - '0';
-            set_player_anim(6, 4);
+            karnov_die(6, 4);
         }
         break;
     case 'Q': case 'q':
@@ -279,7 +279,7 @@ void demo_set_attract(s16 on)
     else
         demo_ptr->pos = 0;
     game_D564 |= 4;
-    plr_D8C8[2] = 0;
-    plr_D8C8[1] = 0;
-    plr_D8C8[0] = 0;
+    respawn_D8CC = 0;
+    respawn_y = 0;
+    respawn_x = 0;
 }

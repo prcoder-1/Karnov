@@ -121,26 +121,26 @@ static void unstamp_restore(ActiveObject *o)
     s16 nb, si, di, c0, c1, r0, r1, h, w;
     u16 off;
     SpriteBox *b;
-    u8 *cell;
+    u16 co;
     for (nb = 0, b = &o->box[0]; o->num_bboxes > nb; nb++, b++) {
         r[0] = (s16)((b->x0 > 0 ? b->x0 : 0) >> tile_shift);
         r[2] = (s16)((b->x1 > 0 ? b->x1 : 0) >> tile_shift);
         r[1] = b->y0 > 0 ? b->y0 : 0;
         r[3] = b->y1 > 0 ? b->y1 : 0;
-        c0 = px_to_col[r[0]];
-        c1 = px_to_col[r[2]] + 1;
-        r0 = px_to_trow[r[1]];
-        r1 = px_to_trow[r[3]] + 1;
+        c0 = PX_COL(r[0]);
+        c1 = PX_COL(r[2]) + 1;
+        r0 = PX_TROW(r[1]);
+        r1 = PX_TROW(r[3]) + 1;
         for (di = r0; di < r1; di++) {
             si = c0;
-            for (cell = map_row[di] + (u16)(si * 2); si < c1; si++, cell += 2)
-                cell[1] = (u8)tile_attr[cell[0]];
+            for (co = (u16)(si * 2); si < c1; si++, co += 2)
+                MAP_WR(di, co + 1, TILE_ATTR(MAP_RD(di, co)));
         }
         rect_intersect(r, view_rect, v);
-        c0 = px_to_col[v[0]];
-        c1 = px_to_col[v[2]] + 1;
-        r0 = px_to_trow[v[1]];
-        r1 = px_to_trow[v[3]] + 1;
+        c0 = PX_COL(v[0]);
+        c1 = PX_COL(v[2]) + 1;
+        r0 = PX_TROW(v[1]);
+        r1 = PX_TROW(v[3]) + 1;
         for (di = r0; di < r1; di++)
             for (si = c0; si < c1; si++)
                 draw_tile(si, di);

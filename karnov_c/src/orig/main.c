@@ -48,6 +48,16 @@ void port_frame_hook(void)
         }
         if (fp)
             fwrite(img, 1, sizeof img, fp);
+        if (frames < 150) {             /* как HEAP.BIN хука DOSBox */
+            static FILE *hp;
+            char hpath[512];
+            if (hp == NULL) {
+                snprintf(hpath, sizeof hpath, "%s.heap", port_opt.dsdump);
+                hp = fopen(hpath, "wb");
+            }
+            if (hp)
+                fwrite(&hw_conv[0x2DE30], 1, 0x50000, hp);
+        }
     }
     if (port_opt.frames && ++frames >= port_opt.frames) {
         if (fp)
@@ -144,5 +154,6 @@ int main(int argc, char **argv)
     if (ds_check())
         return 1;
     ds_init();
+    rtl_startup_heap();
     return game_main();
 }

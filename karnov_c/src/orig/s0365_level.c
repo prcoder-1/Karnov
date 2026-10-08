@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "orig/fn.h"
+#include "orig/hw.h"
 #include "orig/todo.h"
 
 /* @0365:000B file:04E5B level_init — буферы тайлов, регионов, триггеров */
@@ -114,8 +115,8 @@ s16 read_object_regions(FILE *fp)
     if (bin_fread((u8 *)&region_count, 2, 1, fp) != 1 ||
         bin_fread((u8 *)regions, 0xC, (u16)region_count, fp) != (u16)region_count)
         return 1;
-    lvl_048C = regions[0].w8;
-    lvl_048E = regions[0].wA;
+    player_spawn[0].wx = regions[0].spawn_x;
+    player_spawn[0].wy = regions[0].spawn_y;
     return 0;
 }
 
@@ -196,10 +197,14 @@ s16 load_level(s16 level)
         return 0x33;
     }
     map_row_bytes = map_cols * 2;
-    for (si = 0; si < map_rows; si++)
-        map_row[si] = map_buf + (u16)(si * map_row_bytes);
+    for (si = 0; si < map_rows; si++) {
+        u16 seg = hw_heap_seg(map_buf);
+        map_row[si * 2] = (u16)((u32)(map_buf - hw_conv) - (u32)seg * 16 + (u16)(si * map_row_bytes));
+        map_row[si * 2 + 1] = seg;
+    }
 
-    attr = 0;   /* читается один байт; старший в оригинале — мусор стека */
+    /* читается один байт; старший — мусор стека, в DOSBox всегда 02 */
+    attr = 0x0200;
     gfx = tile_gfx;
     for (si = 0; si < (s16)ntiles; si++) {
         if ((si & 0xF) == 0)
@@ -212,7 +217,7 @@ s16 load_level(s16 level)
             bin_fclose(fp);
             return 0x47;
         }
-        tile_attr[idx] = attr;
+        DS_SET16(tile_attr, 0xABC0, idx, attr);   /* idx до 255 — за массивом */
         if (level_mode == 0 || level_mode == 2) {
             gfx = tile_gfx + idx * 0x28;
             if (bin_fread(gfx, 0x28, 1, fp) != 1) {
@@ -250,7 +255,7 @@ s16 load_level(s16 level)
     src = map_buf + (u16)(map_rows * map_cols) - 1;
     dst = map_buf + (u16)(map_rows * map_cols * 2) - 1;
     for (n = (s16)(map_rows * map_cols - 1); n >= 0; n--) {
-        *dst-- = (u8)tile_attr[*src];
+        *dst-- = (u8)TILE_ATTR(*src);
         *dst-- = *src--;
     }
     return 0;

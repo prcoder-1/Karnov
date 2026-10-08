@@ -11,6 +11,8 @@ import dsdiff
 HERE = os.path.dirname(os.path.abspath(__file__))
 KC = os.path.normpath(os.path.join(HERE, ".."))
 LO, HI = 0x13F8, 0x1F8E
+# не резать: смещения полей внутри таблиц (адресуются [bx+база+2])
+NOCUT = {0x19F6, 0x19FC, 0x19FE, 0x1BFA, 0x1C04, 0x1C6A, 0x1C76, 0x1F0E, 0x1F26}
 d = open(os.path.join(KC, "../KARNOV.EXE"), "rb").read()
 DSF = 0x1F190
 
@@ -58,7 +60,38 @@ def main():
     for a, t in fp.items():
         if LO <= a < HI and LO <= t < HI:
             cuts.add(t)
-    cuts = sorted(cuts)
+    # непосредственные операнды игрового кода (mov ..., смещение в DS)
+    import x86map
+    from capstone import x86 as X
+    for (seg, off), f in x86map.scan().items():
+        if x86map.klass(seg) != "game":
+            continue
+        for i in f["insns"].values():
+            for o in i.operands:
+                v = None
+                if o.type == X.X86_OP_IMM:
+                    v = o.imm & 0xFFFF
+                elif o.type == X.X86_OP_MEM and o.mem.segment in (0, X.X86_REG_DS) \
+                        and o.mem.base not in (0, X.X86_REG_BP):
+                    v = o.mem.disp & 0xFFFF
+                if v is not None and LO <= v < HI and not v & 1 and not covered[v]:
+                    cuts.add(v)
+    # массивы кадров и смещений под StateEntry: [n, кадры×n] и [(dx, dy)×n]
+    # — внутри них не резать (адресуются указателем + индекс)
+    spans = []
+    for a, b in runs:
+        for e in range(a, b, 8):
+            pa, po = fp.get(e), fp.get(e + 4)
+            if pa is None or po is None or not (LO <= pa < HI):
+                continue
+            n, = struct.unpack_from("<H", d, DSF + pa)
+            if n > 64:
+                continue
+            spans.append((pa, pa + 2 * (n + 1)))
+            if LO <= po < HI:
+                spans.append((po, po + 4 * n))
+    cuts = sorted(c for c in cuts if not any(a < c < b for a, b in runs)
+                  and not any(a < c < b for a, b in spans) and c not in NOCUT)
     lines = ["/* Сгенерировано tools/gen_ds_anim.py — не править.",
              " * Область анимаций DS: StateEntry — пары (кадры, смещения);",
              " * an_XXXX — массивы кадров (слово 0 — число кадров) и смещений. */"]

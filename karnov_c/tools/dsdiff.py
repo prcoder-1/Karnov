@@ -4,14 +4,19 @@
 
   dsdiff.py ORIG.BIN PORT.BIN MASK.BIN [-n кадров] [-k показать_адресов]
             [--ignore 0xA-0xB,...]
-Печатает первый расходящийся кадр и имена переменных/полей объектов."""
+Печатает первый расходящийся кадр и имена переменных/полей объектов.
+Маска 2 — сегментное слово far-указателя: у оригинала из него вычитается
+база загрузки (по сегменту ai_handlers[1])."""
 import argparse, os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KC = os.path.normpath(os.path.join(HERE, ".."))
 F = 0x10000
+DS_SEG = 0x1D99
 # Нестабильно в самом оригинале (два прогона расходятся): ввод/джойстик.
-IGNORE = [(0xCC9C, 0xCCA0)]
+# Состояние ISR таймера (музыка, SFX, счётчики) идёт от реального PIT и
+# зависит от темпа эмуляции — не сверяется.
+IGNORE = [(0xCC9C, 0xCCA0), (0x1206, 0x126A), (0x1346, 0x1347), (0xD774, 0xD779)]
 
 
 def symbols():
@@ -49,9 +54,11 @@ def symbols():
 
 
 def name_of(addr, vars_, objf):
+    """→ (имя, адрес начала поля/слова)"""
     for a, n, size, cnt, typ in vars_:
         if a <= addr < a + size * cnt:
             i, r = divmod(addr - a, size)
+            base = a + i * size
             if typ == "ActiveObject":
                 fo = max(o for o in objf if o <= r)
                 fn = objf[fo]
@@ -59,9 +66,10 @@ def name_of(addr, vars_, objf):
                     b, br = divmod(r - 0x20, 18)
                     fn = f"box[{b}].{['sprite','dx','dy','x0','y0','x1','y1','hitflag','was_vis'][br // 2]}"
                     fo = 0x20 + b * 18 + br // 2 * 2
-                return f"{n}[{i}].{fn}" + (f"+{r - fo}" if r != fo else "")
-            return f"{n}[{i}]" + (f"+{r}" if r else "") if cnt > 1 else n + (f"+{r}" if r else "")
-    return "?"
+                return f"{n}[{i}].{fn}", base + fo
+            ws = base + (r & ~1 if size > 1 else r)
+            return (f"{n}[{i}]" if cnt > 1 else n), ws
+    return "?", addr
 
 
 def main():
@@ -79,6 +87,14 @@ def main():
     for lo, hi in ign:
         mask[lo:hi] = bytes(hi - lo)
     idx = [i for i in range(F) if mask[i]]
+    segw, i = [], 0
+    while i < F - 1:
+        if mask[i] == 2:
+            segw.append(i)
+            i += 2
+        else:
+            i += 1
+    LOADREF = 0x1104            # ai_handlers[1]: сегмент 0E62 в переводе
     vars_, objf = symbols()
     fo, fp = open(a.orig, "rb"), open(a.port, "rb")
     nf = min(os.path.getsize(a.orig), os.path.getsize(a.port)) // F
@@ -87,20 +103,37 @@ def main():
     print(f"кадров: оригинал {os.path.getsize(a.orig) // F}, перевод "
           f"{os.path.getsize(a.port) // F}; сравниваю {nf}, байт в маске {len(idx)}")
     for f in range(nf):
-        x, y = fo.read(F), fp.read(F)
+        x, y = bytearray(fo.read(F)), fp.read(F)
+        if f == 0:
+            delta = (x[LOADREF] | x[LOADREF + 1] << 8) - (y[LOADREF] | y[LOADREF + 1] << 8)
+            print(f"база загрузки оригинала: {delta:04X}")
+        for i in segw:
+            v = x[i] | x[i + 1] << 8
+            if v:
+                v = (v - delta) & 0xFFFF
+                x[i], x[i + 1] = v & 0xFF, v >> 8
+        dsw = (DS_SEG + delta) & 0xFFFF
+        for i in range(0x2824, 0x2824 + 128 * 0xF5, 0xF5):
+            j = i + 2
+            if (x[j] | x[j + 1] << 8) == dsw and (y[j] | y[j + 1] << 8) == DS_SEG:
+                x[j], x[j + 1] = y[j], y[j + 1]
         bad = [i for i in idx if x[i] != y[i]]
+        if bad:
+            # сырые слова со значением DS (far-указатели в не-far полях)
+            def dsword(j):
+                return 0 <= j < F - 1 and (x[j] | x[j + 1] << 8) == dsw and \
+                    (y[j] | y[j + 1] << 8) == DS_SEG
+            bad = [i for i in bad if not (dsword(i) or dsword(i - 1))]
         if not bad:
             continue
         print(f"кадр {f}: расхождений {len(bad)}")
         shown = set()
         for i in bad:
-            n = name_of(i, vars_, objf)
-            key = re.sub(r"\+\d+$", "", n)
-            if key in shown:
+            n, w = name_of(i, vars_, objf)
+            if n in shown:
                 continue
-            shown.add(key)
-            w = i & ~1 if mask[i & ~1] and mask[(i & ~1) + 1] else i
-            if w + 1 < F and mask[w + 1] and w == i & ~1:
+            shown.add(n)
+            if w + 1 < F and mask[w] and mask[w + 1]:
                 ov, pv = x[w] | x[w + 1] << 8, y[w] | y[w + 1] << 8
                 print(f"  DS:{w:04X} {n:32} оригинал {ov:04X} перевод {pv:04X}")
             else:

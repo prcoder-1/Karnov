@@ -1,5 +1,6 @@
 /* check.c — самопроверка реестра DS при старте (только порт). */
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include "orig/ds.h"
 
@@ -53,6 +54,9 @@ int ds_check(void)
                         kind = v->lay->f[f].kind;
                         in -= v->lay->f[f].off;
                     }
+            /* узел far-кучи RTL хранит seg:off сырыми словами (rtl.c) */
+            if (!strncmp(v->name, "rtl_heap", 8))
+                continue;
             if ((kind != K_FARDATA && kind != K_FARCODE) || in != 0) {
                 fprintf(stderr, "ds_check: far-указатель DS:%04X лежит в "
                         "не-far поле %s\n", a, v->name);

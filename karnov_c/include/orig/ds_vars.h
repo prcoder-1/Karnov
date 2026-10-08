@@ -27,6 +27,17 @@ DSA(char, s_menu_mono,          0x043D, 34)
 DSA(char, s_cant_force_herc,    0x045F, 27)
 DSV(u8,  key_pending,    0x047A)    /* скан-код расширенной клавиши */
 
+/* --- рантайм Turbo-C */
+DSV(s16, fp_errno,       0x0073)    /* обнуляется в sqrt */
+DSV(u32, rand_seed,      0x24DA)
+DSV(u16, rtl_psp,        0x006F)    /* сегмент PSP */
+DSA(u16, rtl_heapbase,   0x0077, 2) /* far-куча: off, seg */
+DSA(u16, rtl_brklvl,     0x007B, 2)
+DSA(u16, rtl_heaptop,    0x007F, 2)
+DSV(u16, rtl_brk_kb,     0x22B2)    /* размер блока программы в КБ */
+DSA(u16, rtl_heap_node,  0x246C, 4) /* фиктивный узел свободного списка */
+DSA(u16, rtl_heap_rover, 0x2474, 2)
+
 /* --- видео: детект и буфер (модуль 0x015F) */
 DSA(char, s_sprites_ega_a, 0x00A4, 12)
 DSA(char, s_rb_a,          0x00B0, 3)
@@ -44,8 +55,7 @@ DSA(char, s_insert_prog,   0x0362, 27)
 DSA(char, s_insert_disk,   0x037D, 24)
 DSA(char, s_any_key,       0x0395, 19)
 DSVX(ObjRegion *, regions,  0x047C, 4)     /* куча: region_count записей */
-DSV(s16, lvl_048C,       0x048C)            /* regions[0].w8 */
-DSV(s16, lvl_048E,       0x048E)            /* regions[0].wA */
+DSA(EnemySpawn, player_spawn, 0x0480, 1)    /* запись спауна игрока */
 DSVX(EnemySpawn *, spawns,  0x0494, 4)      /* куча: spawn_count, по x */
 DSA(char, s_level_fmt,     0x0498, 13)
 DSA(char, s_rb_lvl_a,      0x04A5, 3)
@@ -130,7 +140,7 @@ DSA(s16, new_vis,            0xA2B4, 4)      /* SCROLLVIEW: view_rect ∩ world_
 DSA(u16, vb_row_off,         0xA2BC, 0x47E)  /* y → смещение строки пикселей */
 DSA(u16, tile_attr,          0xABC0, 200)  /* атрибут тайла по номеру */
 DSV(u16, video_offset,       0xAD50)
-DSX(u8 *, map_row,           0xAD52, 0x73, 4) /* куча: начало строки карты */
+DSA(u16, map_row,           0xAD52, 0xE6)   /* far-указатели строк карты: off, seg */
 DSV(s16, vid_AF1E,           0xAF1E)
 DSV(s16, vid_AF20,           0xAF20)
 DSA(s16, px_to_trow,         0xAF22, 0x47E)  /* y → строка тайлов (y/10) */
@@ -224,10 +234,16 @@ DSV(s16, plr_D8B8,           0xD8B8)         /* предмет 5: 150 */
 DSV(s16, plr_D8BA,           0xD8BA)         /* предмет 8 */
 DSV(s16, player_x,           0xD8BC)         /* копия x_world игрока для AI */
 DSV(s16, player_y,           0xD8BE)
-DSA(s16, plr_D8C0,           0xD8C0, 4)
-DSA(s16, plr_D8C8,           0xD8C8, 3)
+DSV(s16, jump_y0,            0xD8C0)         /* y в начале прыжка */
+DSV(s16, cell_col,           0xD8C2)         /* клетка игрока (пишет POST_KARNOV) */
+DSV(s16, cell_row_head,      0xD8C4)
+DSV(s16, cell_row_feet,      0xD8C6)
+DSV(s16, respawn_x,          0xD8C8)
+DSV(s16, respawn_y,          0xD8CA)
+DSV(s16, respawn_D8CC,       0xD8CC)
 DSV(s16, player_state,       0xD8CE)
-DSA(s16, plr_D8D0,           0xD8D0, 0x14)
+DSV(s16, karnov_mode,        0xD8D0)         /* фаза прыжка: 0..3; 4, 7 — гибель */
+DSS(CollRes, coll,           0xD8D2, 1)      /* упоры игрока (move_with_collision) */
 DSV(s16, items_owned,        0xD8F8)         /* видов предметов в наличии */
 DSV(s16, item_sel,           0xD8FA)         /* выбранный; -1 — нет */
 DSA(s16, plr_D8FC,           0xD8FC, 11)
@@ -243,7 +259,7 @@ DSA(u8,  ammo_digits,        0xD943, 2)
 DSV(s16, ammo_dirty,         0xD945)
 DSV(s16, weapon,             0xD947)
 DSV(s16, firepower,          0xD949)
-DSA(u8,  plr_D94B,           0xD94B, 4)
+DSP(ActiveObject, item_chain, 0xD94B)        /* предметы на лестницах (через parent) */
 
 /* --- ввод (модуль 0x020F) */
 DSV(s16, god_mode,           0xCCA6)         /* чит ZEEK */
@@ -281,8 +297,8 @@ DSA(Motion, motion_table,    0x1348, 11)
 DSA(s16, sfx_prio_tab,       0x146A, 10)
 DSPA(u8, sfx_scripts,        0x147E, 10)
 DSA(s16, remove_list,        0xD780, 128)    /* индексы на удаление в конце THINKCYCLE */
-DSV(s32, lvl_D880,           0xD880)
-DSV(s32, lvl_D886,           0xD886)
+DSP(ActiveObject, sky_chain, 0xD880)         /* лёд (тип 8): цепочка через parent */
+DSP(ActiveObject, t51_obj,     0xD886)         /* тип 51 (ворота) */
 DSV(s16, pending_state,      0xD88C)
 DSV(s16, cur_state,          0xD8A2)
 DSP(ActiveObject, cur_obj,   0xD8A6)
@@ -292,3 +308,24 @@ DSP(ActiveObject, handoff_obj, 0xD95B)       /* ai_result & 8: кому пере
 DSV(s16, ai_result,          0xD963)
 
 #include "orig/ds_anim.h"
+
+/* --- Карнов (модуль 0x0E62) */
+DSV(s16, shots_alive,        0x1424)
+DSA(s32, level_time,         0x14A6, 10)     /* BCD: начальный таймер уровня */
+DSV(s16, cam_dx,             0xD88A)
+DSA(s16, cam_hist,           0xD88E, 8)      /* 4 последние позиции игрока (x, y) */
+DSV(s16, ladder_col,         0xD89E)
+DSV(s16, sky_x0,             0xD8A0)         /* x игрока при последнем сбросе sky-таймера */
+DSV(s16, sky_timer,          0xD8A4)
+DSV(s16, cam_dy,             0xD955)
+DSV(s16, k_i,                0xD968)         /* счётчик циклов обработчиков игрока */
+DSV(s16, k_kind,             0xD96A)
+DSV(s16, scroll_i,           0xD96E)         /* свиток: обход врагов */
+DSV(s16, scroll_k,           0xD970)
+
+/* --- AI-модули 0x1348.. */
+DSA(s16, cam_saved,          0xD972, 4)      /* cam_rect на время боя тип 30 */
+DSV(s16, t25_count,          0xD97A)         /* живые тип 25 (держат тип 30) */
+DSV(s16, gold_balls,         0xD97C)         /* шары золотого человека */
+DSA(s16, t34_trail,          0xD97E, 40)     /* тип 34: след головы (x, y) ×20 */
+DSA(s16, t56_pos,            0x1F8E, 6)      /* тип 56: точки появления (x, y) ×3 */

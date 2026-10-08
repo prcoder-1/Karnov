@@ -75,7 +75,7 @@ void hud_lives(void)
 }
 
 /* @041D:01CF file:05B9F hud_items */
-static void hud_items(void)
+void hud_items(void)
 {
     s16 i;
     for (i = 0; i < 0xB; i++)
@@ -95,7 +95,7 @@ void items_reset(u8 *rec)
 }
 
 /* @041D:0244 file:05C14 hud_sel_clear */
-static void hud_sel_clear(void)
+void hud_sel_clear(void)
 {
     s16 i;
     for (i = 0; i <= 8; i++)
@@ -193,7 +193,7 @@ static void hud_blank_digits(s16 n, s16 col, s16 row)
 }
 
 /* @041D:0498 file:05E68 hud_score */
-static void hud_score(u8 *score)
+void hud_score(u8 *score)
 {
     if (demo_mode != 0 || score_dirty == 0)
         return;
@@ -299,7 +299,7 @@ s16 use_item0(void)
     alloc_idx = alloc_object(1);
     o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
     if (o != NULL)
-        queue_state(o, (farfn)h_0FFA_07CC);
+        queue_state(o, (farfn)ladder_item);
     return 0;
 }
 
@@ -324,7 +324,7 @@ s16 use_item2(void)
     o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
     if (o == NULL)
         return 0;
-    queue_state(o, (farfn)h_0FFA_0BCB);
+    queue_state(o, (farfn)bomb);
     return 1;
 }
 
@@ -353,11 +353,11 @@ s16 use_item5(void)
     return 1;
 }
 
-/* @041D:08CB file:0629B use_item6 — игрок в состояние 0E62:13C6 */
+/* @041D:08CB file:0629B use_item6 — полёт (k_fly) */
 s16 use_item6(void)
 {
     plr_D8B6 = 0xC8;
-    queue_state(player_ptr, (farfn)h_0E62_13C6);
+    queue_state(player_ptr, (farfn)k_fly);
     return 1;
 }
 
@@ -382,7 +382,7 @@ static s16 item_usable(s16 n)
     /* item_next может спросить n = -1: в оригинале это слово перед
      * item_count, то есть plr_D8FC[10] */
     s16 cnt = n == -1 ? plr_D8FC[10] : item_count[n];
-    return cnt > 0 && (n < 5 || item_active[n - 5] == 0);
+    return cnt > 0 && (n < 5 || item_active[n - 5] != 0);
 }
 
 /* @041D:093C file:0630C item_next — следующий применимый по кругу */
@@ -451,7 +451,7 @@ void item_pickup(s16 n)
 }
 
 /* @041D:0AB4 file:06484 item_consume */
-static void item_consume(s16 n)
+void item_consume(s16 n)
 {
     item_select(item_next(inp_dir & 1));
     if (--item_count[n] == 0) {

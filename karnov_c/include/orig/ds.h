@@ -155,6 +155,7 @@ typedef struct ActiveObject {
 extern const Layout ActiveObject_layout;
 
 /* Записи уровня в куче (не в DS). */
+#define EnemySpawn_SIZE 20
 typedef struct {            /* 20 байт, отсортированы по x */
     s16 type;               /* AI-тип: индекс ai_handlers */
     s16 kind;               /* → obj_type; бит 0 — parity-цепочка */
@@ -172,8 +173,9 @@ typedef struct {            /* демо: 0x304 байта в DS */
     u8  ev[0x300];          /* события по 3 байта: маска, кадр (слово) */
 } Demo;
 
-typedef struct {            /* 12 байт */
-    s16 w0, w2, w4, w6, w8, wA;
+typedef struct {            /* 12 байт: зона и точка возрождения в ней */
+    s16 x0, y0, x1, y1;
+    s16 spawn_x, spawn_y;
 } ObjRegion;
 
 /* --- глобалы ------------------------------------------------------ */
@@ -215,6 +217,29 @@ void ds_snapshot(u8 *img, u8 *mask);
 /* fmemcpy между диапазоном DS и буфером в раскладке оригинала. */
 void ds_copy_out(u16 addr, u16 n, u8 *dst);
 void ds_copy_in(u16 addr, u16 n, const u8 *src);
+u16 ds_peek16(u16 addr);
+void ds_poke16(u16 addr, u16 v);
+
+/* Индекс массива s16 в DS: вне массива оригинал читает соседние
+ * переменные — то же через ds_peek16. */
+#define DS_IDX16(arr, addr, i) \
+    ((u16)(i) < sizeof(arr) / sizeof((arr)[0]) ? (arr)[(u16)(i)] \
+                                              : (s16)ds_peek16((u16)((addr) + (i) * 2)))
+#define PX_COL(i)  DS_IDX16(px_to_col, 0xBB5E, (i))
+#define PX_TROW(i) DS_IDX16(px_to_trow, 0xAF22, (i))
+#define DS_SET16(arr, addr, i, v) \
+    ((u16)(i) < sizeof(arr) / sizeof((arr)[0]) ? (void)((arr)[(u16)(i)] = (v)) \
+                                              : ds_poke16((u16)((addr) + (i) * 2), (u16)(v)))
+/* Байт по far-адресу: обычная память (hw_conv) или DS (через реестр). */
+u8   far_peekb(u16 seg, u16 off);
+void far_pokeb(u16 seg, u16 off, u8 v);
+/* Клетка карты: map_row[r] (seg:off) + смещение в 16 битах, как les/add */
+#define MAP_OFF(r) ((u16)DS_IDX16(map_row, 0xAD52, (r) * 2))
+#define MAP_SEG(r) ((u16)DS_IDX16(map_row, 0xAD52, (r) * 2 + 1))
+#define MAP_RD(r, o) far_peekb(MAP_SEG(r), (u16)(MAP_OFF(r) + (u16)(o)))
+#define MAP_WR(r, o, v) far_pokeb(MAP_SEG(r), (u16)(MAP_OFF(r) + (u16)(o)), (u8)(v))
+#define ATTR_PROP(i) ((u16)DS_IDX16(attr_props, 0x0084, (i)))
+#define TILE_ATTR(i) ((u16)DS_IDX16(tile_attr, 0xABC0, (i)))
 
 /* far-указатели: seg:off (seg в старшем слове) ↔ C-указатель. */
 void *ds_resolve(u32 segoff);

@@ -11,13 +11,24 @@ static u8 lowmem[0x100] = {
 static u8 video_mode = 3;
 static u8 cur_row, cur_col;
 
+/* Вектор INT 0: стартовый код Turbo-C (@0000:0122) ставит свой
+ * обработчик деления на 0 — CS:0119; сегмент не эмулируется. */
+static const u8 ivt0[4] = { 0x19, 0x01, 0x00, 0x00 };
+
 u8 hw_peekb(u16 seg, u16 off)
 {
     u32 a = (u32)seg * 16 + off;
+    if (a < 4)
+        return ivt0[a];
     if (a >= 0x400 && a < 0x500)
         return lowmem[a - 0x400];
     fprintf(stderr, "hw_peekb: %04X:%04X не эмулируется\n", seg, off);
     return 0;
+}
+
+u16 hw_peekw(u16 seg, u16 off)
+{
+    return (u16)(hw_peekb(seg, off) | hw_peekb(seg, (u16)(off + 1)) << 8);
 }
 
 void hw_pokeb(u16 seg, u16 off, u8 v)
@@ -81,24 +92,17 @@ void hw_exit(int code)
     exit(code);
 }
 
-/* farmalloc Turbo-C возвращает указатель со смещением 4 внутри параграфа;
- * блок выделяется с запасом, чтобы выравнивание оригинала давало тот же
- * объём полезной памяти. */
-u8 *hw_farmalloc(u32 size)
-{
-    u8 *p = calloc(1, size + 16);
-    return p ? p + 4 : NULL;
-}
+u8 hw_conv[HW_CONV_SIZE];
 
-void hw_farfree(u8 *p)
+/* farmalloc возвращает нормализованный заголовок + 4 */
+u16 hw_heap_seg(const u8 *p)
 {
-    if (p)
-        free(p - 4);
+    return (u16)(((u32)(p - hw_conv) - 4) >> 4);
 }
 
 u8 *hw_next_paragraph(u8 *p)
 {
-    return p + 12;
+    return &hw_conv[((u32)hw_heap_seg(p) + 1) * 16];
 }
 
 void hw_out(u16 port, u8 v)

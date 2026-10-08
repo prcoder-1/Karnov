@@ -95,9 +95,9 @@ void end_life(void)
                 swap++;
         }
         if (demo_mode != 0) {
-            plr_D8C8[2] = 10;
-            plr_D8C8[1] = 10;
-            plr_D8C8[0] = 10;
+            respawn_D8CC = 10;
+            respawn_y = 10;
+            respawn_x = 10;
         }
         player_save();
         if (players_left == 2 && demo_mode == 0)
@@ -109,9 +109,9 @@ void end_life(void)
             demo_ptr->pos = 0;
     } else {
         current_level++;
-        plr_D8C8[2] = 10;
-        plr_D8C8[1] = 10;
-        plr_D8C8[0] = 10;
+        respawn_D8CC = 10;
+        respawn_y = 10;
+        respawn_x = 10;
         if (current_level > 9) {
             game_over_screen();
             if (--players_left != 0)

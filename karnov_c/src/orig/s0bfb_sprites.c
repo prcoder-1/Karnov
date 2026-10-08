@@ -1,15 +1,15 @@
 /* Модуль 0x0BFB (file 0xD7B0) — загрузка спрайтов SPRITES.EGA/CGA в арену.
  *
  * Арена (sprite_arena, куча): таблица из count far-указателей на
- * спрайты, затем данные. Здесь вместо far-указателя в таблицу пишется
- * смещение от начала арены (4 байта, как в оригинале). Слова данных
- * спрайтов — big-endian.
+ * спрайты (нормализованные seg:off, как у huge-указателя оригинала),
+ * затем данные. Слова данных спрайтов — big-endian.
  *
  * EGA-спрайт: 3 слова смещений сдвинутых копий, заголовок (h, w в
  * словах), 5 плоскостей (маска + 4 цвета) по h строк × w слов; за ним
  * копия, сдвинутая на 4 бита вправо (ega_transform). */
 #include <stdio.h>
 #include "orig/fn.h"
+#include "orig/hw.h"
 #include "orig/todo.h"
 
 static u16 cga_transform(u8 *buf, u16 size);
@@ -30,6 +30,14 @@ static void wr_le(u8 *b, u16 word, u16 v)
 {
     b[word * 2] = (u8)v;
     b[word * 2 + 1] = (u8)(v >> 8);
+}
+
+/* far-указатель (huge, нормализованный) на p в эмулированной памяти */
+static void wr_far(u8 *b, const u8 *p)
+{
+    u32 l = (u32)(p - hw_conv);
+    wr_le(b, 0, (u16)(l & 0xF));
+    wr_le(b, 1, (u16)(l >> 4));
 }
 
 /* @0BFB:0004 file:0D7B4 sprite_init — арена; ширины спрайтов → пары пикселей */
@@ -123,8 +131,7 @@ s16 sprite_loader_main(void)
             continue;
         }
         if (!sprite_needed(dir[0])) {
-            wr_le(table, 0, (u16)(empty - sprite_arena));
-            wr_le(table, 1, (u16)((u32)(empty - sprite_arena) >> 16));
+            wr_far(table, empty);
             need_seek = 1;
             continue;
         }
@@ -164,8 +171,7 @@ s16 sprite_loader_main(void)
             si = tandy_sprite_convert(cursor, vbuf + 0x4000);
             break;
         }
-        wr_le(table, 0, (u16)(cursor - sprite_arena));
-        wr_le(table, 1, (u16)((u32)(cursor - sprite_arena) >> 16));
+        wr_far(table, cursor);
         cursor += si;
         total += si;
         if (first_time && (dir[0] == 0 || dir[0] == 1)) {

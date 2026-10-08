@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "orig/ds.h"
 
+void rtl_startup_heap(void);                         /* @0000:069E */
 void init_object_pool(void);                         /* @006E:0002 */
 void objects_init(void);                             /* @006E:00D1 */
 s16 alloc_object(s16 parity);                        /* @006E:011B */
@@ -63,10 +64,13 @@ void hud_put(s16 sprite, s16 col, s16 row, s16 show); /* @041D:0002 */
 void hud_item(s16 i, s16 show);                      /* @041D:0129 */
 void hud_sel(s16 i, s16 show);                       /* @041D:014E */
 void hud_lives(void);                                /* @041D:01A6 */
+void hud_items(void);                                /* @041D:01CF */
 void items_reset(u8 *rec);                           /* @041D:0206 */
+void hud_sel_clear(void);                            /* @041D:0244 */
 void bcd_set(u8 *p, s16 n, s32 v);                   /* @041D:02BF */
 void bcd_add(u8 *p, s16 n, s32 v);                   /* @041D:02F4 */
 s16 bcd_sub(u8 *p, s16 n, s32 v);                    /* @041D:037C */
+void hud_score(u8 *score);                           /* @041D:0498 */
 void add_score(s32 v);                               /* @041D:04D7 */
 void hud_redraw(void);                               /* @041D:04F7 */
 void hud_options(void);                              /* @041D:05D2 */
@@ -80,6 +84,7 @@ s16 use_item6(void);                                 /* @041D:08CB */
 s16 use_item7(void);                                 /* @041D:08F1 */
 s16 use_item8(void);                                 /* @041D:08F9 */
 void item_pickup(s16 n);                             /* @041D:09BE */
+void item_consume(s16 n);                            /* @041D:0AB4 */
 void item_set_active(s16 k, s16 on);                 /* @041D:0B4F */
 void items_tick(void);                               /* @041D:0BC1 */
 void draw_text(const char *s, s16 row);              /* @04E4:000B */
@@ -142,12 +147,112 @@ void ai_dispatch(void);                              /* @0D4B:0BD5 */
 void THINKCYCLE(void);                               /* @0D4B:0E03 */
 void play_sound(s16 n);                              /* @0D4B:1124 */
 void level_clear_state(void);                        /* @0D4B:1148 */
+void cam_track(s16 tx, s16 ty);                      /* @0E62:0032 */
+void camera_update(void);                            /* @0E62:0081 */
+void set_player_state(s16 s);                        /* @0E62:01E7 */
+void level_enter(void);                              /* @0E62:01F9 */
+void k_start_state3(void);                           /* @0E62:05C0 */
+void karnov_die(s16 s, s16 mode);                    /* @0E62:0683 */
+void die_water(s16 k);                               /* @0E62:06C6 */
+void die_hit(void);                                  /* @0E62:06FE */
+s16 attr_head(void);                                 /* @0E62:0712 */
+s16 attr_feet(void);                                 /* @0E62:0727 */
+void ladder_grab(void);                              /* @0E62:07C3 */
+void ladder_grab_down(void);                         /* @0E62:07FF */
+void k_nop(void);                                    /* @0E62:0C44 */
+void k_appear(void);                                 /* @0E62:0C49 */
+void k_walk(void);                                   /* @0E62:0CF6 */
+void k_slope(void);                                  /* @0E62:0E20 */
+void k_crouch(void);                                 /* @0E62:0FAE */
+void k_climb(void);                                  /* @0E62:1071 */
+void k_jump(void);                                   /* @0E62:1165 */
+void k_fly(void);                                    /* @0E62:13C6 */
+void k_state3(void);                                 /* @0E62:14D7 */
+void k_bounce(void);                                 /* @0E62:16F3 */
+void karnov_death(void);                             /* @0E62:1791 */
+void shot_straight(void);                            /* @0FFA:00C2 */
+void shot_upper(void);                               /* @0FFA:00FF */
+void shot_lower(void);                               /* @0FFA:0183 */
+void boomerang(void);                                /* @0FFA:0247 */
+void fireball(void);                                 /* @0FFA:0575 */
+void ladders_mark(void);                             /* @0FFA:0724 */
+void ladder_item(void);                              /* @0FFA:07CC */
+void bomb_blast(void);                               /* @0FFA:0A7B */
+void bomb(void);                                     /* @0FFA:0BCB */
+void hidden_item(void);                              /* @0FFA:0CF6 */
+void falling_item(void);                             /* @0FFA:0DAA */
+void static_item(void);                              /* @0FFA:0EB8 */
+void level_scroll(void);                             /* @0FFA:1032 */
+void sky_ice(void);                                  /* @0FFA:139F */
+void kill_sky_chain(void);                           /* @0FFA:155E */
+void PRE_KARNOV(void);                               /* @0FFA:1A1A */
+void POST_KARNOV(void);                              /* @0FFA:1C04 */
+void aim_speed(s16 x0, s16 y0, s16 x1, s16 y1, s32 *vx, s32 *vy, s32 speed); /* @11D6:0006 */
+void aim(s16 x0, s16 y0, s16 x1, s16 y1, s32 *vx, s32 *vy, s16 n); /* @11D6:00DD */
+void spawn_projectile(s16 x0, s16 y0, s16 tx, s16 ty, s16 kind, s32 speed, s16 flat); /* @11D6:0139 */
+void projectile(void);                               /* @11D6:02A3 */
+void ai_t10(void);                                   /* @11D6:0413 */
+void ai_t11(void);                                   /* @11D6:04CA */
+void ai_t17(void);                                   /* @11D6:0617 */
+void ai_t13(void);                                   /* @11D6:06A8 */
+void ai_t12(void);                                   /* @11D6:08B3 */
+void ai_t15(void);                                   /* @11D6:0ACB */
+void ai_t14(void);                                   /* @11D6:0E08 */
+void ai_t16(void);                                   /* @11D6:1033 */
+void ai_t18(void);                                   /* @11D6:127D */
+void ai_t09(void);                                   /* @11D6:1644 */
+void ai_t19(void);                                   /* @11D6:16C0 */
+void ai_t23(void);                                   /* @1348:0007 */
+void gold_ball(void);                                /* @1348:00D7 */
+void ai_t24(void);                                   /* @1348:03A9 */
+void ai_t20(void);                                   /* @1348:06DD */
+void ai_t25(void);                                   /* @1348:0A20 */
+void t22_drop(void);                                 /* @1348:0BB2 */
+void ai_t22(void);                                   /* @1348:0C82 */
+void ai_t26(void);                                   /* @1348:0E46 */
+void ai_t21(void);                                   /* @1348:1153 */
+void ai_t30(void);                                   /* @1348:12CF */
+void ai_t29(void);                                   /* @1348:1531 */
+void ai_t27(void);                                   /* @1348:17AB */
+void ai_t28(void);                                   /* @1348:197C */
+void ai_t31(void);                                   /* @1348:1B1A */
+void ai_t32(void);                                   /* @1348:1C34 */
+void ai_t33(void);                                   /* @151A:00CD */
+void ai_t34(void);                                   /* @151A:02A6 */
+void ai_t36(void);                                   /* @151A:061B */
+void ai_t35(void);                                   /* @151A:08B0 */
+void ai_t37(void);                                   /* @151A:0C31 */
+void ai_t38(void);                                   /* @151A:0EC7 */
+void ai_t39(void);                                   /* @161F:0002 */
+void ai_t41(void);                                   /* @161F:020A */
+void ai_t42(void);                                   /* @161F:029F */
+void ai_t40(void);                                   /* @161F:0447 */
+void ai_t45(void);                                   /* @1692:00B4 */
+void ai_t43(void);                                   /* @1692:0205 */
+void ai_t47(void);                                   /* @1692:0479 */
+void ai_t44(void);                                   /* @1692:052E */
+void ai_t46(void);                                   /* @1692:066B */
+void t48_drop(void);                                 /* @170C:000E */
+void ai_t48(void);                                   /* @170C:018C */
+void ai_t49(void);                                   /* @170C:03C5 */
+void ai_t50(void);                                   /* @175E:000F */
+void ai_t52(void);                                   /* @175E:0203 */
+void partner_kill(void);                             /* @175E:0391 */
+void t51_open(void);                                 /* @175E:03A9 */
+void ai_t51(void);                                   /* @175E:0498 */
+void ai_t53(void);                                   /* @17B6:007D */
+void ai_t54(void);                                   /* @17B6:01DB */
+void ai_t55(void);                                   /* @17EC:0028 */
+void ai_t56(void);                                   /* @17EC:03B2 */
+void ai_t57(void);                                   /* @17EC:0607 */
+double rtl_sqrt(double x);                           /* @1B4D:0000 */
 s16 rtl_bioskey(s16 cmd);                            /* @1B7A:0000 */
 void rtl_exit(s16 code);                             /* @1B89:0005 */
-void rtl_farfree(u8 *p);                             /* @1BBC:000A */
+void rtl_farfree(u8 *ptr);                           /* @1BBC:000A */
 u8 *rtl_farmalloc(u32 size);                         /* @1BE0:0008 */
 FILE *rtl_fopen(const char *name, const char *mode); /* @1BF7:0203 */
 s16 rtl_fseek(FILE *fp, s32 off, s16 whence);        /* @1C31:0053 */
 void rtl_fmemcpy(void *dst, const void *src, u16 n); /* @1C92:000E */
+s16 rtl_rand(void);                                  /* @1CE7:0017 */
 
 #endif

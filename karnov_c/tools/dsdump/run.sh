@@ -11,7 +11,7 @@ for f in "$ROOT"/LEVEL?.BIN "$ROOT"/LEVEL?.MOV "$ROOT"/SPRITES.EGA "$ROOT"/SPRIT
     cp -f "$f" "$WORK/"
 done
 chmod u+w "$WORK"/*
-rm -f "$WORK/DSDUMP.BIN"
+rm -f "$WORK/DSDUMP.BIN" "$WORK/HEAP.BIN"
 cat > "$WORK/dosbox.conf" <<CONF
 [sdl]
 output = surface

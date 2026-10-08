@@ -7,6 +7,10 @@
 
 /* Нижняя память BIOS 0000:0400..04FF. */
 u8   hw_peekb(u16 seg, u16 off);
+u16  hw_peekw(u16 seg, u16 off);
+/* p[i] для far-указателя на s16; NULL — чтение с 0000:0000 (таблица
+ * векторов), как в оригинале */
+#define FAR_W(p, i) ((p) != NULL ? (p)[i] : (s16)hw_peekw(0, (u16)((i) * 2)))
 void hw_pokeb(u16 seg, u16 off, u8 v);
 
 /* INT 10h */
@@ -54,8 +58,12 @@ void  hw_setvect(u8 n, farfn f);
  * в реальном времени сначала выдерживает период PIT. */
 void hw_wait_tick(void);
 
-/* Куча (farmalloc/farfree Turbo-C). */
-u8  *hw_farmalloc(u32 size);
-void hw_farfree(u8 *p);
-/* (seg:off + 0xFFFF) & 0xFFFF0000 — начало следующего параграфа. */
+/* Обычная память 640 КБ (линейные адреса реального режима): far-куча
+ * Turbo-C. Область DS (DS_LIN..+64К) сюда не входит — она в реестре. */
+#define HW_CONV_SIZE 0xA0000
+#define DS_LIN       ((u32)DS_SEG * 16)
+extern u8 hw_conv[HW_CONV_SIZE];
+/* Блок far-кучи: seg:off указателя от farmalloc (смещение 4..19). */
+u16  hw_heap_seg(const u8 *p);
+/* (seg + 1):0000 — начало следующего параграфа после seg:off. */
 u8  *hw_next_paragraph(u8 *p);

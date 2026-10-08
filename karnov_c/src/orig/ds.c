@@ -106,7 +106,7 @@ void ds_init(void)
             n = var_slots(v, e, elem, sl);
             for (s = 0; s < n; s++) {
                 u32 a = base + slot_off(v, s);
-                u8 tmp[512];
+                static u8 tmp[0x1000];
                 unsigned k;
                 if (a >= ds_init_size)
                     break;
@@ -142,7 +142,7 @@ void ds_snapshot(u8 *img, u8 *mask)
             n = var_slots(v, e, elem, sl);
             for (s = 0; s < n; s++) {
                 u32 a = base + slot_off(v, s);
-                u8 tmp[512];
+                static u8 tmp[0x1000];
                 if (a + sl[s].size > 0x10000 || sl[s].kind == K_NOCMP)
                     continue;
                 if (sl[s].kind == K_FARDATA) {
@@ -157,8 +157,9 @@ void ds_snapshot(u8 *img, u8 *mask)
                     memcpy(tmp, sl[s].c, sl[s].size);
                 }
                 memcpy(img + a, tmp, sl[s].size);
-                if (sl[s].kind != K_NOCMP)
-                    memset(mask + a, 1, sl[s].size);
+                memset(mask + a, 1, sl[s].size);
+                if (sl[s].kind == K_FARDATA || sl[s].kind == K_FARCODE)
+                    mask[a + 2] = mask[a + 3] = 2;  /* сегмент: сверка с базой загрузки */
             }
         }
     }
@@ -202,14 +203,17 @@ void *ds_resolve(u32 segoff)
 u32 ds_unresolve(const void *p)
 {
     const u8 *q = p;
-    unsigned i, f;
+    unsigned i, f, pass;
     if (!p)
         return 0;
+    /* проход 0 — внутри переменной; 1 — указатель на конец массива
+     * (C-переменные могут стоять вплотную, внутренность важнее) */
+    for (pass = 0; pass < 2; pass++)
     for (i = 0; i < ds_nvars; i++) {
         const DsVar *v = &ds_vars[i];
         const u8 *b = v->ptr, *end = b + v->count * v->c_size;
         size_t e, in;
-        if (q < b || q > end)
+        if (q < b || q > end || (q == end) != (pass == 1))
             continue;
         if (q == end && v->lay)
             continue;
@@ -269,7 +273,7 @@ static void ds_copy(u16 addr, u16 n, u8 *buf, int in)
             unsigned ns = var_slots(v, e, elem, sl);
             for (s = 0; s < ns; s++) {
                 u32 a = base + slot_off(v, s);
-                u8 tmp[512];
+                static u8 tmp[0x1000];
                 if (a < lo || a + sl[s].size > hi || sl[s].kind == K_NOCMP)
                     continue;
                 if (in) {
@@ -305,3 +309,48 @@ static void ds_copy(u16 addr, u16 n, u8 *buf, int in)
 
 void ds_copy_out(u16 addr, u16 n, u8 *dst) { ds_copy(addr, n, dst, 0); }
 void ds_copy_in(u16 addr, u16 n, const u8 *src) { ds_copy(addr, n, (u8 *)src, 1); }
+
+void ds_poke16(u16 addr, u16 v)
+{
+    u8 b[2];
+    b[0] = (u8)v;
+    b[1] = (u8)(v >> 8);
+    ds_copy_in(addr, 2, b);
+}
+
+extern u8 hw_conv[];
+
+u8 far_peekb(u16 seg, u16 off)
+{
+    u32 l = ((u32)seg * 16 + off) & 0xFFFFF;
+    if (l >= (u32)DS_SEG * 16 && l < (u32)DS_SEG * 16 + 0x10000) {
+        u16 a = (u16)(l - (u32)DS_SEG * 16);
+        return (u8)(a & 1 ? ds_peek16((u16)(a - 1)) >> 8 : ds_peek16(a));
+    }
+    return l < 0xA0000 ? hw_conv[l] : 0;
+}
+
+void far_pokeb(u16 seg, u16 off, u8 v)
+{
+    u32 l = ((u32)seg * 16 + off) & 0xFFFFF;
+    if (l >= (u32)DS_SEG * 16 && l < (u32)DS_SEG * 16 + 0x10000) {
+        u8 b = v;
+        ds_copy_in((u16)(l - (u32)DS_SEG * 16), 1, &b);
+        return;
+    }
+    if (l < 0xA0000)
+        hw_conv[l] = v;
+}
+
+/* Слово DS по адресу — для чтений оригинала за пределы массива. */
+u16 ds_peek16(u16 addr)
+{
+    u8 b[2] = { 0, 0 };
+    unsigned k;
+    /* байты вне реестра — из образа инициализированного DS (константы) */
+    for (k = 0; k < 2; k++)
+        if ((u32)addr + k < ds_init_size)
+            b[k] = ds_init_image[addr + k];
+    ds_copy_out(addr, 2, b);
+    return (u16)(b[0] | b[1] << 8);
+}
