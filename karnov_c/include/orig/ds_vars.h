@@ -180,6 +180,7 @@ DSV(s16, demo_level_ctr,     0x035E)
 DSV(s16, demo_mode,          0xCDEC)
 
 /* --- спрайты (модуль 0x0BFB) */
+DSV(u16, ega_page,           0x0D02)         /* EGA: видимая страница (0 / 8000) */
 DSVX(u8 *, sprite_arena,     0x0D04, 4)
 DSV(s16, sprites_fixed,      0x11E6)         /* последний закреплённый спрайт; -1 — ещё не грузили */
 DSA(char, s_sprites_cga,     0x11E8, 12)
@@ -329,3 +330,8 @@ DSV(s16, t25_count,          0xD97A)         /* живые тип 25 (держа
 DSV(s16, gold_balls,         0xD97C)         /* шары золотого человека */
 DSA(s16, t34_trail,          0xD97E, 40)     /* тип 34: след головы (x, y) ×20 */
 DSA(s16, t56_pos,            0x1F8E, 6)      /* тип 56: точки появления (x, y) ×3 */
+
+/* --- рекорды (модуль 0x02D3) */
+DSA(u8,  herc_crtc,          0x0204, 12)     /* регистры 6845 для графики Hercules */
+DSA(u8,  hiscores,           0x0210, 0x136)  /* 10 × (имя[27], u32 BCD-очки) */
+DSA(char, s_high_scores,     0x0346, 12)

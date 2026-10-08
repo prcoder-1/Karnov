@@ -59,6 +59,17 @@ void port_frame_hook(void)
                 fwrite(&hw_conv[0x2DE30], 1, 0x50000, hp);
         }
     }
+    {
+        static int fno;
+        int k;
+        char spath[64];
+        for (k = 0; k < port_opt.nshot; k++)
+            if (port_opt.shot[k] == fno) {
+                snprintf(spath, sizeof spath, "shot_%05d.ppm", fno);
+                hw_video_save_ppm(spath);
+            }
+        fno++;
+    }
     if (port_opt.frames && ++frames >= port_opt.frames) {
         if (fp)
             fclose(fp);
@@ -145,6 +156,8 @@ int main(int argc, char **argv)
             port_opt.no_audio = 1;
         } else if (!strcmp(argv[i], "--headless")) {
             port_opt.headless = 1;
+        } else if (!strcmp(argv[i], "--shot") && i + 1 < argc && port_opt.nshot < 16) {
+            port_opt.shot[port_opt.nshot++] = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
             port_opt.frames = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--dsdump") && i + 1 < argc) {

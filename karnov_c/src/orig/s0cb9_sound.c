@@ -121,7 +121,7 @@ static void mus_rest(void)
 /* @0CB9:019E file:0E52E mus_next */
 static void mus_next(void)
 {
-    u8 *e;
+    u16 e;
     if (mus_script[mus_pos] == 0) {
         if (mus_loop == 0) {
             mus_script = NULL;
@@ -133,22 +133,23 @@ static void mus_next(void)
     }
     if (mus_script[mus_pos] == 0xFF) {
         mus_pos++;
-        e = &note_len[mus_script[mus_pos] * 2];
+        /* индекс до 255: за note_len (0x40) — соседние переменные DS */
+        e = (u16)(0x122A + mus_script[mus_pos] * 2);
         mus_pos++;
-        e[0] = mus_script[mus_pos];
+        far_pokeb(DS_SEG, e, mus_script[mus_pos]);
         mus_pos++;
-        e[1] = mus_script[mus_pos];
+        far_pokeb(DS_SEG, (u16)(e + 1), mus_script[mus_pos]);
         mus_pos++;
         mus_next();
         return;
     }
     mus_phase = 2;
-    mus_div = pitch_lut[mus_script[mus_pos]];
+    mus_div = (u16)DS_IDX16(pitch_lut, 0x126A, mus_script[mus_pos]);
     mus_pos++;
-    e = &note_len[mus_script[mus_pos] * 2];
+    e = (u16)(0x122A + mus_script[mus_pos] * 2);
     mus_pos++;
-    mus_timer = e[0];
-    mus_gap = e[1];
+    mus_timer = far_peekb(DS_SEG, e);
+    mus_gap = far_peekb(DS_SEG, (u16)(e + 1));
 }
 
 /* @0CB9:0298 file:0E628 music_tick */

@@ -61,7 +61,7 @@ void CHECKTRIGGERS(void)
 
     trig_lo = 0;
     trig_hi = spawn_count - 1;
-    key = (s16)(cam_rect[0] << tile_shift);
+    key = (s16)((u16)cam_rect[0] << tile_shift);
     do {
         si = (s16)(trig_lo + trig_hi) >> 1;
         if (spawns[si].x < key)

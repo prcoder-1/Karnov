@@ -28,7 +28,7 @@ void detect_video_mode(void)
             ;
         clear_arg(0);
     }
-    fclose(fp);
+    rtl_fclose(fp);
     equip = (s8)hw_peekb(0, 0x410);
     if (level_mode != 4)
         return;
@@ -36,7 +36,7 @@ void detect_video_mode(void)
         fp = rtl_fopen(s_sprites_ega_b, s_rb_b);
         if (fp == NULL)
             goto cga;
-        fclose(fp);
+        rtl_fclose(fp);
         bios_set_mode(9);
         level_mode = 3;
         return;
@@ -44,7 +44,7 @@ void detect_video_mode(void)
     if (ega_detect() == 0) {
         fp = rtl_fopen(s_sprites_ega_c, s_rb_c);
         if (fp != NULL) {
-            fclose(fp);
+            rtl_fclose(fp);
             bios_set_mode(0x0D);
             level_mode = 1;
             return;

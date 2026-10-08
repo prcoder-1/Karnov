@@ -40,6 +40,10 @@ void delay(s16 n);                                   /* @0282:000F */
 void draw_tile(s16 col, s16 row);                    /* @0287:0006 */
 void rect_move_inside(s16 *a, const s16 *b);         /* @02B5:0001 */
 void rect_intersect(const s16 *a, const s16 *b, s16 *out); /* @02B5:009D */
+void herc_init(void);                                /* @02C7:000E */
+void herc_shutdown(void);                            /* @02C7:0052 */
+void hiscore_enter(u8 *score);                       /* @02D3:000C */
+void show_hiscores(s16 ticks);                       /* @02D3:00FB */
 u8 *joy_read(void);                                  /* @0316:00E0 */
 void bios_set_cursor(s16 row, s16 col);              /* @0330:0009 */
 void bios_set_mode(s16 mode);                        /* @0330:001A */
@@ -70,6 +74,7 @@ void hud_sel_clear(void);                            /* @041D:0244 */
 void bcd_set(u8 *p, s16 n, s32 v);                   /* @041D:02BF */
 void bcd_add(u8 *p, s16 n, s32 v);                   /* @041D:02F4 */
 s16 bcd_sub(u8 *p, s16 n, s32 v);                    /* @041D:037C */
+void hud_digits(u8 *p, s16 n, s16 col, s16 row);     /* @041D:041A */
 void hud_score(u8 *score);                           /* @041D:0498 */
 void add_score(s32 v);                               /* @041D:04D7 */
 void hud_redraw(void);                               /* @041D:04F7 */
@@ -103,6 +108,12 @@ s16 bin_fclose(FILE *fp);                            /* @058B:004C */
 void bin_reset(void);                                /* @058B:0066 */
 u16 bin_fread(u8 *buf, u16 size, u16 count, FILE *fp); /* @058B:0077 */
 s16 read_byte(u8 *dst, FILE *fp);                    /* @058B:0135 */
+void scroll_blit(u16 src);                           /* @05A3:0009 */
+void sprite_blit(u16 off, s16 sprite, s16 phase, s16 mode); /* @0920:0002 */
+void sprite_erase(u16 off, s16 sprite, s16 phase);   /* @0920:13FE */
+void vb_present_rect(u16 off, s16 w, s16 h);         /* @0920:2392 */
+void hud_blit(u16 off, s16 sprite, s16 phase);       /* @0920:24C8 */
+void hud_erase(u16 off, s16 sprite, s16 phase);      /* @0920:2A56 */
 s16 sprite_init(void);                               /* @0BFB:0004 */
 void sprite_shutdown(void);                          /* @0BFB:00B2 */
 s16 sprite_loader_main(void);                        /* @0BFB:011C */
@@ -121,6 +132,8 @@ void set_vector(s16 n, farfn f);                     /* @0CB9:04D8 */
 s16 ega_detect(void);                                /* @0D09:0006 */
 s16 cga_detect(void);                                /* @0D09:0050 */
 s16 herc_detect(void);                               /* @0D09:00A3 */
+void tandy_convert(u8 *dst, const u8 *src);          /* @0D18:000D */
+u16 tandy_sprite_convert(u8 *dst, const u8 *src);    /* @0D18:009D */
 void map_set_attr(s16 col, s16 row, s16 attr);       /* @0D4B:0003 */
 s16 map_attr(s16 col, s16 row);                      /* @0D4B:0021 */
 s16 map_tile(s16 col, s16 row);                      /* @0D4B:003E */
@@ -248,9 +261,11 @@ void ai_t57(void);                                   /* @17EC:0607 */
 double rtl_sqrt(double x);                           /* @1B4D:0000 */
 s16 rtl_bioskey(s16 cmd);                            /* @1B7A:0000 */
 void rtl_exit(s16 code);                             /* @1B89:0005 */
+s16 rtl_fclose(FILE *fp);                            /* @1BA1:000B */
 void rtl_farfree(u8 *ptr);                           /* @1BBC:000A */
 u8 *rtl_farmalloc(u32 size);                         /* @1BE0:0008 */
 FILE *rtl_fopen(const char *name, const char *mode); /* @1BF7:0203 */
+u16 rtl_fread(void *ptr, u16 size, u16 n, FILE *fp); /* @1C24:0062 */
 s16 rtl_fseek(FILE *fp, s32 off, s16 whence);        /* @1C31:0053 */
 void rtl_fmemcpy(void *dst, const void *src, u16 n); /* @1C92:000E */
 s16 rtl_rand(void);                                  /* @1CE7:0017 */

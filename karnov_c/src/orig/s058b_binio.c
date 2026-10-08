@@ -18,7 +18,7 @@ FILE *bin_fopen(const char *name, const char *mode)
 /* @058B:004C file:070FC bin_fclose */
 s16 bin_fclose(FILE *fp)
 {
-    return (s16)fclose(fp);
+    return (s16)rtl_fclose(fp);
 }
 
 /* @058B:0066 file:07116 bin_reset */
@@ -66,7 +66,7 @@ s16 read_byte(u8 *dst, FILE *fp)
         if (io_buf_avail != 0x200)
             return 1;
         io_buf_pos = 0;
-        io_buf_avail = (s16)fread(io_buffer, 1, 0x200, fp);
+        io_buf_avail = (s16)rtl_fread(io_buffer, 1, 0x200, fp);
     }
     *dst = io_buffer[io_buf_pos];
     io_buf_pos++;

@@ -12,6 +12,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 KC = os.path.normpath(os.path.join(HERE, ".."))
 LO, HI = 0x13F8, 0x1F8E
 # не резать: смещения полей внутри таблиц (адресуются [bx+база+2])
+# таблицы масок упоров игрока (CollRes.masks, 5 слов) — 0E62
+MASKTABS = (0x1510, 0x151A, 0x1546, 0x1580, 0x15B6, 0x164A, 0x169A)
 NOCUT = {0x19F6, 0x19FC, 0x19FE, 0x1BFA, 0x1C04, 0x1C6A, 0x1C76, 0x1F0E, 0x1F26}
 d = open(os.path.join(KC, "../KARNOV.EXE"), "rb").read()
 DSF = 0x1F190
@@ -90,6 +92,8 @@ def main():
             spans.append((pa, pa + 2 * (n + 1)))
             if LO <= po < HI:
                 spans.append((po, po + 4 * n))
+    spans += [(t, t + 10) for t in MASKTABS]
+    spans += [(0x15B6, 0x15CA), (0x164A, 0x165E)]   # + флаги упоров [dir + 5]
     cuts = sorted(c for c in cuts if not any(a < c < b for a, b in runs)
                   and not any(a < c < b for a, b in spans) and c not in NOCUT)
     lines = ["/* Сгенерировано tools/gen_ds_anim.py — не править.",

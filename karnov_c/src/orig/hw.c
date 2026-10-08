@@ -44,6 +44,9 @@ void hw_int10_set_mode(u8 mode)
     hw_video_reset();
 }
 u8 hw_int10_get_mode(void) { return video_mode; }
+
+/* BIOS: фон/рамка — регистр выбора цвета CGA */
+void hw_int10_set_bg(u8 color) { hw_out(0x3D9, (u8)(color & 0x1F)); }
 void hw_int10_set_cursor(u8 row, u8 col) { cur_row = row; cur_col = col; }
 u16 hw_int10_get_cursor(void) { return (u16)(cur_row << 8 | cur_col); }
 

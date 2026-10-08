@@ -19,6 +19,7 @@ u8   hw_int10_get_mode(void);
 void hw_int10_set_cursor(u8 row, u8 col);
 u16  hw_int10_get_cursor(void);              /* DH:DL */
 void hw_int10_teletype(u8 ch);
+void hw_int10_set_bg(u8 color);              /* INT 10h/0Bh, BH = 0 */
 /* INT 16h AH=0: ожидание клавиши → AH скан-код, AL ASCII; AH=1: без
  * извлечения, 0 — буфер пуст. */
 u16  hw_int16_read(void);

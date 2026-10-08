@@ -6,10 +6,83 @@
 #include "orig/hw.h"
 #include "orig/ds.h"
 
+/* --- stdio Turbo-C: буфер потока (0x200) в far-куче, как у setvbuf из
+ * __openfp (@1BF7:00DD); байты берутся через него (_ffill). Это важно
+ * для раскладки кучи и её «мусора». */
+typedef struct { FILE *fp; u8 *buf; u16 pos, avail; } RtlFile;
+static RtlFile rtl_files[8];
+
+static RtlFile *rf_of(FILE *fp)
+{
+    unsigned i;
+    for (i = 0; i < sizeof rtl_files / sizeof rtl_files[0]; i++)
+        if (rtl_files[i].fp == fp)
+            return &rtl_files[i];
+    return NULL;
+}
+
 /* @1BF7:0203 file:1D973 fopen RTL — имена DOS без учёта регистра */
 FILE *rtl_fopen(const char *name, const char *mode)
 {
-    return karnov_fopen(name, mode);
+    FILE *fp = karnov_fopen(name, mode);
+    RtlFile *f;
+    u8 *buf;
+    if (fp == NULL)
+        return NULL;
+    buf = rtl_farmalloc(0x200);
+    f = rf_of(NULL);
+    if (buf == NULL || f == NULL) {
+        fclose(fp);
+        return NULL;
+    }
+    f->fp = fp;
+    f->buf = buf;
+    f->pos = f->avail = 0;
+    return fp;
+}
+
+/* @1BA1:000B file:1D21B fclose RTL */
+s16 rtl_fclose(FILE *fp)
+{
+    RtlFile *f = rf_of(fp);
+    if (f != NULL) {
+        rtl_farfree(f->buf);
+        f->fp = NULL;
+    }
+    return (s16)fclose(fp);
+}
+
+/* @1C24:0062 file:1DAA2 fread RTL — побайтно через буфер потока */
+u16 rtl_fread(void *ptr, u16 size, u16 n, FILE *fp)
+{
+    RtlFile *f = rf_of(fp);
+    u8 *d = ptr;
+    u16 i, k;
+    if (f == NULL)
+        return (u16)fread(ptr, size, n, fp);
+    for (i = 0; i < n; i++)
+        for (k = 0; k < size; k++) {
+            if (f->pos >= f->avail) {
+                f->avail = (u16)fread(f->buf, 1, 0x200, fp);
+                f->pos = 0;
+                if (f->avail == 0)
+                    return i;
+            }
+            *d++ = f->buf[f->pos++];
+        }
+    return n;
+}
+
+/* @1C31:0053 file:1DB63 fseek RTL — сбрасывает буфер потока */
+s16 rtl_fseek(FILE *fp, s32 off, s16 whence)
+{
+    RtlFile *f = rf_of(fp);
+    if (f != NULL) {
+        if (whence == SEEK_CUR)
+            off -= (s32)(f->avail - f->pos);
+        f->pos = f->avail = 0;
+    }
+    return (s16)fseek(fp, off, whence);
 }
 
 /* @1C92:000E file:1E12E fmemcpy RTL — rep movsw вперёд (при перекрытии
@@ -267,12 +340,6 @@ void rtl_startup_heap(void)
     rtl_heaptop[0] = 0;
     rtl_heaptop[1] = 0x9FFF;
     rtl_farmalloc(0x10);
-}
-
-/* @1C31:0053 file:1DB63 fseek RTL */
-s16 rtl_fseek(FILE *fp, s32 off, s16 whence)
-{
-    return (s16)fseek(fp, off, whence);
 }
 
 /* @1B7A:0000 file:1CFA0 bioskey RTL — INT 16h: 0 — чтение (ожидание),

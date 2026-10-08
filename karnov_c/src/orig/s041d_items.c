@@ -175,7 +175,7 @@ s16 bcd_sub(u8 *p, s16 n, s32 v)
 }
 
 /* @041D:041A file:05DEA hud_digits — без ведущих нулей */
-static void hud_digits(u8 *p, s16 n, s16 col, s16 row)
+void hud_digits(u8 *p, s16 n, s16 col, s16 row)
 {
     s16 lead = 0, si;
     for (si = n - 1; si >= 0; si--, col += 2) {

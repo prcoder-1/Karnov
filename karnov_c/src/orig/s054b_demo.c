@@ -94,21 +94,21 @@ s16 load_demo(void)
         clear_screen();
         clear_arg(0);
     }
-    fclose(fp);
+    rtl_fclose(fp);
     fp = rtl_fopen(msg_buf, s_rb_mov_b);
     if (fp == NULL)
         return 1;
-    if (fread(&first, 2, 1, fp) != 1 || fread(&last, 2, 1, fp) != 1 || first >= last)
+    if (rtl_fread(&first, 2, 1, fp) != 1 || rtl_fread(&last, 2, 1, fp) != 1 || first >= last)
         goto fail;
     for (si = 0, ev = &demo_ptr->ev[0]; last - first > si; si++, ev += 3)
-        if (fread(ev, 1, 1, fp) != 1 || fread(ev + 1, 2, 1, fp) != 1)
+        if (rtl_fread(ev, 1, 1, fp) != 1 || rtl_fread(ev + 1, 2, 1, fp) != 1)
             goto fail;
     demo_ptr->pos = 0;
     demo_ptr->count = last;
-    fclose(fp);
+    rtl_fclose(fp);
     return 0;
 fail:
-    fclose(fp);
+    rtl_fclose(fp);
     return 1;
 }
 
@@ -123,9 +123,9 @@ s16 save_demo(void)
         return 1;
     if (pos >= count || fwrite(&pos, 2, 1, fp) != 1 || fwrite(&count, 2, 1, fp) != 1 ||
         fwrite(&demo_rec_ptr->ev[0], 3, (size_t)(count - pos), fp) != (size_t)(count - pos)) {
-        fclose(fp);
+        rtl_fclose(fp);
         return 1;
     }
-    fclose(fp);
+    rtl_fclose(fp);
     return 0;
 }
