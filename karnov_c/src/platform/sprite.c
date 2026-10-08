@@ -11,6 +11,7 @@
  */
 #include "sprite.h"
 #include "file_io.h"
+#include "fsopen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

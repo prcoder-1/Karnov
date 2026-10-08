@@ -25,31 +25,6 @@ static u16   io_buf_pos    = IO_BUF_SIZE;
 static u8    io_buffer[IO_BUF_SIZE] = {0};
 static FILE *bin_stream    = NULL;
 
-/* DOS — case-insensitive, Linux — нет. Пробуем имя как есть, затем
- * полностью в верхнем регистре, затем в нижнем. */
-FILE *karnov_fopen(const char *filename, const char *mode)
-{
-    FILE *fp = fopen(filename, mode);
-    if (fp) return fp;
-
-    char buf[256];
-    size_t n = strlen(filename);
-    if (n >= sizeof(buf)) return NULL;
-
-    for (size_t i = 0; i < n; ++i) {
-        buf[i] = (char)toupper((unsigned char)filename[i]);
-    }
-    buf[n] = '\0';
-    fp = fopen(buf, mode);
-    if (fp) return fp;
-
-    for (size_t i = 0; i < n; ++i) {
-        buf[i] = (char)tolower((unsigned char)filename[i]);
-    }
-    buf[n] = '\0';
-    return fopen(buf, mode);
-}
-
 /* Низкоуровневое чтение байта из файла с буферизацией.
  * Возвращает 0 при успехе, 1 при EOF/ошибке. */
 static int read_byte(u8 *dst, FILE *fp)

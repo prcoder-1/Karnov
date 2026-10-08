@@ -4,3 +4,6 @@ __pycache__/
 karnov_c/karnov
 out/
 karnov_c/out/
+karnov_c/karnov_old
+karnov_c/tools/dsdump/DSDUMP.EXE
+karnov_c/tools/dsdump/hook.bin
