@@ -1,6 +1,7 @@
 /* Модуль 0x175E (file 0x18DE0) — AI-типы 50–52: стена со шипами,
  * ворота (тип 51 и их части), вращающийся блок. */
 #include "orig/fn.h"
+#include "orig/hw.h"
 #include "orig/port.h"
 #include "orig/todo.h"
 
@@ -80,10 +81,16 @@ void ai_t52(void)
         o->tick_period = 3;
         o->y_world -= o->y_world % 10;
         cur_obj->state_list = sl_1E70;
-        /* TODO(@175E:025D): row_fill(1) вызван с одним словом вместо
-         * (o, attr) — объект и атрибут берутся из стека вызывающего;
-         * не воспроизведено. */
-        port_todo_once("175E:025D row_fill с мусорными аргументами");
+        /* row_fill(1): одно слово вместо (o, attr) — o = BP:0001 (BP
+         * ai_dispatch, указывает в код), attr = SI вызывающего ai_dispatch */
+        if (hw_ai_bp != 0) {
+            ActiveObject g;
+            g.x_world = (s16)hw_peekw(hw_ai_bp, 1 + 8);
+            g.y_world = (s16)hw_peekw(hw_ai_bp, 1 + 0xC);
+            row_fill(&g, hw_ai_si);
+        } else {
+            port_todo_once("175E:025D row_fill вне THINKCYCLE");
+        }
         /* fallthrough */
     case 2:
         o = cur_obj;

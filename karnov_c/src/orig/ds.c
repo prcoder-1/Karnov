@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "orig/ds.h"
+#include "orig/hw.h"
 
 /* --- определения */
 #define DSV(t, n, a)        t n;
@@ -92,13 +93,15 @@ static u16 slot_off(const DsVar *v, unsigned i)
     return v->lay ? v->lay->f[i].off : 0;
 }
 
-void ds_init(void)
+/* Образ DS → переменные. load — база загрузки, вычитаемая из сегментов
+ * far-указателей (0 для образа из EXE, 0x1A3 для дампа DOSBox). */
+static void ds_load_image(const u8 *img, u32 size, u16 load)
 {
     static Slot sl[64];
     unsigned i, e, s, n;
     for (i = 0; i < ds_nvars; i++) {
         const DsVar *v = &ds_vars[i];
-        if (v->addr >= ds_init_size)
+        if (v->addr >= size)
             continue;
         for (e = 0; e < v->count; e++) {
             u8 *elem = (u8 *)v->ptr + e * v->c_size;
@@ -108,24 +111,38 @@ void ds_init(void)
                 u32 a = base + slot_off(v, s);
                 static u8 tmp[0x1000];
                 unsigned k;
-                if (a >= ds_init_size)
+                if (a >= size)
                     break;
                 for (k = 0; k < sl[s].size && k < sizeof tmp; k++)
-                    tmp[k] = a + k < ds_init_size ? ds_init_image[a + k] : 0;
-                if (sl[s].kind == K_NOCMP) {
-                    continue;
-                } else if (sl[s].kind == K_FARDATA) {
-                    void *p = ds_resolve(rd32(tmp));
-                    memcpy(sl[s].c, &p, sizeof p);
-                } else if (sl[s].kind == K_FARCODE) {
-                    farfn f = fn_resolve(rd32(tmp));
-                    memcpy(sl[s].c, &f, sizeof f);
-                } else {
+                    tmp[k] = a + k < size ? img[a + k] : 0;
+                if (sl[s].kind == K_FARDATA || sl[s].kind == K_FARCODE) {
+                    u32 fp = rd32(tmp);
+                    if (load != 0 && (fp >> 16) != 0)
+                        fp -= (u32)load << 16;
+                    if (sl[s].kind == K_FARDATA) {
+                        void *p = ds_resolve(fp);
+                        memcpy(sl[s].c, &p, sizeof p);
+                    } else {
+                        farfn f = fn_resolve(fp);
+                        memcpy(sl[s].c, &f, sizeof f);
+                    }
+                } else if (sl[s].kind != K_NOCMP) {
                     memcpy(sl[s].c, tmp, sl[s].size);
                 }
             }
         }
     }
+}
+
+void ds_init(void)
+{
+    hw_lowmem_reset();
+    ds_load_image(ds_init_image, ds_init_size, 0);
+}
+
+void ds_load(const u8 *img, u16 load)
+{
+    ds_load_image(img, 0x10000, load);
 }
 
 void ds_snapshot(u8 *img, u8 *mask)
@@ -320,11 +337,20 @@ void ds_poke16(u16 addr, u16 v)
 
 extern u8 hw_conv[];
 
+/* Линейный адрес эталона: указатели перевода на DS несут сегмент без
+ * релокации (DS_SEG), мусорные — абсолютный, где DS лежит с HW_DS_LIN. */
+static u32 far_lin(u16 seg, u16 off)
+{
+    if (seg == DS_SEG)
+        return HW_DS_LIN + off;
+    return ((u32)seg * 16 + off) & 0xFFFFF;
+}
+
 u8 far_peekb(u16 seg, u16 off)
 {
-    u32 l = ((u32)seg * 16 + off) & 0xFFFFF;
-    if (l >= (u32)DS_SEG * 16 && l < (u32)DS_SEG * 16 + 0x10000) {
-        u16 a = (u16)(l - (u32)DS_SEG * 16);
+    u32 l = far_lin(seg, off);
+    if (l >= HW_DS_LIN && l < HW_HEAP_LIN) {
+        u16 a = (u16)(l - HW_DS_LIN);
         return (u8)(a & 1 ? ds_peek16((u16)(a - 1)) >> 8 : ds_peek16(a));
     }
     return l < 0xA0000 ? hw_conv[l] : 0;
@@ -332,10 +358,10 @@ u8 far_peekb(u16 seg, u16 off)
 
 void far_pokeb(u16 seg, u16 off, u8 v)
 {
-    u32 l = ((u32)seg * 16 + off) & 0xFFFFF;
-    if (l >= (u32)DS_SEG * 16 && l < (u32)DS_SEG * 16 + 0x10000) {
+    u32 l = far_lin(seg, off);
+    if (l >= HW_DS_LIN && l < HW_HEAP_LIN) {
         u8 b = v;
-        ds_copy_in((u16)(l - (u32)DS_SEG * 16), 1, &b);
+        ds_copy_in((u16)(l - HW_DS_LIN), 1, &b);
         return;
     }
     if (l < 0xA0000)

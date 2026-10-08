@@ -441,6 +441,8 @@ void ai_dispatch(void)
     } else {
         return;
     }
+    if (hw_ai_bp != 0)
+        hw_ai_bp -= 0x12;               /* кадр вложенного ai_dispatch */
     ai_dispatch();
 }
 
@@ -538,7 +540,10 @@ void THINKCYCLE(void)
                 (--cur_obj->throttle <= 0 || cur_obj->state_byte != 2)) {
                 cur_obj->throttle = cur_obj->tick_period;
                 cur_state = cur_obj->state_byte;
+                hw_ai_bp = 0x0FAA;      /* main_loop SP=0FCA → THINKCYCLE → ai_dispatch */
+                hw_ai_si = si;
                 ai_dispatch();
+                hw_ai_bp = 0;
             }
             if (si != 0 && active_index[di] != goal_idx &&
                 player_x - cur_obj->x_world > 0x7D) {

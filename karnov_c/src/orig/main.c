@@ -28,6 +28,8 @@ void port_todo_once(const char *what)
     fprintf(stderr, "не переведено (пропуск): %s\n", what);
 }
 
+int ftest_run(const char *ds_file, const char *heap_file, const char *out, int nfn, char **fns);
+
 void port_frame_hook(void)
 {
     static FILE *fp;
@@ -142,6 +144,7 @@ void port_pump_events(void)
 int main(int argc, char **argv)
 {
     int i;
+    port_opt.demo_level = -1;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--check")) {
             int bad = ds_check();
@@ -156,6 +159,13 @@ int main(int argc, char **argv)
             port_opt.no_audio = 1;
         } else if (!strcmp(argv[i], "--headless")) {
             port_opt.headless = 1;
+        } else if (!strcmp(argv[i], "--ftest") && i + 3 < argc) {
+            /* --ftest DS HEAP OUT fn...: дифференциальная проверка (ftest.c) */
+            ds_init();
+            rtl_startup_heap();
+            return ftest_run(argv[i + 1], argv[i + 2], argv[i + 3], argc - i - 4, argv + i + 4);
+        } else if (!strcmp(argv[i], "--demo-level") && i + 1 < argc) {
+            port_opt.demo_level = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--shot") && i + 1 < argc && port_opt.nshot < 16) {
             port_opt.shot[port_opt.nshot++] = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {

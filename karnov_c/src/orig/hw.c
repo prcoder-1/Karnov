@@ -1,29 +1,60 @@
 /* hw.c — BIOS и нижняя память для перевода (порт). */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "orig/hw.h"
 #include "orig/port.h"
+#include "fsopen.h"
 
-static u8 lowmem[0x100] = {
-    [0x10] = 0x26,          /* equipment: 80×25 цвет, без FPU (DOSBox ega) */
-    [0x17] = 0x00,          /* флаги клавиатуры */
-};
+/* Образ KARNOV.EXE с релокацией на 0x1A3 → hw_conv[HW_LOAD_LIN..HW_DS_LIN). */
+static void load_exe_image(void)
+{
+    u8 h[0x1C], *img = &hw_conv[HW_LOAD_LIN];
+    u32 len = HW_DS_LIN - HW_LOAD_LIN, hdr, tab, n, i;
+    FILE *f = karnov_fopen("KARNOV.EXE", "rb");
+    if (f == NULL)
+        return;
+    if (fread(h, 1, sizeof h, f) == sizeof h && h[0] == 'M' && h[1] == 'Z') {
+        hdr = (u32)(h[8] | h[9] << 8) * 16;
+        tab = (u32)(h[0x18] | h[0x19] << 8);
+        n = (u32)(h[6] | h[7] << 8);
+        if (fseek(f, (long)hdr, SEEK_SET) == 0 && fread(img, 1, len, f) == len) {
+            for (i = 0; i < n; i++) {
+                u8 r[4];
+                u32 a;
+                if (fseek(f, (long)(tab + i * 4), SEEK_SET) != 0 || fread(r, 1, 4, f) != 4)
+                    break;
+                a = (u32)(r[2] | r[3] << 8) * 16 + (u32)(r[0] | r[1] << 8);
+                if (a + 1 < len) {
+                    u16 v = (u16)(img[a] | img[a + 1] << 8) + HW_LOAD_LIN / 16;
+                    img[a] = (u8)v;
+                    img[a + 1] = (u8)(v >> 8);
+                }
+            }
+        }
+    }
+    fclose(f);
+}
+
+u16 hw_ai_bp;
+s16 hw_ai_si;
+
+void hw_lowmem_reset(void)
+{
+    const HwPatch *p;
+    memcpy(hw_conv, hw_lowmem_init, sizeof hw_lowmem_init);
+    load_exe_image();
+    for (p = hw_code_patch; p->n != 0; p++)
+        memcpy(&hw_conv[HW_LOAD_LIN + p->off], p->b, p->n);
+}
+
 static u8 video_mode = 3;
 static u8 cur_row, cur_col;
 
-/* Вектор INT 0: стартовый код Turbo-C (@0000:0122) ставит свой
- * обработчик деления на 0 — CS:0119; сегмент не эмулируется. */
-static const u8 ivt0[4] = { 0x19, 0x01, 0x00, 0x00 };
-
 u8 hw_peekb(u16 seg, u16 off)
 {
-    u32 a = (u32)seg * 16 + off;
-    if (a < 4)
-        return ivt0[a];
-    if (a >= 0x400 && a < 0x500)
-        return lowmem[a - 0x400];
-    fprintf(stderr, "hw_peekb: %04X:%04X не эмулируется\n", seg, off);
-    return 0;
+    u32 a = ((u32)seg * 16 + off) & 0xFFFFF;
+    return a < HW_CONV_SIZE ? hw_conv[a] : 0;
 }
 
 u16 hw_peekw(u16 seg, u16 off)
@@ -33,9 +64,9 @@ u16 hw_peekw(u16 seg, u16 off)
 
 void hw_pokeb(u16 seg, u16 off, u8 v)
 {
-    u32 a = (u32)seg * 16 + off;
-    if (a >= 0x400 && a < 0x500)
-        lowmem[a - 0x400] = v;
+    u32 a = ((u32)seg * 16 + off) & 0xFFFFF;
+    if (a < HW_CONV_SIZE)
+        hw_conv[a] = v;
 }
 
 void hw_int10_set_mode(u8 mode)

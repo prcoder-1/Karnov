@@ -212,6 +212,7 @@ extern const unsigned ds_init_nfar;
 /* Инициализация всех переменных из образа DS оригинала. */
 void ds_init(void);
 /* Образ DS перевода; mask[i] = 1 там, где байт описан реестром. */
+void ds_load(const u8 *img, u16 load);
 void ds_snapshot(u8 *img, u8 *mask);
 
 /* fmemcpy между диапазоном DS и буфером в раскладке оригинала. */

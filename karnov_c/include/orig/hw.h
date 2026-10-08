@@ -5,7 +5,20 @@
 #define ORIG_HW_H
 #include "orig/ds.h"
 
-/* Нижняя память BIOS 0000:0400..04FF. */
+/* Память ниже DS как у эталона (для чтений по мусорным far-указателям):
+ * 0..1A2F — снимок DOSBox, далее образ KARNOV.EXE (если найден) с
+ * рабочими данными сегментов кода. См. tools/gen_lowmem.py. */
+#define HW_LOAD_LIN 0x1A30u
+#define HW_DS_LIN   0x1F3C0u
+#define HW_HEAP_LIN 0x2DE30u
+typedef struct { u32 off; u8 n; u8 b[8]; } HwPatch;
+extern const u8 hw_lowmem_init[HW_LOAD_LIN];
+extern const HwPatch hw_code_patch[];
+void hw_lowmem_reset(void);
+/* BP и SI вызывающего обработчик ai_dispatch в оригинале (смещения стека
+ * SS=2B3F); их читает ai_t52 как аргументы. 0 — неизвестны. */
+extern u16 hw_ai_bp;
+extern s16 hw_ai_si;
 u8   hw_peekb(u16 seg, u16 off);
 u16  hw_peekw(u16 seg, u16 off);
 /* p[i] для far-указателя на s16; NULL — чтение с 0000:0000 (таблица

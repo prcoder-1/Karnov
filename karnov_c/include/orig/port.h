@@ -9,7 +9,8 @@ typedef struct {
     int fast;               /* без выдержки реального времени */
     int no_audio;
     int frames;             /* >0: выйти после N кадров главного цикла */
-    int shot[16], nshot;    /* --shot N: снимок shot_N.ppm в кадре N */
+    int shot[16], nshot;
+    int demo_level;         /* --demo-level k (тест): уровень старта, как патч EXE; -1 нет */    /* --shot N: снимок shot_N.ppm в кадре N */
     const char *dsdump;     /* файл покадрового дампа DS */
 } PortOpt;
 extern PortOpt port_opt;

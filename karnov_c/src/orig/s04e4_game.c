@@ -179,6 +179,8 @@ static void new_game(void)
     for (si = 0, r = player_rec; si < num_players; si++, r += PLAYER_SIZE) {
         r[2] = 5; r[3] = 0;
         r[0] = demo_mode != 0 ? 0 : 1; r[1] = 0;
+        if (port_opt.demo_level >= 0)       /* тест: как патч mkdump_exe.py */
+            r[0] = (u8)port_opt.demo_level;
         r[0x9F] = 1; r[0xA0] = 0;
         r[0x22] = 10; r[0x23] = 0;
         r[0x20] = 10; r[0x21] = 0;
