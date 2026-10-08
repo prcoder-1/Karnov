@@ -19,27 +19,47 @@
 /* Shield поглощает 5 попаданий врага. */
 #define SHIELD_HITS         5
 
-static u8  s_count[ITEM_NUM];  /* счётчик каждого предмета */
-static int s_current;          /* выбранный индекс, -1 если пусто */
+static u8  s_count[ITEM_NUM];   /* счётчик каждого предмета — DS:0xD912, 11 слов */
+static int s_current = -1;     /* выбранный индекс, -1 если пусто (DS:0xD8FA) */
 static u16 s_boots_timer;      /* frames remaining; 0 = boots неактивны */
 static u16 s_fly_timer;        /* frames remaining; 0 = не летит */
 static u8  s_shield_hits;      /* оставшиеся поглощения щита */
 static u16 s_glasses_timer;    /* frames remaining; >0 — видны скрытые предметы */
-static int s_firepower;        /* 1..3 — снарядов за выстрел ([0xD949]) */
+static int s_firepower = 1;    /* 1..3 — снарядов за выстрел ([0xD949]) */
 static int s_kmarks;           /* накоплено K-Mark'ов */
 
+/* Байт-верифицировано (2026-09): счётчики предметов DS:0xD912 (11 слов,
+ * inv_give/inv_use — file 0x616A..0x64C4) НИГДЕ в KARNOV.EXE не обнуляются
+ * ни на переходе между уровнями, ни на респавне после смерти — единственные
+ * обращения к смещению 0xD912 во всём EXE лежат внутри самих обработчиков
+ * pickup/use (проверено полным сканом байт-паттерна `12 D9`, 11 вхождений,
+ * все в диапазоне file 0x5BB2..0x65FA). То же верно для «текущего выбора»
+ * DS:0xD8FA и «числа разных предметов» DS:0xD8F8 (диапазоны 0x5F1D..0x65D6).
+ * Общий обработчик респавна/входа в уровень (file 0x10019 — общий и для
+ * "level complete", и для смерти, см. physics.c/game.c) обнуляет ТОЛЬКО
+ * активные таймеры-эффекты — [0xD8B4] Boots, [0xD8B6] Wings, [0xD8B8]
+ * Glasses, [0xD8BA] Mask — и HP/тип оружия; предметы переживают и то, и
+ * другое. Раньше inv_reset() (звалась из physics_reset на КАЖДЫЙ вход в
+ * уровень) очищала s_count/s_current целиком — это и роняло предметы при
+ * переходе между уровнями, из-за чего некоторые места следующих уровней
+ * становились недостижимы. */
 void inv_reset(void)
 {
-    for (int i = 0; i < ITEM_NUM; ++i) s_count[i] = 0;
-    s_current     = -1;
     s_boots_timer = 0;
     s_fly_timer   = 0;
     s_shield_hits = 0;
     s_glasses_timer = 0;
-    /* Сила огня сбрасывается вместе с (ре)спавном Карнова — file 0x104DE
-     * (`mov word [0xD949],1`), а inv_reset зовётся из physics_reset. */
-    s_firepower   = 1;
-    s_kmarks      = 0;
+}
+
+void inv_on_death(void)
+{
+    /* set_player_anim (cs:0xE62:0x0683, file 0x104A3), вызывается ТОЛЬКО из
+     * die_water/die_hit в момент реальной гибели: `mov word[0xD949],1`
+     * (file 0x104DE). Это НЕ часть общего входа-в-уровень/респавн-после-
+     * смерти (file 0x10019) — та функция [0xD949] не трогает вовсе, — так
+     * что сила огня сбрасывается именно и только при смерти, а не при
+     * переходе на следующий уровень. Звать из physics.c:death_begin(). */
+    s_firepower = 1;
 }
 
 void inv_give(int id)
@@ -140,9 +160,20 @@ int inv_use(void)
             break;
     }
 
-    /* Расход предмета. Если счётчик обнулился — сдвигаем выбор дальше. */
-    if (s_count[id] > 0) --s_count[id];
-    if (s_count[id] == 0) inv_cycle(+1);
+    /* Расход предмета. Байт-верифицировано (диспетчер file 0x64E3): вызов
+     * обработчика (таблица DS:0x0C30) возвращает ax, и decrement (file
+     * 0x6484 — dec word[DS:0xD912+id*2]) зовётся ТОЛЬКО если ax != 0.
+     * Обработчик Ladder (file 0x616A) всегда кладёт `xor ax,ax` перед retf
+     * (оба пути — успешный спавн и неуспешный — сходятся в 0x61BC) — т.е.
+     * decrement для него не вызывается НИКОГДА: предмет действительно
+     * «не расходуется» (см. inventory.h). Раньше порт списывал Ladder как
+     * любой другой предмет — в т.ч. и при неудачной постановке (physics.c
+     * условие on_ground) — из-за чего единственная лестница на уровне могла
+     * быть потеряна навсегда одним неудачным нажатием OPT. */
+    if (id != ITEM_LADDER) {
+        if (s_count[id] > 0) --s_count[id];
+        if (s_count[id] == 0) inv_cycle(+1);
+    }
     return id;
 }
 

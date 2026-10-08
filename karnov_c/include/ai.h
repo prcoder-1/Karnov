@@ -23,6 +23,7 @@ void ai_init_from_level(u16 level_num);
  * (physics_hit). Бокс игрока задаётся центром/подошвой и размерами. */
 void ai_check_player_hit(int kx, int ky, int kw, int kh);
 
+
 void ai_check_triggers(int player_x_px, int player_y_px, int camera_left_px,
                        u16 frame);
 

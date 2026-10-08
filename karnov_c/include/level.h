@@ -53,6 +53,24 @@ extern u16 level_num_map_rows;
 extern u16 level_num_map_cols;
 extern u8  level_map[MAX_MAP_ROWS][MAX_MAP_COLS];
 
+/* Динамическая подмена attr «на клетку» (не на tile_id!). Порт того, что
+ * KARNOV.EXE хранит в реальности НЕ как «u8 tile_id на клетку», а как
+ * пару {tile_id, attr} на клетку (2 байта), где attr — КЭШ категории,
+ * обычно равный level_tile_attr[tile_id], но который отдельные объекты
+ * могут переписать напрямую (см. ai_head_column в ai.c). probe_tile
+ * (file 0xF214, cs:0xD4B:0x564) и хелпер постановки на землю (file
+ * 0xEDFC/0xEE4F, cs:0xD4B:0x14C/0x19F) читают именно этот кэш-байт через
+ * общий геттер cs:0xD4B:0x21/0x3E — НЕ level_tile_attr[tile_id] заново.
+ * −1 = нет подмены (использовать level_tile_attr[level_map[row][col]]). */
+extern s8 level_attr_override[MAX_MAP_ROWS][MAX_MAP_COLS];
+
+/* Записывает/снимает подмену attr клетки (row,col). attr<0 снимает
+ * подмену (клетка возвращается к своему естественному attr по tile_id) —
+ * байт-точный порт «косметического» первого цикла cs:0xD4B:0x2DB (file
+ * 0xEF8B), где attr пересчитывается из level_tile_attr[tile_id] заново
+ * (что при отсутствии подмены и так тождественно естественному attr). */
+void level_set_attr_override(int row, int col, int attr);
+
 /* Загружает level_num (0..9). Возвращает 0 = OK, иначе код ошибки. */
 int level_load(u16 level_num);
 

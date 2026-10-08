@@ -65,11 +65,18 @@ void physics_set_current_frame(u16 frame);
 bool physics_just_died(void);
 bool physics_is_dying(void);
 void physics_set_invuln(bool on);   /* victory-секвенция: Karnov неуязвим */
+bool physics_is_invuln(void);
 /* Урон Карнову от касания врага (pair-loop, file 0xF81E): у игрока 5 HP
  * (file 0x101CE), при контакте вычитается HP врага; ноль — смерть.
  * Игнорируется во время i-frames, неуязвимости и анимации гибели. */
 void physics_hit(int enemy_hp);
 int  physics_hp(void);
+/* Безусловная гибель от касания ГОЛОВЫ колонны (тип 20) — байт-точный
+ * порт cs:0xE62:0x6FE (die_hit = set_player_anim(6,4)), вызываемого
+ * напрямую из state5 колонны, МИМО physics_hit()/HP-обмена (см. ai.c,
+ * ai_check_player_hit). НЕ играет SFX2 — в оригинале этот путь его не
+ * задевает (см. комментарий в physics.c). */
+void physics_kill_by_head_touch(void);
 void physics_set_sit_scroll(bool on); /* level-end: поза «сидит со свитком» #0x60-0x62 */
 
 /* Рендер Karnov-спрайта в текущей позе. M3+: использует sprite cache,

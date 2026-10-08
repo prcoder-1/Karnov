@@ -531,7 +531,7 @@ void physics_reset(int x, int y)
     s_invuln = false;
     s_hp = 5;                 /* file 0x101CE: hit_points = 5 при респавне */
     s_hit_iframes = 0;
-    inv_reset();                 /* пустой инвентарь — pickup обязателен */
+    inv_reset();                 /* только таймеры-эффекты — предметы НЕ теряются (file 0x10019) */
     /* для отладки можно зафиксировать позицию через env: */
     const char *e = getenv("KARNOV_FIX_POS");
     if (e) { int xx, yy; if (sscanf(e, "%d,%d", &xx, &yy) == 2) { s_x = xx; s_y = yy; } }
@@ -583,6 +583,10 @@ static void death_begin(bool by_water)
                         ? DEATH_AY_Q_CAT9 : DEATH_AY_Q;
     s_death_ticks   = 0;
     s_death_by_water = by_water;
+
+    /* die_water/die_hit → set_player_anim, file 0x104DE: firepower сюда, а
+     * не в общий физ.ресет (см. inventory.c:inv_on_death). */
+    inv_on_death();
 
     if (by_water) audio_play_sfx(7);     /* file 0x10515 */
     /* INIT обработчика (0x1838): play_music(DS:0x09D9, prio 0x64, loop 0) —
@@ -749,9 +753,11 @@ void physics_tick(u8 input)
                 s_in_jump   = false;          /* полёт прерывает прыжок */
             } else if (used == ITEM_LADDER) {
                 /* Лестница ставится только стоя на земле и без уже
-                 * поставленной. Если условие не выполнено — предмет уже
-                 * списан в inv_use(); визуально лестница не появляется
-                 * (как «потеря» при неудачной постановке). */
+                 * поставленной. inv_use() ЛЕСТНИЦУ больше не расходует
+                 * (file 0x616A/0x64E3 — «не расходуется», см. inventory.c) —
+                 * при неудачной постановке (не на земле/уже стоит другая)
+                 * предмет просто остаётся в инвентаре, попытку можно
+                 * повторить. */
                 if (s_on_ground && !s_ladder_placed && !s_on_ladder) {
                     s_ladder_placed       = true;
                     s_ladder_x            = s_x;
@@ -834,12 +840,13 @@ void physics_tick(u8 input)
             s_in_jump = false;
             /* === LADDER RETRIEVE ===
              * Если Karnov действительно слез ВНИЗ (был climbing-down в этом
-             * или предыдущем кадре), лестница складывается и возвращается
-             * в инвентарь. Иначе (например, если слетел сверху без climb-
-             * down) — лестница остаётся в мире и теряется навсегда. */
+             * или предыдущем кадре), лестница складывается — s_ladder_placed
+             * снимается, можно ставить новую. inv_take_back_ladder() здесь
+             * больше НЕ зовётся: раз постановка (inv_use()) саму лестницу
+             * из инвентаря не расходует (file 0x616A — «не расходуется»),
+             * повторный inv_give() при спуске задвоил бы счётчик. */
             if (s_climbing_down_prev) {
                 s_ladder_placed = false;
-                inv_take_back_ladder();
             }
             s_climbing_down_prev = false;
         }
@@ -905,6 +912,17 @@ void physics_tick(u8 input)
                     !level_tile_blocks(lead_x, s_y - KARNOV_FEET_PROBE_UP - TILE_H,
                                        KARNOV_MASK_FEET))
                     feet_hit = false;
+                /* Колонна голов (тип 20) — солидность НАЙДЕНА (2026-09-26,
+                 * см. большой комментарий у ai_head_column/
+                 * ai_head_column_restamp в ai.c): она не даёт объект-
+                 * коллизии, а каждый тик перештамповывает тайлы под своим
+                 * ТЕЛОМ в level_attr_override[] (level.c) через attr 3/4
+                 * (полностью твёрдые для обеих масок). level_tile_blocks
+                 * ниже читает эту подмену автоматически — никакого
+                 * отдельного объект-AABB здесь не нужно. Голова в
+                 * застолбованный диапазон не входит — она проходима, но
+                 * смертельна при касании (physics_kill_by_head_touch,
+                 * ai_check_player_hit). */
                 bool blocked = feet_hit ||
                     level_tile_blocks(lead_x, s_y - body_h, KARNOV_MASK_HEAD);
                 if (blocked) break;
@@ -1050,11 +1068,33 @@ void physics_hit(int enemy_hp)
     death_begin(/*by_water=*/false);      /* die_hit (player_state 6) */
 }
 
+/* Тип 20 (колонна голов) — голова убивает Карнова напрямую, минуя
+ * physics_hit()/HP-обмен: байт-точный порт cs:0xE62:0x6FE (die_hit),
+ * который её state5 вызывает безусловным far call'ом (см. ai.c,
+ * ai_check_player_hit). die_hit сам по себе — это ровно
+ * `set_player_anim(6, 4)`, т.е. переключение на death-handler 0xE62:0x1791
+ * (== death_begin(by_water=false) в порту); никакого вычитания HP тут в
+ * оригинале нет вообще. SFX2 («предсмертный крик») здесь НЕ играется —
+ * в оригинале он прибит к ветке общего HP-обмена (file 0x0FBC2), которую
+ * эта прямая ветка обходит целиком (byte-verified: ни один из вызовов на
+ * пути от state5 до set_player_anim не трогает play_sound). */
+void physics_kill_by_head_touch(void)
+{
+    if (input_god_mode()) return;      /* защита порта: ZEEK останавливает
+                                         * все смерти для тестирования; в
+                                         * оригинале этот путь ZEEK не
+                                         * проверяет (см. physics_hit) */
+    if (s_invuln || s_dying) return;
+    s_hp = 0;
+    death_begin(/*by_water=*/false);   /* die_hit (player_state 6), без SFX2 */
+}
+
 int physics_hp(void) { return s_hp; }
 
 bool physics_just_died(void) { return s_just_died_pulse; }
 bool physics_is_dying(void)  { return s_dying; }
 void physics_set_invuln(bool on) { s_invuln = on; }
+bool physics_is_invuln(void) { return s_invuln; }
 void physics_set_sit_scroll(bool on) { s_sit_scroll = on; }
 
 int  physics_get_x(void)       { return s_x; }

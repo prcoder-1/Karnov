@@ -24,6 +24,23 @@ u16 level_num_tile_graphics = 0;
 u16 level_num_map_rows = 0;
 u16 level_num_map_cols = 0;
 u8  level_map[MAX_MAP_ROWS][MAX_MAP_COLS];
+s8  level_attr_override[MAX_MAP_ROWS][MAX_MAP_COLS];
+
+void level_set_attr_override(int row, int col, int attr)
+{
+    if (row < 0 || row >= MAX_MAP_ROWS || col < 0 || col >= MAX_MAP_COLS) return;
+    level_attr_override[row][col] = (s8)(attr < 0 ? -1 : attr);
+}
+
+/* Эффективный attr клетки (row,col): подмена, если есть, иначе
+ * level_tile_attr[level_map[row][col]]. Общая точка для всех запросов
+ * коллизии/пола — см. комментарий у level_attr_override в level.h. */
+static u8 cell_attr(int row, int col)
+{
+    s8 ov = level_attr_override[row][col];
+    if (ov >= 0) return (u8)ov;
+    return level_tile_attr[level_map[row][col]];
+}
 
 /* Возможные пути к data — пробуем относительные от cwd, затем data/. */
 static const char *DATA_DIRS[] = { "", "data/", "../" };
@@ -135,6 +152,8 @@ int level_load(u16 level_num)
      * проходил сквозь пустые тайлы и не «стоял» на чёрных дверных проёмах. */
     level_tile_attr[0] = 2;
 
+    memset(level_attr_override, 0xFF, sizeof(level_attr_override)); /* все -1 */
+
     return 0;
 }
 
@@ -202,8 +221,7 @@ bool level_solid_at(int wx, int wy)
     int row = wy / TILE_H;
     if (col >= (int)level_num_map_cols) return false;
     if (row >= (int)level_num_map_rows) return false;
-    u8 tile_id = level_map[row][col];
-    u8 attr    = level_tile_attr[tile_id];
+    u8 attr = cell_attr(row, col);
     /* Категория вне таблицы — трактуем как solid (defensive: незнакомый
      * тайл не должен пропускать Karnov-а сквозь себя). */
     if (attr >= 10) return true;
@@ -229,7 +247,7 @@ int level_tile_attr_at(int wx, int wy)
     int row = wy / TILE_H;
     if (col >= (int)level_num_map_cols) return -1;
     if (row >= (int)level_num_map_rows) return -1;
-    return (int)level_tile_attr[level_map[row][col]];
+    return (int)cell_attr(row, col);
 }
 
 bool level_tile_blocks(int wx, int wy, u16 mask)
@@ -239,7 +257,7 @@ bool level_tile_blocks(int wx, int wy, u16 mask)
     int row = wy / TILE_H;
     if (col >= (int)level_num_map_cols) return false;
     if (row >= (int)level_num_map_rows) return false;
-    u8 attr = level_tile_attr[level_map[row][col]];
+    u8 attr = cell_attr(row, col);
     if (attr >= 10) return true;
     u16 props = LEVEL_ATTR_TO_PROPS[attr];
     return (props & mask) != props;
@@ -260,7 +278,7 @@ int level_ground_row_below(int wx, int start_row, u16 mask)
     if (col >= (int)level_num_map_cols) return -1;
     if (start_row < 0) start_row = 0;
     for (int r = start_row; r < (int)level_num_map_rows; ++r) {
-        u8 attr = level_tile_attr[level_map[r][col]];
+        u8 attr = cell_attr(r, col);
         if (attr >= 10) return r;                  /* незнакомая категория — считаем полом */
         if (LEVEL_ATTR_TO_PROPS[attr] & mask) return r;
     }

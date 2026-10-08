@@ -587,18 +587,26 @@ static void ai_stone_thrower(ai_obj_t *o, u16 frame, u8 karnov_input)
         o->anim_phase = 4;             /* #90 — follow-through */
     }
 
-    /* Spawn rock на переходе #88 → #89. */
+    /* Spawn rock на переходе #88 → #89. Тот же handler cs:0x11D6:0x08B3,
+     * что и у ai_type13 — vx=±6.0 px/frame (см. комментарий там же про
+     * ×2 «единицы движка → пиксели», байт-значение ±3.0 — это x_world-
+     * единицы, а не пиксели порта). */
     if (phase == idle_len + WINDUP_LEN && frame != o->spawn_frame) {
         int rock_x  = o->x + (o->facing < 0 ? -10 : 10);
         int rock_y  = o->y + 6;        /* руки ≈ верх спрайта + 6 */
-        int rock_vx = (o->facing < 0 ? -3 : 3);
+        int rock_vx = (o->facing < 0 ? -6 : 6);
         spawn_rock(rock_x, rock_y, rock_vx, frame);
     }
 }
 
 /* TYPE_ROCK_PROJECTILE — катящаяся каменная глыба, побайтовый порт AI handler
  * cs:0x11D6:0x08B3 (file 0x13E13) для sprites #21-23.
- * Init: vx=±3, vy=-1.5 (UP launch), gravity=0xAAAA/65536 (≈0.666 px/frame²).
+ * Init (byte-verified): vx_hi:vx_lo = ±3.0, vy=-1.5 (UP launch),
+ * gravity=0xAAAA/65536 (≈0.666 px/frame²).
+ * vx=±3.0 — это x_world-единицы движка (тот же регистр, что интегрирует
+ * UPDATELOCS), а Y (vy/gravity) хранится 1:1 в пикселях. Мировая X = ×2 от
+ * движковой (KARNOV.md §477), значит в пикселях порта vx=±6.0 px/frame —
+ * это то, что передаёт spawn_rock() (см. вызовы в ai_type13/ai_stone_thrower).
  * TICK: при ударе об пол (tile_attr & 1) bounce с уменьшением скорости,
  * gravity→0x5555.
  *
@@ -1174,9 +1182,16 @@ static void ai_type13(ai_obj_t *o, u16 frame, u8 in)
              * [DS:0xFC1] (=16, file 0x13E7D: `sub ax,[0xfc1]`), а не y+6 —
              * прежнее значение было визуальной подгонкой, не байтом. Дочерний
              * обработчик (уже портирован как TYPE_ROCK_PROJECTILE) при
-             * child.frame_idx==dir берёт vx=±3.0 (file 0x13E8B/0x13E92),
-             * а НЕ ±6.0 — тут раньше был баг вдвое завышенной скорости. */
-            spawn_rock(o->x, o->y - 16, dir ? 3 : -3, frame);
+             * child.frame_idx==dir пишет [vx_hi:vx_lo]=±3.0 (file
+             * 0x13E8B/0x13E92) — НО это Q16.16 в ЕДИНИЦАХ ДВИЖКА (x_world),
+             * а не в пикселях порта: как и всюду в движке, «мировая X =
+             * движковая ×2» (KARNOV.md §x_world, тот же множитель у
+             * player-fireball vx=6.0/7.0 единиц → 12/14 px). spawn_rock()
+             * работает в ПИКСЕЛЯХ порта напрямую (без обёртки obj_integrate),
+             * поэтому сюда нужно ±6.0, а не байт-значение ±3.0. Раньше здесь
+             * стояло ±6, и это было ВЕРНО — «исправление» до ±3 было
+             * ошибочным (пропущен именно этот ×2). */
+            spawn_rock(o->x, o->y - 16, dir ? 6 : -6, frame);
             if (--o->st_misc != 0) o->frame_index = (o->st_ctr & 3) ? 1 : 0;
             o->pending_state = dir + 2;
         } else if (o->frame_index == 0) {
@@ -3902,18 +3917,62 @@ static void ai_world_item(ai_obj_t *o, u16 frame, u8 karnov_input)
  *     метрик спрайта DS:0x0D08/0x0FAC — порту не нужен: рендер и
  *     хит-тест и так читают dx/dy живьём каждый кадр, см.
  *     blit_sprite_world/ai_player_fireball) и cs:0xD4B:0x2DB (file
- *     0xEF8B) — функция с ДВОЙНЫМ вложенным циклом по строкам/колонкам
- *     карты вокруг нижнего сегмента, которая зовёт тайловые хелперы
- *     (0xECEE/0xECB3) — судя по сигнатуре (запись в массив карты, не в
- *     объект), это ШТАМПОВКА ТВЁРДОГО ГРУНТА под текущим основанием
- *     колонны (перепривязка декорации карты к новой высоте столба). Не
- *     портировано: порт получает геометрию уровня статически из
- *     LEVELn.BIN; сама видимая просадка сегментов (главная жалоба)
- *     портирована через ai_head_column_settle() ниже и от тайловой
- *     штамповки не зависит — реального расхождения без неё не обнаружено.
+ *     0xEF8B).
+ *
+ * ── РАССЛЕДОВАНИЕ 2026-09-26: cs:0xD4B:0x2DB — НЕ косметика, это
+ * настоящая солидность колонны ────────────────────────────────────────
+ * Предыдущий пассаж утверждал «штамповка тайлов не портирована, видимая
+ * просадка от неё не зависит, расхождения без неё нет» — это было
+ * ОШИБКОЙ: анализ остановился на ПЕРВОМ (косметическом) цикле функции и
+ * не заметил ВТОРОЙ. Полный байт-точный разбор cs:0xD4B:0x2DB (с
+ * ИСПРАВЛЕННЫМ origin для ndisasm — без этого near-call таргеты внутри
+ * функции читались как абсурдно большие адреса, см. предупреждение в
+ * SKILL.md про truncated targets):
+ *
+ *   1. Каждая клетка карты в оригинале — НЕ 1 байт tile_id, а ПАРА байт
+ *      {tile_id, attr_cache} (подтверждено геттерами/сеттерами
+ *      cs:0xD4B:0x03/0x21/0x3E — используют один и тот же far-pointer-
+ *      таблицы-строк механизм (DS:0xAD52) и один и тот же
+ *      px→tile-индекс (DS:0xAF22 «px_to_tile_y[]», DS:0xBB5E
+ *      «px_to_tile_x[]» — те самые LUT'ы скролла из §2 KARNOV.md).
+ *      attr_cache ОБЫЧНО равен level_tile_attr[tile_id], но это ОТДЕЛЬНАЯ
+ *      ячейка, которую можно переписать НЕ трогая tile_id/графику.
+ *   2. probe_tile (cs:0xD4B:0x564, file 0xF214) и хелпер постановки на
+ *      пол (cs:0xD4B:0x14C/0x19F, file 0xEDFC/0xEE4F) читают ИМЕННО
+ *      attr_cache через тот же геттер 0xD4B:0x21 — НЕ level_tile_attr[]
+ *      напрямую. Значит то, что пишет сеттер 0xD4B:0x03, ПОЛНОСТЬЮ
+ *      управляет и коллизией (move_with_collision), и приземлением
+ *      (find_floor_y-эквивалентом).
+ *   3. cs:0xD4B:0x2DB делает ДВА цикла по 2 колонки карты (колонки
+ *      x_world[box0]>>4 и +1, т.е. ровно TILE_W=16 столбца под столбом):
+ *      — 1-й цикл, строки [T−1 .. row(own_edge)−1], где T=row(y_world)
+ *        (исходный, неизменный верх объекта) — ПЕРЕСЧИТЫВАЕТ attr_cache
+ *        ИЗ level_tile_attr[tile_id] (косметика/само-исправление: тем
+ *        самым СНИМАЕТ подмену там, где голова уже «просела» глубже, и
+ *        строки над ней возвращаются к естественному attr = проходимы);
+ *      — 2-й цикл, строки [row(own_edge) .. row(target_y)−1], где
+ *        own_edge=bottom(box0) — низ ГОЛОВЫ, target_y=bottom(box[N−1])
+ *        — низ ПОСЛЕДНЕГО сегмента (оба уже пост-settle, т.е. текущие
+ *        dy) — ПИШЕТ ЛИТЕРАЛЬНЫЙ attr: первая строка = 4 (пол+стена),
+ *        остальные = 3 (стена). attr 3 и 4 блокируют И feet-маску
+ *        (0x0006), И head-маску (0x0085) Карнова — полностью твёрдые
+ *        (см. таблицу attr в §7 KARNOV.md).
+ *   Итог: КАЖДЫЙ тик колонна перештамповывает клетки карты под своим
+ *   ТЕЛОМ (от низа головы до низа последнего сегмента, 2 колонки шириной)
+ *   в твёрдую стену, и «отпускает» назад те клетки, которые тело больше
+ *   не занимает (по мере просадки верхних секций вниз при гибели нижних).
+ *   ГОЛОВА (box0) при этом НИКОГДА не входит в застолбованный диапазон —
+ *   она остаётся проходимой (только смертельной при касании, см.
+ *   ai_check_player_hit) — ровно то поведение, о котором сообщил
+ *   пользователь: колонна блокирует ТЕЛОМ, голова просто убивает.
+ *   Порт: level_attr_override[][] в level.c (клетка, не tile_id) +
+ *   ai_head_column_restamp() ниже, вызывается из TICK каждый кадр (без
+ *   пропущенной оптимизации cs:0xD4B:0x2AC — она лишь избегает лишней
+ *   записи, семантически не влияет).
  * «Видимость на экране» в порту — только по горизонтали (g_camera_left/
  * VIEW_W), как и у типа 23: вертикальная позиция камеры в ai.c не
- * отслеживается (защита порта). */
+ * отслеживается (защита порта); это влияет только на выстрелы, не на
+ * штамповку (та в оригинале безусловна). */
 /* Каскадная просадка секций колонны (cs:0x1348:0x59E, file 0x1521E) — см.
  * разбор в комментарии к ai_head_column выше. Рекурсия идёт от нижнего
  * фиксированного слота (idx=num_parts-1) к голове (idx=0): box[idx]
@@ -3921,8 +3980,9 @@ static void ai_world_item(ai_obj_t *o, u16 frame, u8 karnov_input)
  * «мёртвый» box без объёма) достичь target_y не быстрее чем на 6 px/тик;
  * затем box[idx-1] получает задание встать своим низом ровно на новый верх
  * box[idx] — без зазора. Возврат — «было ли движение» (self.aux(+0xEF) в
- * оригинале); порт эту булеву развязку не использует (тайловая штамповка
- * cs:0xD4B:0x2DB не портирована), но сохраняет байт-точную рекурсию. */
+ * оригинале, используется только для пропуска лишней перештамповки
+ * cs:0xD4B:0x2AC/0x2DB — семантически не нужен, порт штампует каждый тик
+ * безусловно, см. ai_head_column_restamp). */
 static bool ai_head_column_settle(ai_obj_t *o, int idx, int target_y)
 {
     if (idx < 0) return false;
@@ -3936,6 +3996,41 @@ static bool ai_head_column_settle(ai_obj_t *o, int idx, int target_y)
         return true;
     }
     return ai_head_column_settle(o, idx - 1, top);
+}
+
+/* Штамповка твёрдости тела колонны в карту (cs:0xD4B:0x2DB, file 0xEF8B)
+ * — байт-точный порт, см. большой разбор выше у ai_head_column. own_edge
+ * = низ box0 (головы; голова НИКОГДА не входит в застолбованный
+ * диапазон), target_y = низ последнего box (после текущего settle).
+ * 2 колонки карты (TILE_W=16 px) под box0.x. Первая строка диапазона —
+ * attr 4 (пол+стена), остальные — attr 3 (стена); строки выше own_edge,
+ * но ниже исходного верха объекта (T=y_world), «отпускаются» — снимается
+ * подмена, клетка возвращается к естественному attr тайла. */
+static void ai_head_column_restamp(ai_obj_t *o)
+{
+    int col0 = o->x / TILE_W;
+    int col1 = col0 + 1;
+
+    int row_top_orig = o->y / TILE_H;                  /* T */
+
+    int head_bottom = o->y + o->parts[0].dy +
+                       (o->parts[0].sprite != 0 ? 20 : 0);
+    int row_own = head_bottom / TILE_H;                 /* local_a */
+
+    int last = o->num_parts - 1;
+    int last_bottom = o->y + o->parts[last].dy +
+                        (o->parts[last].sprite != 0 ? 20 : 0);
+    int row_target = last_bottom / TILE_H;               /* local_b */
+
+    for (int r = row_top_orig - 1; r < row_own; ++r) {
+        level_set_attr_override(r, col0, -1);
+        level_set_attr_override(r, col1, -1);
+    }
+    for (int r = row_own; r < row_target; ++r) {
+        int attr = (r == row_own) ? 4 : 3;
+        level_set_attr_override(r, col0, attr);
+        level_set_attr_override(r, col1, attr);
+    }
 }
 
 static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
@@ -3999,6 +4094,9 @@ static void ai_head_column(ai_obj_t *o, u16 frame, u8 karnov_input)
     /* file 0x15531: вызывается КАЖДЫЙ тик, безусловно (до/после проверки
      * видимости не важно — сама функция видимость не проверяет). */
     ai_head_column_settle(o, o->num_parts - 1, o->y + o->num_parts * 20);
+    /* file 0x1554E-ish (хвост THINK, cs:0xD4B:0x2DB) — тоже безусловно
+     * каждый тик, см. ai_head_column_restamp выше. */
+    ai_head_column_restamp(o);
 }
 
 /* Пер-сегментный урон колонны голов (cs:0x1348:0x638, file 0x152B8) — см.
@@ -4936,8 +5034,12 @@ static ai_handler_fn pick_handler(u16 type)
 /* ─── API ──────────────────────────────────────────────────────────── */
 
 /* spawn_rock — соответствует state 0 ai handler'а cs:0x11D6:0x08B3
- * (rolling rock с sprites #21-23). vx=±3 — байт-верифицированная скорость
- * из state 1 init блока (obj+0x10 = 0xFFFD = -3). */
+ * (rolling rock с sprites #21-23). Байт-значение из state 1 init блока —
+ * obj+0x10 = 0xFFFD = -3 (file 0x13E92) / +3 (file 0x13E8B) — это x_world-
+ * единицы движка, а не пиксели порта. `vx` здесь — параметр этой функции
+ * в ПИКСЕЛЯХ порта (см. вызывающих: ai_type13/ai_stone_thrower передают
+ * ±6.0 = байт-значение ×2, тот же множитель «мировая X = движковая ×2»,
+ * что и у player-fireball). */
 static void spawn_rock(int x, int y, int vx, u16 frame)
 {
     int slot = alloc_obj_slot();
@@ -4952,7 +5054,7 @@ static void spawn_rock(int x, int y, int vx, u16 frame)
         .spawn_frame = frame,
         .pos_x_q16   = x * 0x10000,
         .pos_y_q16   = y * 0x10000,
-        .vx_q16      = vx * 0x10000,        /* ±3.0 px/frame (Q16.16) */
+        .vx_q16      = vx * 0x10000,        /* ±6.0 px/frame (Q16.16) */
         .vy_q16      = ROCK_VY_INITIAL,     /* -1.5 (UP launch) */
         .grav_q16    = ROCK_GRAV_INITIAL,   /* ~0.666 px/frame² */
         .bounces     = 0,
@@ -5220,6 +5322,24 @@ static void ai_collect_pairs(void)
     }
 }
 
+/* ─── Тип 20 — солидность колонны: НАЙДЕНА (2026-09-26, 3-я попытка) ──
+ *
+ * Две предыдущие попытки ошибочно заключили «колонна не блокирует»: они
+ * искали AABB-коллизию объект↔Карнов (её и правда нет — pair-loop file
+ * 0xF81E..0xFCE4 и коллектор пар не пишут в координаты) и остановились
+ * на ПЕРВОМ (косметическом) цикле cs:0xD4B:0x2DB, не заметив второй,
+ * который литерально пишет attr=3/4 в карту. Полный разбор — большой
+ * комментарий у ai_head_column выше и у ai_head_column_restamp(). Итог:
+ * блокирует НЕ объект-коллизия, а тайловая — колонна каждый тик
+ * перештамповывает 2 колонки карты под своим ТЕЛОМ (от низа головы до
+ * низа последнего сегмента) в твёрдую стену через level_attr_override[]
+ * (level.c), которую читают level_solid_at/level_tile_blocks —
+ * move_with_collision в оригинале (cs:0xD4B:0x6CB) читает ровно тот же
+ * per-клетка attr_cache. Голова в застолбованный диапазон не входит —
+ * она проходима, но смертельна при касании (см. ai_check_player_hit
+ * ниже). Порт байт-точен: тело — твёрдая стена, голова — смерть от
+ * касания. */
+
 /* ─── Pair-loop: касание врага бьёт Карнова ───────────────────────────
  *
  * Порт ветки THINKCYCLE, где a.obj_type = 0 (маркер Карнова), а
@@ -5236,6 +5356,30 @@ void ai_check_player_hit(int kx, int ky, int kw, int kh)
 {
     int px0 = kx - kw / 2, px1 = kx + kw / 2;
     int py0 = ky - kh,     py1 = ky;
+    /* Тип 20 (колонна голов) — касание ГОЛОВЫ (part0) убивает Карнова.
+     * Байт-точный порт state5 (file 0x155FC.., см. большой комментарий у
+     * ai_head_column выше): партнёр=Карнов, hit_box_self==0 (голова) →
+     * безусловный far call cs:0xE62:0x6FE = set_player_anim(6,4) =
+     * physics_kill_by_head_touch() ниже. Это НЕ physics_hit() — в
+     * оригинале тут вообще нет обмена hit_points (см. state5: этот путь
+     * physически недостижим через generic pair-loop у obj_type==9), и
+     * НЕ играется SFX2 (тот привязан только к ветке общего HP-обмена,
+     * file 0x0FBC2, а этот вызов её полностью минует). Остальные
+     * сегменты (part>=1, «тело») — касание НЕ имеет эффекта (см. там же,
+     * ветка hit_box_self!=0: state_byte:=2, эффекта нет ни для кого). */
+    for (int i = 0; i < g_num; ++i) {
+        ai_obj_t *o = &g_obj[i];
+        if (!o->alive || o->type != 20 || o->num_parts == 0) continue;
+        if (o->parts[0].sprite == 0) continue;     /* голова уже разрушена — не бьёт */
+        const sprite_t *ps = sprite_find(o->parts[0].sprite);
+        int pw = ps ? (int)ps->art_w : 16, ph = ps ? (int)ps->h : 20;
+        int hx0 = o->x + o->parts[0].dx, hx1 = hx0 + pw;
+        int hy0 = o->y + o->parts[0].dy, hy1 = hy0 + ph;
+        if (px1 < hx0 || px0 > hx1) continue;
+        if (py1 < hy0 || py0 > hy1) continue;
+        physics_kill_by_head_touch();
+        return;
+    }
     /* Тип 49 (щит, phase!=0 — только LEVEL9 x>0x44C) гибнет от ПРОСТОГО
      * касания игроком, не от урона — file 0x18D81, см. ai_type49. Тип 52
      * («пробуждающийся» блок) точно так же просыпается от касания
@@ -5406,15 +5550,35 @@ void ai_tick(u16 frame, u8 karnov_input)
         fprintf(stderr, "f=%u alive=%d (из уровня %d) выстрелов=%d сила=%d slots=%d/%d kx=%d\n",
                 frame, alive, from_level, shots, inv_firepower(), g_num, MAX_AI, physics_get_left_x());
     } }
+    /* KARNOV_DBG_DUMPALL=<frame> — временный тестовый хук: разово печатает
+     * type/x/y всех живых объектов на указанном кадре (диагностика). */
+    { const char *da = getenv("KARNOV_DBG_DUMPALL");
+      if (da && frame == (u16)atoi(da)) {
+        for (int i = 0; i < g_num; ++i) {
+            if (!g_obj[i].alive) continue;
+            fprintf(stderr, "  dump[%d] type=%u x=%d y=%d hp=%d\n",
+                    i, g_obj[i].type, g_obj[i].x, g_obj[i].y, g_obj[i].hp);
+        }
+      } }
     /* KARNOV_DBG_HITCOL=<box_idx> — временный тестовый хук: раз в 40 кадров
      * бьёт указанный box первого живого типа-20 объекта (для смоук-теста
-     * просадки колонны без реального выстрела игрока). */
+     * просадки колонны без реального выстрела игрока). box_idx=-1 — бьёт
+     * ВСЕ боксы тела (1..num_parts-1) разом, для теста «голова оседает на
+     * уровень игрока после уничтожения тела». */
     { const char *hc = getenv("KARNOV_DBG_HITCOL");
       if (hc && frame % 40 == 0 && frame > 0) {
         int box = atoi(hc);
         for (int i = 0; i < g_num; ++i) {
             if (g_obj[i].alive && g_obj[i].type == 20) {
-                ai_head_column_hit_box(&g_obj[i], box);
+                if (box == -1) {
+                    for (int p = 1; p < g_obj[i].num_parts; ++p)
+                        ai_head_column_hit_box(&g_obj[i], p);
+                } else if (box == -2) {
+                    for (int p = 0; p < g_obj[i].num_parts; ++p)
+                        ai_head_column_hit_box(&g_obj[i], p);
+                } else {
+                    ai_head_column_hit_box(&g_obj[i], box);
+                }
                 break;
             }
         }

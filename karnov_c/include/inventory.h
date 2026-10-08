@@ -53,8 +53,17 @@ typedef enum {
     ITEM_NUM = 11
 } item_id_t;
 
-/* Сброс инвентаря и состояния полёта. Вызывается из physics_reset. */
+/* Сброс АКТИВНЫХ ТАЙМЕРОВ-ЭФФЕКТОВ (boots/wings/glasses/shield) — вход в
+ * уровень И респавн после смерти (KARNOV.EXE file 0x10019, общий для обоих
+ * случаев). НЕ трогает счётчики предметов/выбор/силу огня — байт-
+ * верифицировано, что оригинал их тут не обнуляет (см. inventory.c).
+ * Вызывается из physics_reset. */
 void inv_reset(void);
+
+/* Сброс силы огня в 1 — момент РЕАЛЬНОЙ гибели (die_water/die_hit →
+ * set_player_anim, file 0x104DE), НЕ вход в уровень. Звать из
+ * physics.c:death_begin(). */
+void inv_on_death(void);
 
 /* Добавить предмет в инвентарь. K-Mark считается отдельно (kmarks). */
 void inv_give(int id);

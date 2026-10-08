@@ -150,6 +150,63 @@ static bool s_game_over = false;
 #define LEVEL_END_MIN_TICKS 51    /* байт-верифицировано: frame_ctr > 0x32 (file 0x19BDF) */
 #define LEVEL_END_MAX_TICKS 165   /* ~6 сек — потолок, чтобы не зависнуть если jingle не сигналит конец */
 
+/* ─── Таймер уровня ─────────────────────────────────────────────────
+ * Байт-верифицировано (2026-09): file 0x60BD (вызывается из главного
+ * цикла file 0x6966) — трёхзначный счётчик-цифры [DS:0xD93A..0xD93C]
+ * (по байту на разряд, не BCD), декремент на 1 раз в 16 кадров (throttle
+ * `test [0xCDEA],0xF; jz`, [0xCDEA] — счётчик кадров, ++ в file 0x6990,
+ * т.е. ровно аналог локальной переменной `frame`). Гейты: player_state
+ * ([0xD8CE])==6 («уже гибнет») — не тикать вовсе; ==9 (invuln) — не
+ * декрементировать и не убивать, но порог ниже всё равно проверяется.
+ *
+ * Сброс — file 0x1021E (та же level-init функция, что respawn/rearm):
+ *   mov bx,[0xD8AA] (=номер уровня); shl bx,1; shl bx,1
+ *   push [bx+0x14A8]; push [bx+0x14A6]; push 3; push ds; push 0xD93A
+ *   call 0x41D:0x2BF   ; распаковать 32-бит BCD → 3 цифровых байта
+ * Таблица DS:0x14A6 (10×4 байта, младшее слово = 3-цифровое BCD):
+ *   L0=0x0999 L1=0x0151 L2=0x0251 L3=0x0301 L4=0x0231
+ *   L5=0x0376 L6=0x0226 L7=0x0301 L8=0x0151 L9=0x0651
+ * (т.е. в десятичном виде ровно эти же числа — совпадение цифр BCD).
+ * [DS:0xD93D] («hurry»-флаг) сбрасывается в 0 там же (file 0x10237).
+ *
+ * Каждый throttled тик после декремента: если счётчик стал 000 —
+ * far call cs:0xE62:0x6FE (file 0x60F7→0x1051E→0x104A3) — ТОТ ЖЕ
+ * die_hit-путь, что у колонны голов (см. physics_kill_by_head_touch),
+ * т.е. Карнов гибнет от истечения времени. Отдельно (не завязано на
+ * итог декремента): если сотни==0 И десятки<3 (т.е. осталось <30
+ * единиц) и [D93D] ещё не взведён — [D93D]=1, play_music(DS:0x0663,
+ * prio 0, loop) — трек 1, идентифицированный пользователем по слуху как
+ * «когда время заканчивается» (см. AUDIO.md §2/§7, там же мигающий
+ * индикатор в HUD file 0x612A — glyph 0x3D в позиции (50,150), мигает
+ * по биту 0x10 [0xCDEA], рядом с самими цифрами таймера (54,150,
+ * glyph-база 0x3E, file 0x60FC/0x5DEA) — то, что предыдущий проход не
+ * нашёл, ища ASCII "TIME": это отрисовка готовых спрайтов-цифр, не
+ * текст). Порт не рисует оригинальные глиф-спрайты HUD (score/lives тоже
+ * выведены отладочным текстом) — таймер и мигание добавлены в draw_hud
+ * тем же текстовым способом. */
+static const int LEVEL_TIMER_INIT[10] = {
+    999, 151, 251, 301, 231, 376, 226, 301, 151, 651
+};
+static int  s_level_timer       = 0;
+static bool s_level_timer_hurry = false;
+
+/* once per 16 frames — прямой порт throttle-гейта file 0x60C0. */
+static void level_timer_tick(u16 frame, bool audio_running)
+{
+    if (physics_is_dying()) return;             /* [0xD8CE]==6 */
+    if ((frame & 0xF) != 0) return;
+    if (!physics_is_invuln()) {                 /* [0xD8CE]!=9 */
+        if (s_level_timer > 0) --s_level_timer;
+        if (s_level_timer == 0) {
+            physics_kill_by_head_touch();        /* cs:0xE62:0x6FE die_hit */
+        }
+    }
+    if (!s_level_timer_hurry && s_level_timer < 30) {
+        s_level_timer_hurry = true;
+        if (audio_running) audio_play_music(1, /*loop=*/true);  /* track1 */
+    }
+}
+
 static void update_scroll(int karnov_x, int karnov_y)
 {
     int level_w_px = level_num_map_cols * TILE_W;
@@ -304,11 +361,16 @@ static void draw_hud(u16 frame, int karnov_x, u8 input_state)
 {
     /* Yellow text on black background bar. */
     render_fill_rect(0, VIEW_H, WIN_W, HUD_H, 0xFF000000u);
-    char line[80];
+    char line[96];
     snprintf(line, sizeof(line),
-             "SCORE:%-7u F:%-4u X:%-4d Y:%-3d HP:%d",
-             ai_score(), frame, karnov_x, physics_get_y(), physics_hp());
+             "SCORE:%-7u F:%-4u X:%-4d Y:%-3d HP:%d TIME:%03d",
+             ai_score(), frame, karnov_x, physics_get_y(), physics_hp(), s_level_timer);
     render_draw_text(4, VIEW_H + 2, line, 0xFFFFFF55u);
+    /* Мигающий индикатор «время на исходе» — оригинал (file 0x612A) рисует
+     * glyph 0x3D мигая по биту 0x10 [0xCDEA] рядом с цифрами таймера. */
+    if (s_level_timer_hurry && ((frame >> 4) & 1) != 0) {
+        render_draw_text(4, VIEW_H + 2 + 9, "TIME!", 0xFFFF3030u);
+    }
     /* OPTIONS item bar — иконки собранных предметов с подсветкой выбора. */
     draw_item_bar(frame);
     draw_lives();   /* символы жизней справа в HUD */
@@ -376,6 +438,11 @@ static int prepare_level(u16 level_num, bool load_demo)
     const char *dbg_start_x = getenv("KARNOV_START_X");
     int sx = dbg_start_x ? atoi(dbg_start_x) : ph.spawn_x;
     physics_reset(sx, ph.spawn_y);
+
+    /* Таймер уровня — сброс на каждый вход (level_num < 10 всегда для
+     * реальных уровней; file 0x1021E, см. комментарий у level_timer_tick). */
+    s_level_timer       = LEVEL_TIMER_INIT[level_num % 10];
+    s_level_timer_hurry = false;
 
     ai_init_from_level(level_num);
     /* КАЖДЫЙ вход в уровень (не только респавн после смерти!) в оригинале
@@ -516,6 +583,7 @@ int splash_run(const splash_options_t *opt)
             physics_set_current_frame(frame);
             bool was_dying = physics_is_dying();
             physics_tick(inp);
+            level_timer_tick(frame, audio_running);
             if (physics_just_died()) {
                 int checkpoint_units = physics_get_x() / 2 + 0xBB;
                 const object_region_t *rg = level_region_for_respawn(
@@ -523,8 +591,13 @@ int splash_run(const splash_options_t *opt)
                 if (rg) physics_set_spawn_point((int)rg->respawn_x * 2,
                                                 (int)rg->respawn_y);
             }
-            if (was_dying && !physics_is_dying())
+            if (was_dying && !physics_is_dying()) {
                 ai_respawn_rearm(physics_get_x());
+                /* Респавн — тот же file 0x10019, что и вход в уровень:
+                 * таймер получает свежее значение (см. level_timer_tick). */
+                s_level_timer       = LEVEL_TIMER_INIT[current_level % 10];
+                s_level_timer_hurry = false;
+            }
             ai_try_pickup(physics_get_x(), physics_get_y());
             /* Pair-loop: касание врага ранит Карнова (file 0xFB7A). */
             ai_check_player_hit(physics_get_x(), physics_get_y(), 16, 26);
@@ -710,6 +783,7 @@ int splash_run(const splash_options_t *opt)
             physics_set_current_frame(frame);
             bool was_dying = physics_is_dying();
             physics_tick(inp);
+            level_timer_tick(frame, audio_running);
             /* Karnov только что вошёл в death-state (контакт с водой):
              * запускаем death-music (track 5, не зацикленную). По окончании
              * анимации physics возвращает is_dying=false, и мы возобновляем
@@ -734,6 +808,10 @@ int splash_run(const splash_options_t *opt)
                 /* Karnov возродился: rearm-цикл записей спауна (file 0x1015A) —
                  * всё, что не полностью позади точки возрождения, оживает. */
                 ai_respawn_rearm(physics_get_x());
+                /* Респавн — тот же file 0x10019, что и вход в уровень:
+                 * таймер получает свежее значение (см. level_timer_tick). */
+                s_level_timer       = LEVEL_TIMER_INIT[current_level % 10];
+                s_level_timer_hurry = false;
             }
             /* Трек 5 «смерть Karnov» запускает сама physics (INIT обработчика
              * гибели, KARNOV.EXE 0x1838). Здесь — только возврат к фоновой
