@@ -7,6 +7,7 @@ typedef struct {
     int headless;           /* без окна и звука */
     int fast;               /* без выдержки реального времени */
     int no_audio;
+    int frame_ticks;        /* тиков PIT (220 Гц) на кадр; в оригинале минимум 8 */
     int frames;             /* >0: выйти после N кадров главного цикла */
 } PortOpt;
 extern PortOpt port_opt;

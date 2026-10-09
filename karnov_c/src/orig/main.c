@@ -82,6 +82,7 @@ void port_pump_events(void)
 int main(int argc, char **argv)
 {
     int i;
+    port_opt.frame_ticks = 14;          /* ≈16 кадров/с, как оригинал на IBM PC/AT */
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--fast")) {
             port_opt.fast = 1;
@@ -91,6 +92,11 @@ int main(int argc, char **argv)
             bios_kbflags |= 0x02;       /* как Shift при запуске: меню видеорежимов */
         } else if (!strcmp(argv[i], "--headless")) {
             port_opt.headless = 1;
+        } else if (!strcmp(argv[i], "--fps") && i + 1 < argc) {
+            int fps = atoi(argv[++i]);
+            port_opt.frame_ticks = fps > 0 ? (220 + fps / 2) / fps : 0;
+            if (port_opt.frame_ticks < 8)       /* быстрее оригинал не умеет */
+                port_opt.frame_ticks = 8;
         } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
             port_opt.frames = atoi(argv[++i]);
         }

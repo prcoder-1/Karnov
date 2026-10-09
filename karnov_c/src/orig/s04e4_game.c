@@ -109,7 +109,8 @@ void end_life(void)
         show_hiscores(1000);
 }
 
-/* @04E4:0326 file:06966 main_loop — 11 фаз; кадр не короче 8 тиков PIT.
+/* @04E4:0326 file:06966 main_loop — 11 фаз; кадр не короче 8 тиков PIT
+ * (порт: port_opt.frame_ticks — темп медленной машины).
  * Время загрузки уровня в timer_ticks не засчитывается. */
 void main_loop(void)
 {
@@ -135,7 +136,7 @@ void main_loop(void)
             SCROLLUPDATE();
             ERASECYCLE();
         }
-        while ((s32)(timer_ticks - t) < 8)
+        while ((s32)(timer_ticks - t) < port_opt.frame_ticks)
             hw_wait_tick();
     } while (in_game != 0);
 }
