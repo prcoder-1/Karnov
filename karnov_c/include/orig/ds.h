@@ -490,6 +490,7 @@ static inline void map_wr(s16 r, u16 o, u8 v)
 
 /* Скрипт-«стоп» для play_music/play_sfx (в оригинале far-указатель 0000:FFFF). */
 extern u8 snd_stop_marker;
+extern u16 mus_cycles;
 #define SND_STOP (&snd_stop_marker)
 
 #endif

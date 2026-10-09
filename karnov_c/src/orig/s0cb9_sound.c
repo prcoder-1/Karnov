@@ -11,6 +11,7 @@
 #include "orig/hw.h"
 
 u8 snd_stop_marker;
+u16 mus_cycles;                         /* порт: пройденные циклы зацикленной музыки */
 
 static void speaker_off(void)
 {
@@ -130,6 +131,7 @@ static void mus_next(void)
             return;
         }
         mus_pos = 0;
+        mus_cycles++;
     }
     if (mus_script[mus_pos] == 0xFF) {
         mus_pos++;

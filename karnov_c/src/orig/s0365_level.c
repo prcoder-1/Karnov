@@ -259,6 +259,13 @@ void enter_level(void)
         delay(0x370);
         fatal(1, msg_buf);
     }
+    /* порт: загрузка мгновенная — музыка загрузчика доигрывает цикл,
+     * клавиша прерывает (и остаётся в буфере) */
+    if (music_enabled) {
+        u16 c = mus_cycles;
+        while (mus_cycles == c && rtl_bioskey(1) == 0)
+            hw_wait_tick();
+    }
     loaded_level = plr.current_level;
     level_loading = 0;
     play_music(SND_STOP, 0x1000, 0);
