@@ -21,8 +21,9 @@ u16  hw_int16_read(void);
 u16  hw_int16_peek(void);
 /* Положить код в буфер клавиатуры BIOS (порт: из событий SDL). */
 void hw_kbd_push(u16 code);
-/* Джойстик за портом 0x201: отсчёты осей за 255 опросов и кнопки. */
-void hw_joystick(s16 *x, s16 *y, u8 *btn);
+/* Джойстик за портом 0x201: отсчёты осей A и B (X и Y в байтах слова)
+ * за 255 опросов и кнопки. */
+void hw_joystick(s16 *a, s16 *b, u8 *btn);
 
 /* Видеопамять: A000 — плоскости EGA через логику карты, B800 — CGA. */
 void hw_vmem_write(u16 seg, u16 off, u8 v);

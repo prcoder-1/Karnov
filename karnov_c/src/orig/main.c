@@ -52,6 +52,67 @@ static u16 bios_code(const SDL_KeyboardEvent *k)
     return 0;
 }
 
+static SDL_GameController *pads[4];
+
+/* Отклонение оси: стик или крестовина (до упора). */
+static int pad_axis(SDL_GameController *p, SDL_GameControllerAxis axis,
+                    SDL_GameControllerButton neg, SDL_GameControllerButton pos)
+{
+    if (SDL_GameControllerGetButton(p, neg))
+        return -32768;
+    if (SDL_GameControllerGetButton(p, pos))
+        return 32767;
+    return SDL_GameControllerGetAxis(p, axis);
+}
+
+/* Все геймпады вместе: по оси — наибольшее отклонение, кнопки — любые;
+ * отсчёт 1..127, центр 64. */
+int port_gamepad(u8 *x, u8 *y, u8 *btn)
+{
+    int i, any = 0, vx = 0, vy = 0, v;
+    *btn = 0;
+    for (i = 0; i < 4; i++) {
+        SDL_GameController *p = pads[i];
+        if (p == NULL)
+            continue;
+        any = 1;
+        v = pad_axis(p, SDL_CONTROLLER_AXIS_LEFTX, SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+                     SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+        if (abs(v) > abs(vx))
+            vx = v;
+        v = pad_axis(p, SDL_CONTROLLER_AXIS_LEFTY, SDL_CONTROLLER_BUTTON_DPAD_UP,
+                     SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+        if (abs(v) > abs(vy))
+            vy = v;
+        *btn |= (u8)((SDL_GameControllerGetButton(p, SDL_CONTROLLER_BUTTON_A) ||
+                      SDL_GameControllerGetButton(p, SDL_CONTROLLER_BUTTON_X)) |
+                     (SDL_GameControllerGetButton(p, SDL_CONTROLLER_BUTTON_B) ||
+                      SDL_GameControllerGetButton(p, SDL_CONTROLLER_BUTTON_Y)) << 1);
+    }
+    *x = (u8)(64 + vx * 63 / 32768);
+    *y = (u8)(64 + vy * 63 / 32768);
+    return any;
+}
+
+/* подключение и отключение геймпадов */
+static void pad_event(const SDL_Event *e)
+{
+    int i;
+    if (e->type == SDL_CONTROLLERDEVICEADDED) {
+        for (i = 0; i < 4 && pads[i] != NULL; i++)
+            ;
+        if (i < 4)
+            pads[i] = SDL_GameControllerOpen(e->cdevice.which);
+    } else if (e->type == SDL_CONTROLLERDEVICEREMOVED) {
+        for (i = 0; i < 4; i++)
+            if (pads[i] != NULL &&
+                SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[i])) == e->cdevice.which) {
+                SDL_GameControllerClose(pads[i]);
+                pads[i] = NULL;
+            }
+    }
+}
+
 void port_pump_events(void)
 {
     static int arrows;
@@ -61,6 +122,7 @@ void port_pump_events(void)
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT)
             exit(0);
+        pad_event(&e);
         if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
             SDL_Scancode sc = e.key.keysym.scancode;
             int arrow = sc == SDL_SCANCODE_UP || sc == SDL_SCANCODE_DOWN ||
@@ -82,7 +144,7 @@ void port_pump_events(void)
 int main(int argc, char **argv)
 {
     int i;
-    port_opt.frame_ticks = 14;          /* ≈16 кадров/с, как оригинал на IBM PC/AT */
+    port_opt.frame_ticks = 12;          /* ≈18 кадров/с: чуть быстрее оригинала на IBM PC/AT */
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--fast")) {
             port_opt.fast = 1;
@@ -101,5 +163,7 @@ int main(int argc, char **argv)
             port_opt.frames = atoi(argv[++i]);
         }
     }
+    if (!port_opt.headless)
+        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
     return game_main();
 }

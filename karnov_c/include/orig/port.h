@@ -14,7 +14,9 @@ extern PortOpt port_opt;
 
 /* Начало кадра главного цикла. */
 void port_frame_hook(void);
-/* События SDL (клавиатура, закрытие окна). */
+/* События SDL (клавиатура, геймпад, закрытие окна). */
 void port_pump_events(void);
+/* Геймпады как джойстик A: отсчёты осей (центр 64) и кнопки 1, 2; 0 — нет. */
+int port_gamepad(u8 *x, u8 *y, u8 *btn);
 
 #endif

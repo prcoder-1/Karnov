@@ -4,6 +4,7 @@
 #include <string.h>
 #include "orig/fn.h"
 #include "orig/hw.h"
+#include "orig/port.h"
 
 /* @0365:00ED file:04F3D spawn_active_object */
 ActiveObject *spawn_active_object(EnemySpawn *rec)
@@ -221,6 +222,14 @@ err1:
     return 1;
 }
 
+/* кнопки геймпада (0 — нет геймпада) */
+static u8 pad_buttons(void)
+{
+    u8 x, y, btn = 0;
+    port_gamepad(&x, &y, &btn);
+    return btn;
+}
+
 /* @0365:0A04 file:05854 enter_level — в демо уровни 0..2 по кругу
  * (смена каждые 4 захода); загрузка под музыку загрузчика */
 void enter_level(void)
@@ -259,12 +268,18 @@ void enter_level(void)
         delay(0x370);
         fatal(1, msg_buf);
     }
-    /* порт: загрузка мгновенная — музыка загрузчика доигрывает цикл,
-     * клавиша прерывает (и остаётся в буфере) */
+    /* порт: загрузка мгновенная — музыка загрузчика доигрывает цикл;
+     * прерывают клавиша (остаётся в буфере) и новое нажатие кнопки геймпада */
     if (music_enabled) {
         u16 c = mus_cycles;
-        while (mus_cycles == c && rtl_bioskey(1) == 0)
+        u8 held = pad_buttons(), now;
+        while (mus_cycles == c && rtl_bioskey(1) == 0) {
+            now = pad_buttons();
+            if (now & ~held)
+                break;
+            held = now;
             hw_wait_tick();
+        }
     }
     loaded_level = plr.current_level;
     level_loading = 0;
