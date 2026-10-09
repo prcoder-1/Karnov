@@ -1,5 +1,5 @@
-/* main.c — точка входа порта (не из оригинала): разбор опций, реестр DS,
- * затем main() оригинала (@0330:01C2). */
+/* main.c — точка входа порта (не из оригинала): разбор опций, затем
+ * main() оригинала (@0330:01C2). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,73 +10,11 @@
 
 PortOpt port_opt;
 
-void port_todo(const char *what)
-{
-    fprintf(stderr, "не переведено: %s\n", what);
-    exit(2);
-}
-
-void port_todo_once(const char *what)
-{
-    static const char *seen[64];
-    unsigned i;
-    for (i = 0; i < 64 && seen[i]; i++)
-        if (seen[i] == what)
-            return;
-    if (i < 64)
-        seen[i] = what;
-    fprintf(stderr, "не переведено (пропуск): %s\n", what);
-}
-
-int ftest_run(const char *ds_file, const char *heap_file, const char *out, int nfn, char **fns);
-
 void port_frame_hook(void)
 {
-    static FILE *fp;
-    static u8 img[0x10000], mask[0x10000];
     static int frames;
-    if (port_opt.dsdump) {
-        ds_snapshot(img, mask);
-        if (fp == NULL) {
-            char mpath[512];
-            FILE *mf;
-            fp = fopen(port_opt.dsdump, "wb");
-            snprintf(mpath, sizeof mpath, "%s.mask", port_opt.dsdump);
-            mf = fopen(mpath, "wb");
-            if (mf) {
-                fwrite(mask, 1, sizeof mask, mf);
-                fclose(mf);
-            }
-        }
-        if (fp)
-            fwrite(img, 1, sizeof img, fp);
-        if (frames < 150) {             /* как HEAP.BIN хука DOSBox */
-            static FILE *hp;
-            char hpath[512];
-            if (hp == NULL) {
-                snprintf(hpath, sizeof hpath, "%s.heap", port_opt.dsdump);
-                hp = fopen(hpath, "wb");
-            }
-            if (hp)
-                fwrite(&hw_conv[0x2DE30], 1, 0x50000, hp);
-        }
-    }
-    {
-        static int fno;
-        int k;
-        char spath[64];
-        for (k = 0; k < port_opt.nshot; k++)
-            if (port_opt.shot[k] == fno) {
-                snprintf(spath, sizeof spath, "shot_%05d.ppm", fno);
-                hw_video_save_ppm(spath);
-            }
-        fno++;
-    }
-    if (port_opt.frames && ++frames >= port_opt.frames) {
-        if (fp)
-            fclose(fp);
+    if (port_opt.frames && ++frames >= port_opt.frames)
         exit(0);
-    }
 }
 
 /* SDL → коды BIOS (скан-код << 8 | ASCII). Стрелки — клавиши цифрового
@@ -144,39 +82,18 @@ void port_pump_events(void)
 int main(int argc, char **argv)
 {
     int i;
-    port_opt.demo_level = -1;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--check")) {
-            int bad = ds_check();
-            printf("ds_check: %s, переменных %u, функций %u\n",
-                   bad ? "ОШИБКИ" : "ok", ds_nvars, fn_nreg);
-            return bad;
-        } else if (!strcmp(argv[i], "-v")) {
-            port_opt.verbose = 1;
-        } else if (!strcmp(argv[i], "--fast")) {
+        if (!strcmp(argv[i], "--fast")) {
             port_opt.fast = 1;
         } else if (!strcmp(argv[i], "--no-audio")) {
             port_opt.no_audio = 1;
+        } else if (!strcmp(argv[i], "--menu")) {
+            bios_kbflags |= 0x02;       /* как Shift при запуске: меню видеорежимов */
         } else if (!strcmp(argv[i], "--headless")) {
             port_opt.headless = 1;
-        } else if (!strcmp(argv[i], "--ftest") && i + 3 < argc) {
-            /* --ftest DS HEAP OUT fn...: дифференциальная проверка (ftest.c) */
-            ds_init();
-            rtl_startup_heap();
-            return ftest_run(argv[i + 1], argv[i + 2], argv[i + 3], argc - i - 4, argv + i + 4);
-        } else if (!strcmp(argv[i], "--demo-level") && i + 1 < argc) {
-            port_opt.demo_level = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--shot") && i + 1 < argc && port_opt.nshot < 16) {
-            port_opt.shot[port_opt.nshot++] = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
             port_opt.frames = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--dsdump") && i + 1 < argc) {
-            port_opt.dsdump = argv[++i];
         }
     }
-    if (ds_check())
-        return 1;
-    ds_init();
-    rtl_startup_heap();
     return game_main();
 }

@@ -1,9 +1,8 @@
 /* Модуль 0x151A (file 0x169A0) — AI-типы 33–38: подъёмная лестница,
  * змей со следом, колонна-пресс, прыгуны и двое боссов. */
+#include <string.h>
 #include "orig/fn.h"
-#include "orig/todo.h"
 
-#define ABS16(v) ((v) > 0 ? (v) : -(v))
 
 /* @151A:0002 file:169A2 col_mark — атрибут клеток колонки объекта от
  * верхней части до y */
@@ -158,15 +157,16 @@ void ai_t34(void)
                 o->frame_ctr = 0;
                 o->aux = -o->aux;
             }
-            /* aux < 0 — чтение перед таблицей (sl_1BE0), как в оригинале */
-            if ((s16)ds_peek16(0x1BF0 + cur_obj->aux * 2) < cur_obj->frame_ctr) {
+            /* при aux < 0 оригинал читает перед таблицей far-указатели —
+             * значения больше любого frame_ctr здесь */
+            if (cur_obj->aux >= 0 && an_1BF0[cur_obj->aux] < cur_obj->frame_ctr) {
                 o = cur_obj;
                 o->frame_ctr = 0;
                 if (++o->aux == 6)
                     o->aux = 0;
                 o->aux = -o->aux;
             }
-            rtl_fmemcpy(&t34_trail[0], &t34_trail[2], 0x4C);
+            memmove(&t34_trail[0], &t34_trail[2], 0x4C);
             p = &cur_obj->box[5];
             q = &t34_trail[38];
             q[0] = p->dx;
@@ -404,15 +404,14 @@ static void boss_burst(void)
     ActiveObject *o;
     s16 si;
     for (si = 0; si < 4; si++) {
-        alloc_idx = alloc_object(1);
-        o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        o = new_object(1);
         if (o == NULL)
             continue;
         o->x_world = an_1C68[si * 2] + cur_obj->x_world;
         o->y_world = an_1C68[si * 2 + 1] + cur_obj->y_world;
         o->box[0].hitflag = 0;
-        queue_state(o, (farfn)puff_handler);
-        o->ai_init = (farfn)remove_object;
+        queue_state(o, puff_handler);
+        o->ai_init = remove_object;
         o->phase = si == 0 ? 1 : 0;
     }
     play_sound(1);

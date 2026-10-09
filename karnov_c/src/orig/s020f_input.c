@@ -8,14 +8,13 @@
  * верхнего ряда (скан-код ≤ 0x46) переключают настройки. */
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 /* @020F:000A file:038FA read_key — 0, если клавиш нет; скан-код — в inp_scan */
 s16 read_key(void)
 {
-    s16 si = (s8)hw_peekb(0, 0x417);
+    s16 si = (s8)bios_kbflags;
     si |= 0x70;
-    hw_pokeb(0, 0x417, (u8)si);
+    bios_kbflags = (u8)si;
     if (rtl_bioskey(1) == 0)
         return 0;
     si = rtl_bioskey(0);
@@ -23,14 +22,19 @@ s16 read_key(void)
     return si & 0xFF;
 }
 
+/* Байты замера, как их читает оригинал (запись DS:CDE2): «x» и «y» —
+ * младший и старший байты отсчёта x, кнопки — байт 4. */
+#define JOY_X ((u8)joy_x)
+#define JOY_Y ((u8)((u16)joy_x >> 8))
+
 /* @020F:005C file:0394C read_joystick — биты как у клавиатуры */
 static s16 read_joystick(void)
 {
     s16 si = 0, x, y, btn;
-    joy_data = joy_read();
-    x = joy_data[0];
-    y = joy_data[1];
-    btn = joy_data[4];
+    joy_read();
+    x = JOY_X;
+    y = JOY_Y;
+    btn = joy_btn;
     if (x <= joy_x_lo)
         si |= 2;
     else if (x >= joy_x_hi)
@@ -46,7 +50,7 @@ static s16 read_joystick(void)
 /* @020F:00DA file:039CA read_keyboard — kb_mask по последней клавише */
 static u8 read_keyboard(void)
 {
-    if (player_state == 1 && (kb_mask & 8))
+    if (plr.player_state == 1 && (kb_mask & 8))
         kb_mask &= 0xFFF7;
     if (inp_key >= '1' && inp_key <= '9' && inp_scan <= 0x46)
         return (u8)kb_mask;
@@ -75,17 +79,17 @@ static u8 read_keyboard(void)
         inp_prev_mask &= 0xFC;
         break;
     case '7':
-        if (player_state != 1)
+        if (plr.player_state != 1)
             kb_mask = (kb_mask & 0xFFFA) | 0xA;
         inp_prev_mask &= 0xFE;
         break;
     case '8':
-        if (player_state != 1)
+        if (plr.player_state != 1)
             kb_mask = (kb_mask & 0xFFFB) | 8;
         inp_prev_mask &= 0xFC;
         break;
     case '9':
-        if (player_state != 1)
+        if (plr.player_state != 1)
             kb_mask = (kb_mask & 0xFFF9) | 9;
         inp_prev_mask &= 0xFD;
         break;
@@ -106,18 +110,16 @@ static u8 read_keyboard(void)
 static void joystick_calibrate(void)
 {
     s16 sx, sy, k;
-    joy_data = joy_read();
-    delay(2);
-    joy_data = joy_read();
-    delay(2);
-    joy_data = joy_read();
-    delay(2);
+    for (k = 0; k < 3; k++) {
+        joy_read();
+        delay(2);
+    }
     sx = sy = 0;
     for (k = 0; k < 4; k++) {
-        joy_data = joy_read();
+        joy_read();
         delay(2);
-        sx += joy_data[0];
-        sy += joy_data[1];
+        sx += JOY_X;
+        sy += JOY_Y;
     }
     sx /= 4;
     sy /= 4;
@@ -158,7 +160,7 @@ void DOCONTROLS(void)
         inp_dir = inp_mask & 0xF;
         si = inp_dir & 3;
         if (si != 0)
-            player_dir = si;
+            plr.player_dir = si;
     }
     inp_dir_changed = (inp_mask & 0xF) != (inp_prev_mask & 0xF);
     push_key((s8)inp_key);
@@ -183,13 +185,13 @@ void push_key(s16 key)
         if (k <= '9' && k >= '0') {
             player_ptr->y_world = 0;
             player_ptr->x_world = 0;
-            current_level = k - '0';
+            plr.current_level = k - '0';
             karnov_die(6, 4);
         }
         break;
     case 'Q': case 'q':
         clear_screen();
-        draw_text(s_exit_to_dos, 10);
+        draw_text("Exit to DOS (Y/N)?", 10);
         k = (s8)rtl_bioskey(0);
         if (k == 'y' || k == 'Y') {
             quit_game = 1;
@@ -273,13 +275,13 @@ toggle_players:
  * иначе пустое демо; включить проигрывание */
 void demo_set_attract(s16 on)
 {
-    demo_ptr = &demo_buf[0];
+    demo_ptr = &demo_buf;
     if (on != 0)
         load_demo();
     else
         demo_ptr->pos = 0;
     game_D564 |= 4;
-    respawn_D8CC = 0;
-    respawn_y = 0;
-    respawn_x = 0;
+    plr.respawn_D8CC = 0;
+    plr.respawn_y = 0;
+    plr.respawn_x = 0;
 }

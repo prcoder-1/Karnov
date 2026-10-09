@@ -1,10 +1,9 @@
-/* Сгенерировано tools/gen_fn.py — не править. */
+/* orig/fn.h — функции перевода; в комментарии — адрес в оригинале. */
 #ifndef ORIG_FN_H
 #define ORIG_FN_H
 #include <stdio.h>
 #include "orig/ds.h"
 
-void rtl_startup_heap(void);                         /* @0000:069E */
 void init_object_pool(void);                         /* @006E:0002 */
 void objects_init(void);                             /* @006E:00D1 */
 s16 alloc_object(s16 parity);                        /* @006E:011B */
@@ -25,17 +24,12 @@ void SCROLLUPDATE(void);                             /* @015F:0195 */
 void redraw_rect(const s16 *r);                      /* @015F:01DE */
 void SCROLLVIEW(void);                               /* @015F:0296 */
 void detect_video_mode(void);                        /* @015F:0494 */
-void video_nop(void);                                /* @015F:0641 */
 s16 bk_init(void);                                   /* @015F:0646 */
-void video_shutdown(void);                           /* @015F:0922 */
 s16 detect_machine(void);                            /* @01F3:0007 */
-s16 rom_probe(void);                                 /* @01F3:0153 */
-s16 rom_compare(void);                               /* @01F3:015D */
 s16 read_key(void);                                  /* @020F:000A */
 void DOCONTROLS(void);                               /* @020F:02FB */
 void push_key(s16 key);                              /* @020F:0416 */
 void demo_set_attract(s16 on);                       /* @020F:06B7 */
-s16 detect_cpu(void);                                /* @027D:000F */
 void delay(s16 n);                                   /* @0282:000F */
 void draw_tile(s16 col, s16 row);                    /* @0287:0006 */
 void rect_move_inside(s16 *a, const s16 *b);         /* @02B5:0001 */
@@ -44,7 +38,7 @@ void herc_init(void);                                /* @02C7:000E */
 void herc_shutdown(void);                            /* @02C7:0052 */
 void hiscore_enter(u8 *score);                       /* @02D3:000C */
 void show_hiscores(s16 ticks);                       /* @02D3:00FB */
-u8 *joy_read(void);                                  /* @0316:00E0 */
+void joy_read(void);                                 /* @0316:00E0 */
 void bios_set_cursor(s16 row, s16 col);              /* @0330:0009 */
 void bios_set_mode(s16 mode);                        /* @0330:001A */
 void bios_get_mode(s16 *mode, s16 *cols, s16 *page, s16 *unused); /* @0330:0026 */
@@ -54,10 +48,7 @@ void sys_init(void);                                 /* @0330:00D1 */
 void sys_shutdown(void);                             /* @0330:015A */
 void fatal(s16 code, const char *msg);               /* @0330:01AD */
 s16 game_main(void);                                 /* @0330:01C2 */
-void clear_arg(s16 a);                               /* @0330:030B */
 s16 get_key(void);                                   /* @0361:001F */
-s16 level_init(void);                                /* @0365:000B */
-void level_shutdown(void);                           /* @0365:00B8 */
 ActiveObject *spawn_active_object(EnemySpawn *rec);  /* @0365:00ED */
 void CHECKTRIGGERS(void);                            /* @0365:01C1 */
 s16 read_object_regions(FILE *fp);                   /* @0365:0366 */
@@ -69,7 +60,7 @@ void hud_item(s16 i, s16 show);                      /* @041D:0129 */
 void hud_sel(s16 i, s16 show);                       /* @041D:014E */
 void hud_lives(void);                                /* @041D:01A6 */
 void hud_items(void);                                /* @041D:01CF */
-void items_reset(u8 *rec);                           /* @041D:0206 */
+void items_reset(PlayerRec *r);                      /* @041D:0206 */
 void hud_sel_clear(void);                            /* @041D:0244 */
 void bcd_set(u8 *p, s16 n, s32 v);                   /* @041D:02BF */
 void bcd_add(u8 *p, s16 n, s32 v);                   /* @041D:02F4 */
@@ -98,11 +89,9 @@ void main_loop(void);                                /* @04E4:0326 */
 void game_over_screen(void);                         /* @04E4:04FA */
 void game_run(void);                                 /* @04E4:0621 */
 void demo_reset(Demo *d);                            /* @054B:0050 */
-void demo_copy(const Demo *src, Demo *dst);          /* @054B:0089 */
 s16 demo_record_event(Demo *d, s16 mask, s16 frame); /* @054B:00AD */
 s16 demo_play(Demo *d);                              /* @054B:0106 */
 s16 load_demo(void);                                 /* @054B:0166 */
-s16 save_demo(void);                                 /* @054B:031C */
 FILE *bin_fopen(const char *name, const char *mode); /* @058B:0006 */
 s16 bin_fclose(FILE *fp);                            /* @058B:004C */
 void bin_reset(void);                                /* @058B:0066 */
@@ -114,8 +103,7 @@ void sprite_erase(u16 off, s16 sprite, s16 phase);   /* @0920:13FE */
 void vb_present_rect(u16 off, s16 w, s16 h);         /* @0920:2392 */
 void hud_blit(u16 off, s16 sprite, s16 phase);       /* @0920:24C8 */
 void hud_erase(u16 off, s16 sprite, s16 phase);      /* @0920:2A56 */
-s16 sprite_init(void);                               /* @0BFB:0004 */
-void sprite_shutdown(void);                          /* @0BFB:00B2 */
+void sprite_init(void);                              /* @0BFB:0004 */
 s16 sprite_loader_main(void);                        /* @0BFB:011C */
 void sound_shutdown(void);                           /* @0CB9:000A */
 s16 get_music_enabled(void);                         /* @0CB9:0033 */
@@ -172,7 +160,6 @@ s16 attr_head(void);                                 /* @0E62:0712 */
 s16 attr_feet(void);                                 /* @0E62:0727 */
 void ladder_grab(void);                              /* @0E62:07C3 */
 void ladder_grab_down(void);                         /* @0E62:07FF */
-void k_nop(void);                                    /* @0E62:0C44 */
 void k_appear(void);                                 /* @0E62:0C49 */
 void k_walk(void);                                   /* @0E62:0CF6 */
 void k_slope(void);                                  /* @0E62:0E20 */
@@ -258,16 +245,12 @@ void ai_t54(void);                                   /* @17B6:01DB */
 void ai_t55(void);                                   /* @17EC:0028 */
 void ai_t56(void);                                   /* @17EC:03B2 */
 void ai_t57(void);                                   /* @17EC:0607 */
-double rtl_sqrt(double x);                           /* @1B4D:0000 */
 s16 rtl_bioskey(s16 cmd);                            /* @1B7A:0000 */
-void rtl_exit(s16 code);                             /* @1B89:0005 */
-s16 rtl_fclose(FILE *fp);                            /* @1BA1:000B */
-void rtl_farfree(u8 *ptr);                           /* @1BBC:000A */
-u8 *rtl_farmalloc(u32 size);                         /* @1BE0:0008 */
-FILE *rtl_fopen(const char *name, const char *mode); /* @1BF7:0203 */
-u16 rtl_fread(void *ptr, u16 size, u16 n, FILE *fp); /* @1C24:0062 */
-s16 rtl_fseek(FILE *fp, s32 off, s16 whence);        /* @1C31:0053 */
-void rtl_fmemcpy(void *dst, const void *src, u16 n); /* @1C92:000E */
 s16 rtl_rand(void);                                  /* @1CE7:0017 */
+
+/* порт */
+ActiveObject *new_object(s16 parity);
+const u8 *sprite_data(s16 n);
+void wait_for_file(const char *name, const char *msg);
 
 #endif

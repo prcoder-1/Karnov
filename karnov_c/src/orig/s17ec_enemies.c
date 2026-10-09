@@ -1,7 +1,6 @@
 /* Модуль 0x17EC (file 0x196C0) — AI-типы 55–57: ходок, финальный босс
  * и неподвижная декорация. */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 /* @17EC:0001 file:196C1 t55_reset — новое направление, восстановить hp */
 static void t55_reset(void)
@@ -81,15 +80,14 @@ static void boss2_burst(void)
     ActiveObject *o;
     s16 si;
     for (si = 0; si < 6; si++) {
-        alloc_idx = alloc_object(1);
-        o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        o = new_object(1);
         if (o == NULL)
             continue;
         o->x_world = an_1F0C[si * 2] + cur_obj->x_world;
         o->y_world = an_1F0C[si * 2 + 1] + cur_obj->y_world;
         o->box[0].hitflag = 0;
-        queue_state(o, (farfn)puff_handler);
-        o->ai_init = (farfn)remove_object;
+        queue_state(o, puff_handler);
+        o->ai_init = remove_object;
         o->phase = si == 0 ? 1 : 0;
     }
     play_sound(1);
@@ -122,14 +120,10 @@ void ai_t56(void)
 {
     ActiveObject *o;
     s16 si;
-    u8 rec[0xA5];
     switch (cur_state) {
     case 0: case 1:
         play_sound(9);
-        /* items_reset получает DS:D8AA — блок игрока в раскладке оригинала */
-        ds_copy_out(0xD8AA, sizeof rec, rec);
-        items_reset(rec);
-        ds_copy_in(0xD8AA, sizeof rec, rec);
+        items_reset(&plr);
         hud_items();
         hud_sel_clear();
         o = cur_obj;

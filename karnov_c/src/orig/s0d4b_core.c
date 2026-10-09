@@ -9,33 +9,32 @@
  * 3, 5 — ..., 4 — ранен, 6 — удаление. */
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 #define NO_STATE 0x3E7
 
 /* @0D4B:0003 file:0ECB3 map_set_attr */
 void map_set_attr(s16 col, s16 row, s16 attr)
 {
-    MAP_WR(row, (u16)(col * 2) + 1, attr);
+    map_wr(row, (u16)(col * 2) + 1, attr);
 }
 
 /* @0D4B:0021 file:0ECD1 map_attr */
 s16 map_attr(s16 col, s16 row)
 {
-    return MAP_RD(row, (u16)(col * 2) + 1);
+    return map_rd(row, (u16)(col * 2) + 1);
 }
 
 /* @0D4B:003E file:0ECEE map_tile */
 s16 map_tile(s16 col, s16 row)
 {
-    return MAP_RD(row, (u16)(col * 2));
+    return map_rd(row, (u16)(col * 2));
 }
 
 /* @0D4B:005A file:0ED0A attr_at — атрибут клетки под точкой (x_world, y) */
 s16 attr_at(s16 x, s16 y)
 {
     s16 row = PX_TROW(y);
-    return MAP_RD(row, (u16)(PX_COL(x >> tile_shift) * 2) + 1);
+    return map_rd(row, (u16)(PX_COL(x >> tile_shift) * 2) + 1);
 }
 
 /* @0D4B:008D file:0ED3D set_motion — скорости cur_obj из motion_table */
@@ -62,7 +61,7 @@ void snap_to_ground(ActiveObject *o, s16 sprite, u16 mask, s16 col, s16 row)
 {
     s16 si = row - 1;
     u16 hit = 0;
-    while (hit == 0) {
+    while (hit == 0 && si < map_rows) {
         si++;
         hit = ATTR_PROP(map_attr(col, si)) & mask;
     }
@@ -147,8 +146,8 @@ s16 player_sprite_h(void)
 /* @0D4B:03A5 file:0F055 dir_latch_release */
 void dir_latch_release(void)
 {
-    if (plr_D8AE != 0 && (inp_dir & plr_D8AE) == 0)
-        plr_D8AE = 0;
+    if (plr.plr_D8AE != 0 && (inp_dir & plr.plr_D8AE) == 0)
+        plr.plr_D8AE = 0;
 }
 
 /* @0D4B:03C0 file:0F070 puff_handler — облачко; по последнему кадру
@@ -189,30 +188,29 @@ void puff_handler(void)
     }
 }
 
-/* @0D4B:04A5 file:0F155 die_puff — остановиться, облачко, затем удаление */
-void die_puff(void)
+/* остановиться, облачко вида phase, затем удаление */
+static void die_with_puff(s16 phase)
 {
     set_motion(0);
     cur_obj->frame_ctr = 0;
-    cur_obj->ai_init = (farfn)remove_object;
-    queue_state(cur_obj, (farfn)puff_handler);
-    cur_obj->phase = 0;
+    cur_obj->ai_init = remove_object;
+    queue_state(cur_obj, puff_handler);
+    cur_obj->phase = phase;
     cur_obj->box[0].hitflag = 0;
     ai_result |= 8;
     handoff_obj = cur_obj;
 }
 
-/* @0D4B:04FF file:0F1AF die_puff2 — то же, облачко второго вида */
+/* @0D4B:04A5 file:0F155 die_puff */
+void die_puff(void)
+{
+    die_with_puff(0);
+}
+
+/* @0D4B:04FF file:0F1AF die_puff2 — облачко второго вида */
 void die_puff2(void)
 {
-    set_motion(0);
-    cur_obj->frame_ctr = 0;
-    cur_obj->ai_init = (farfn)remove_object;
-    queue_state(cur_obj, (farfn)puff_handler);
-    cur_obj->phase = 1;
-    cur_obj->box[0].hitflag = 0;
-    ai_result |= 8;
-    handoff_obj = cur_obj;
+    die_with_puff(1);
 }
 
 /* @0D4B:0559 file:0F209 remove_object */
@@ -365,7 +363,7 @@ void queue_state(ActiveObject *o, farfn h)
 static s16 damage_exchange(ActiveObject *b)
 {
     s16 php, bhp;
-    if (player_state == 9)
+    if (plr.player_state == 9)
         return 0;
     php = player_ptr->hit_points;
     bhp = b->hit_points;
@@ -386,9 +384,8 @@ void ai_dispatch(void)
     ai_result = 0;
     pending_state = NO_STATE;
     if (cur_state == 2) {
-        /* state_anim == NULL: оригинал читает 0000:0000 (вектор INT 0) */
         if (o->active != 0 &&
-            ++o->frame_idx >= FAR_W(o->state_anim, 0))
+            ++o->frame_idx >= anim_frames(o))
             o->frame_idx = 0;
     } else {
         switch (cur_state) {
@@ -427,22 +424,20 @@ void ai_dispatch(void)
         o->frame_idx = 0;
     }
     if (ai_result & 4) {
-        o->box[0].sprite = FAR_W(o->state_anim, o->frame_idx + 1);
-        o->box[0].dx = FAR_W(o->state_offs, o->frame_idx * 2);
-        o->box[0].dy = FAR_W(o->state_offs, o->frame_idx * 2 + 1);
+        o->box[0].sprite = o->state_anim[o->frame_idx + 1];
+        o->box[0].dx = o->state_offs[o->frame_idx * 2];
+        o->box[0].dy = o->state_offs[o->frame_idx * 2 + 1];
     }
     if (ai_result & 8) {
         cur_obj = handoff_obj;
         cur_state = cur_obj->state_byte;
     } else if (ai_result & 0x10) {
-        queue_state(cur_obj, (farfn)puff_handler);
+        queue_state(cur_obj, puff_handler);
         cur_obj->phase = 0;
         cur_state = 1;
     } else {
         return;
     }
-    if (hw_ai_bp != 0)
-        hw_ai_bp -= 0x12;               /* кадр вложенного ai_dispatch */
     ai_dispatch();
 }
 
@@ -463,11 +458,11 @@ void THINKCYCLE(void)
         b->throttle = 0;
         switch (a->obj_type) {
         case 0:                         /* игрок */
-            if (player_state == 6)
+            if (plr.player_state == 6)
                 break;
             switch (b->obj_type) {
             case 3:
-                if (player_state != 9)
+                if (plr.player_state != 9)
                     b->state_byte = 4;
                 /* fallthrough */
             case 1: case 7:
@@ -501,17 +496,17 @@ void THINKCYCLE(void)
                 if (b->hit_points > 0) {
                     b->hit_flag = 0;
                 } else {
-                    if (player_state != 9) {
+                    if (plr.player_state != 9) {
                         b->state_byte = 4;
                         play_sound(1);
                     }
-                    if (ib == goal_idx && player_state != 6 && player_state != 7 &&
+                    if (ib == goal_idx && plr.player_state != 6 && plr.player_state != 7 &&
                         goal_watch != NULL) {
                         goal_watch->phase = 1;
                         player_ptr->box[0].hitflag = 0;
                     }
                 }
-                if (player_state != 9 && a->hit_points < 0)
+                if (plr.player_state != 9 && a->hit_points < 0)
                     a->state_byte = 4;
                 break;
             case 3: case 5:
@@ -540,13 +535,10 @@ void THINKCYCLE(void)
                 (--cur_obj->throttle <= 0 || cur_obj->state_byte != 2)) {
                 cur_obj->throttle = cur_obj->tick_period;
                 cur_state = cur_obj->state_byte;
-                hw_ai_bp = 0x0FAA;      /* main_loop SP=0FCA → THINKCYCLE → ai_dispatch */
-                hw_ai_si = si;
                 ai_dispatch();
-                hw_ai_bp = 0;
             }
             if (si != 0 && active_index[di] != goal_idx &&
-                player_x - cur_obj->x_world > 0x7D) {
+                plr.player_x - cur_obj->x_world > 0x7D) {
                 cur_obj->state_byte = 6;
                 cur_obj->throttle = 0;
             }

@@ -1,7 +1,6 @@
 /* Модуль 0x17B6 (file 0x19360) — AI-типы 53 (падающий стрелок) и 54
  * (плевун). */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 /* @17B6:000C file:1936C t53_shoot — два горизонтальных снаряда (вид 2) */
 static void t53_shoot(void)

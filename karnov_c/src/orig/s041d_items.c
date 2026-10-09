@@ -4,7 +4,6 @@
  * младшая первой; значения для bcd_* передаются как BCD-long (0x2600 =
  * 2600). HUD рисуется asm-блиттером сразу на обе страницы EGA. */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 /* @041D:0002 file:059D2 hud_put — спрайт HUD в (col, row); show = 0 —
  * стереть. В демо ничего не рисуется. */
@@ -71,7 +70,7 @@ void hud_lives(void)
 {
     s16 si;
     for (si = 0; si < 6; si++)
-        hud_life(si, lives - 1 > si);
+        hud_life(si, plr.lives - 1 > si);
 }
 
 /* @041D:01CF file:05B9F hud_items */
@@ -79,18 +78,18 @@ void hud_items(void)
 {
     s16 i;
     for (i = 0; i < 0xB; i++)
-        hud_item(i, item_count[i] > 0);
+        hud_item(i, plr.item_count[i] > 0);
 }
 
-/* @041D:0206 file:05BD6 items_reset — в записи игрока (раскладка блока D8AA) */
-void items_reset(u8 *rec)
+/* @041D:0206 file:05BD6 items_reset */
+void items_reset(PlayerRec *r)
 {
     s16 si;
-    rec[0x4E] = 0; rec[0x4F] = 0;
-    rec[0x50] = 0xFF; rec[0x51] = 0xFF;
+    r->items_owned = 0;
+    r->item_sel = -1;
     for (si = 0; si < 0xB; si++) {
-        rec[0x52 + si * 2] = 0; rec[0x53 + si * 2] = 0;
-        rec[0x68 + si * 2] = 0; rec[0x69 + si * 2] = 0;
+        r->plr_D8FC[si] = 0;
+        r->item_count[si] = 0;
     }
 }
 
@@ -195,17 +194,17 @@ static void hud_blank_digits(s16 n, s16 col, s16 row)
 /* @041D:0498 file:05E68 hud_score */
 void hud_score(u8 *score)
 {
-    if (demo_mode != 0 || score_dirty == 0)
+    if (demo_mode != 0 || plr.score_dirty == 0)
         return;
     hud_digits(score, 8, (cur_player != 0 ? 0x37 : 0) + 8, 0xB8);
-    score_dirty = 0;
+    plr.score_dirty = 0;
 }
 
 /* @041D:04D7 file:05EA7 add_score — BCD-long (0x2600 = 2600 очков) */
 void add_score(s32 v)
 {
-    bcd_add(score_bcd, 8, v);
-    score_dirty = 1;
+    bcd_add(plr.score_bcd, 8, v);
+    plr.score_dirty = 1;
 }
 
 /* @041D:04F7 file:05EC7 hud_redraw — весь HUD (очки обоих игроков) */
@@ -215,17 +214,17 @@ void hud_redraw(void)
     if (demo_mode == 0) {
         for (cur_player = 0; two_players + 1 > cur_player; cur_player++) {
             hud_lives();
-            score_dirty = 1;
-            hud_score(&player_rec[cur_player * 0xA5 + 0x86]);
+            plr.score_dirty = 1;
+            hud_score(player_rec[cur_player].score_bcd);
         }
         hud_player_tags_clear();
         hud_sel_clear();
-        hud_sel(item_sel, 1);
+        hud_sel(plr.item_sel, 1);
         hud_blank_digits(2, 0xC, 0x8E);
         hud_put(0x30, 0x3E, 0x96, 1);
-        hud_digits(k_digits, 2, 0x42, 0x96);
+        hud_digits(plr.k_digits, 2, 0x42, 0x96);
         hud_put(0x3D, 0x32, 0x96, 1);
-        hud_digits(time_digits, 3, 0x36, 0x96);
+        hud_digits(plr.time_digits, 3, 0x36, 0x96);
     }
     hud_items();
     cur_player = si;
@@ -245,29 +244,24 @@ void hud_options(void)
     demo_mode = saved;
 }
 
-/* @041D:0671 file:06041 item_nop */
-static void item_nop(void)
-{
-}
-
 /* @041D:0676 file:06046 hud_ammo */
 static void hud_ammo(void)
 {
-    if (ammo_dirty != 0) {
-        if (ammo_digits[0] != 0 || ammo_digits[1] != 0)
-            hud_digits(ammo_digits, 2, 0xC, 0x8E);
+    if (plr.ammo_dirty != 0) {
+        if (plr.ammo_digits[0] != 0 || plr.ammo_digits[1] != 0)
+            hud_digits(plr.ammo_digits, 2, 0xC, 0x8E);
         else
             hud_blank_digits(2, 0xC, 0x8E);
     }
-    ammo_dirty = 0;
+    plr.ammo_dirty = 0;
 }
 
 /* @041D:06C3 file:06093 hud_kcount */
 static void hud_kcount(void)
 {
-    if (k_dirty != 0)
-        hud_digits(k_digits, 2, 0x42, 0x96);
-    k_dirty = 0;
+    if (plr.k_dirty != 0)
+        hud_digits(plr.k_digits, 2, 0x42, 0x96);
+    plr.k_dirty = 0;
 }
 
 /* @041D:06ED file:060BD level_timer_tick — раз в 16 кадров; на нуле —
@@ -276,15 +270,15 @@ static void level_timer_tick(void)
 {
     if (frame_no & 0xF)
         return;
-    if (player_state == 6)
+    if (plr.player_state == 6)
         return;
-    if (player_state != 9 && bcd_sub(time_digits, 3, 1))
+    if (plr.player_state != 9 && bcd_sub(plr.time_digits, 3, 1))
         die_hit();
-    hud_digits(time_digits, 3, 0x36, 0x96);
-    if (hurry != 0) {
+    hud_digits(plr.time_digits, 3, 0x36, 0x96);
+    if (plr.hurry != 0) {
         hud_put(0x3D, 0x32, 0x96, (frame_no & 0x10) != 0);
-    } else if (time_digits[2] == 0 && time_digits[1] < 3) {
-        hurry = 1;
+    } else if (plr.time_digits[2] == 0 && plr.time_digits[1] < 3) {
+        plr.hurry = 1;
         play_music(MUSIC(0x0663), 0, 1);
     }
 }
@@ -296,23 +290,22 @@ static void level_timer_tick(void)
 s16 use_item0(void)
 {
     ActiveObject *o;
-    alloc_idx = alloc_object(1);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(1);
     if (o != NULL)
-        queue_state(o, (farfn)ladder_item);
+        queue_state(o, ladder_item);
     return 0;
 }
 
 /* @041D:07F2 file:061C2 use_item1 */
 s16 use_item1(void)
 {
-    if (player_state == 3)
+    if (plr.player_state == 3)
         return 0;
-    if (current_level == 9) {
+    if (plr.current_level == 9) {
         play_sound(9);
         return 0;
     }
-    plr_D8B4 = 0xFA;
+    plr.plr_D8B4 = 0xFA;
     return 1;
 }
 
@@ -320,44 +313,43 @@ s16 use_item1(void)
 s16 use_item2(void)
 {
     ActiveObject *o;
-    alloc_idx = alloc_object(0);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(0);
     if (o == NULL)
         return 0;
-    queue_state(o, (farfn)bomb);
+    queue_state(o, bomb);
     return 1;
 }
 
 /* @041D:0879 file:06249 use_item3 — +30 патронов, оружие 1 */
 s16 use_item3(void)
 {
-    bcd_add(ammo_digits, 2, 0x30);
-    ammo_dirty = 1;
-    weapon = 1;
+    bcd_add(plr.ammo_digits, 2, 0x30);
+    plr.ammo_dirty = 1;
+    plr.weapon = 1;
     return 1;
 }
 
 /* @041D:08A4 file:06274 use_item4 — оружие 2 */
 s16 use_item4(void)
 {
-    if (player_state == 3)
+    if (plr.player_state == 3)
         return 0;
-    weapon = 2;
+    plr.weapon = 2;
     return 1;
 }
 
 /* @041D:08BD file:0628D use_item5 */
 s16 use_item5(void)
 {
-    plr_D8B8 = 0x96;
+    plr.plr_D8B8 = 0x96;
     return 1;
 }
 
 /* @041D:08CB file:0629B use_item6 — полёт (k_fly) */
 s16 use_item6(void)
 {
-    plr_D8B6 = 0xC8;
-    queue_state(player_ptr, (farfn)k_fly);
+    plr.plr_D8B6 = 0xC8;
+    queue_state(player_ptr, k_fly);
     return 1;
 }
 
@@ -370,9 +362,9 @@ s16 use_item7(void)
 /* @041D:08F9 file:062C9 use_item8 — только в состоянии игрока 3 */
 s16 use_item8(void)
 {
-    if (player_state != 3)
+    if (plr.player_state != 3)
         return 0;
-    plr_D8BA = 1;
+    plr.plr_D8BA = 1;
     return 1;
 }
 
@@ -380,19 +372,19 @@ s16 use_item8(void)
 static s16 item_usable(s16 n)
 {
     /* item_next может спросить n = -1: в оригинале это слово перед
-     * item_count, то есть plr_D8FC[10] */
-    s16 cnt = n == -1 ? plr_D8FC[10] : item_count[n];
-    return cnt > 0 && (n < 5 || item_active[n - 5] != 0);
+     * plr.item_count, то есть plr.plr_D8FC[10] */
+    s16 cnt = n == -1 ? plr.plr_D8FC[10] : plr.item_count[n];
+    return cnt > 0 && (n < 5 || plr.item_active[n - 5] != 0);
 }
 
 /* @041D:093C file:0630C item_next — следующий применимый по кругу */
 static s16 item_next(s16 dir)
 {
     s16 step = dir != 0 ? 1 : -1, cur, si, di;
-    if (items_owned != 0) {
+    if (plr.items_owned != 0) {
         cur = step;
         for (si = 0; si < 0xB; si++, cur += step) {
-            di = (s16)((cur + item_sel + 0xB) % 0xB);
+            di = (s16)((cur + plr.item_sel + 0xB) % 0xB);
             if (item_usable(di))
                 return di;
         }
@@ -403,44 +395,43 @@ static s16 item_next(s16 dir)
 /* @041D:0999 file:06369 item_select */
 static void item_select(s16 n)
 {
-    hud_sel(item_sel, 0);
+    hud_sel(plr.item_sel, 0);
     hud_sel(n, 1);
-    item_sel = n;
+    plr.item_sel = n;
 }
 
 /* @041D:09BE file:0638E item_pickup — 9 — буква «K», 10 — огневая мощь */
 void item_pickup(s16 n)
 {
     s16 got = 0;
-    if (item_count[n] == 0)
-        items_owned++;
+    if (plr.item_count[n] == 0)
+        plr.items_owned++;
     switch (n) {
     case 0: case 1: case 4: case 5: case 6: case 7: case 8:
-        item_count[n] = 1;
+        plr.item_count[n] = 1;
         got = 1;
         break;
     case 2:
-        item_count[n]++;
-        item_nop();
+        plr.item_count[n]++;
         got = 1;
         break;
     case 3:
-        item_count[n]++;
+        plr.item_count[n]++;
         got = 1;
         break;
     case 9:
-        bcd_add(k_digits, 2, 1);
-        if (k_digits[0] == 0 && k_digits[1] == 3) {
-            lives++;
+        bcd_add(plr.k_digits, 2, 1);
+        if (plr.k_digits[0] == 0 && plr.k_digits[1] == 3) {
+            plr.lives++;
             hud_lives();
             play_sound(6);
-            bcd_set(k_digits, 2, 0);
+            bcd_set(plr.k_digits, 2, 0);
         }
-        k_dirty = 1;
+        plr.k_dirty = 1;
         break;
     case 10:
-        if (firepower < 3)
-            firepower++;
+        if (plr.firepower < 3)
+            plr.firepower++;
         break;
     }
     if (got) {
@@ -454,14 +445,14 @@ void item_pickup(s16 n)
 void item_consume(s16 n)
 {
     item_select(item_next(inp_dir & 1));
-    if (--item_count[n] == 0) {
-        items_owned--;
+    if (--plr.item_count[n] == 0) {
+        plr.items_owned--;
         hud_item(n, 0);
     }
-    if (items_owned == 0)
+    if (plr.items_owned == 0)
         item_select(-1);
     if (n >= 5)
-        item_active[n - 5] = 0;
+        plr.item_active[n - 5] = 0;
 }
 
 /* @041D:0B13 file:064E3 item_use */
@@ -469,7 +460,7 @@ static void item_use(s16 n)
 {
     if (n < 0)
         return;
-    if (((s16 (*)(void))item_use_fn[n])() == 0)
+    if (item_use_fn[n]() == 0)
         return;
     item_consume(n);
     if (n >= 5)
@@ -480,15 +471,15 @@ static void item_use(s16 n)
 void item_set_active(s16 k, s16 on)
 {
     s16 n = k - 7;
-    item_active[k - 0xC] = on;
+    plr.item_active[k - 0xC] = on;
     if (on != 0) {
-        if (item_count[n] != 0)
+        if (plr.item_count[n] != 0)
             item_select(n);
         return;
     }
-    if (item_count[n] != 0)
+    if (plr.item_count[n] != 0)
         hud_item(n, 1);
-    if (item_sel == n)
+    if (plr.item_sel == n)
         item_select(item_next(inp_dir & 1));
 }
 
@@ -497,12 +488,12 @@ void item_set_active(s16 k, s16 on)
 void items_tick(void)
 {
     s16 si;
-    if ((u8)(~inp_prev_mask & inp_mask) & 3 || !item_usable(item_sel))
+    if ((u8)(~inp_prev_mask & inp_mask) & 3 || !item_usable(plr.item_sel))
         item_select(item_next(inp_mask & 1));
     if (inp_option & ~inp_prev_option)
-        item_use(item_sel);
+        item_use(plr.item_sel);
     si = frame_no & 3;
-    if (item_active[si] != 0 && item_count[si + 5] != 0 && (frame_no & 0xC) == 0)
+    if (plr.item_active[si] != 0 && plr.item_count[si + 5] != 0 && (frame_no & 0xC) == 0)
         hud_item(si + 5, frame_no & 0x10);
     if (two_players != 0 && (frame_no & 0x1F) == 0)
         hud_player_tag(cur_player, frame_no & 0x20);

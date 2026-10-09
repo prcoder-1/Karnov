@@ -1,8 +1,9 @@
 /* Модуль 0x054B (file 0x6CB0) — демо LEVELn.MOV: проигрывание и запись.
  * Событие — маска ввода и номер кадра (frame_no), с которого она действует. */
 #include <stdio.h>
+#include <string.h>
+#include "fsopen.h"
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 static u16 ev_frame(const Demo *d, s16 i)
 {
@@ -40,13 +41,6 @@ static void demo_advance(Demo *d)
     d->pos = (d->pos + 1) & 0xFF;
 }
 
-/* @054B:0089 file:06D39 demo_copy */
-void demo_copy(const Demo *src, Demo *dst)
-{
-    rtl_fmemcpy(dst, src, 0x304);
-    dst->pos = 0;
-}
-
 /* @054B:00AD file:06D5D demo_record_event — 1, если кольцо заполнено */
 s16 demo_record_event(Demo *d, s16 mask, s16 frame)
 {
@@ -64,7 +58,7 @@ s16 demo_record_event(Demo *d, s16 mask, s16 frame)
 s16 demo_play(Demo *d)
 {
     if (demo_at_end(d))
-        return player_state == 9 ? 0 : 1;
+        return plr.player_state == 9 ? 0 : 1;
     if ((s16)ev_frame(d, d->pos) <= frame_no) {
         inp_mask = d->ev[d->pos * 3];
         demo_advance(d);
@@ -81,51 +75,21 @@ s16 load_demo(void)
     u8 *ev;
     demo_ptr->pos = 0;
     demo_ptr->count = 0;
-    sprintf(msg_buf, s_mov_fmt_a, current_level);
-    while (fp == NULL) {
-        fp = rtl_fopen(msg_buf, s_rb_mov_a);
-        if (fp != NULL)
-            break;
-        clear_screen();
-        draw_text(s_insert_disk, 10);
-        draw_text(s_any_key, 12);
-        while (read_key() == 0)
-            ;
-        clear_screen();
-        clear_arg(0);
-    }
-    rtl_fclose(fp);
-    fp = rtl_fopen(msg_buf, s_rb_mov_b);
+    sprintf(msg_buf, "level%d.mov", plr.current_level);
+    wait_for_file(msg_buf, "Please insert data disk");
+    fp = karnov_fopen(msg_buf, "rb");
     if (fp == NULL)
         return 1;
-    if (rtl_fread(&first, 2, 1, fp) != 1 || rtl_fread(&last, 2, 1, fp) != 1 || first >= last)
+    if (fread(&first, 2, 1, fp) != 1 || fread(&last, 2, 1, fp) != 1 || first >= last)
         goto fail;
     for (si = 0, ev = &demo_ptr->ev[0]; last - first > si; si++, ev += 3)
-        if (rtl_fread(ev, 1, 1, fp) != 1 || rtl_fread(ev + 1, 2, 1, fp) != 1)
+        if (fread(ev, 1, 1, fp) != 1 || fread(ev + 1, 2, 1, fp) != 1)
             goto fail;
     demo_ptr->pos = 0;
     demo_ptr->count = last;
-    rtl_fclose(fp);
+    fclose(fp);
     return 0;
 fail:
-    rtl_fclose(fp);
+    fclose(fp);
     return 1;
-}
-
-/* @054B:031C file:06FCC save_demo — записанное демо в levelN.mov */
-s16 save_demo(void)
-{
-    FILE *fp;
-    s16 pos = demo_rec_ptr->pos, count = demo_rec_ptr->count;
-    sprintf(msg_buf, s_mov_fmt_b, current_level);
-    fp = rtl_fopen(msg_buf, s_wb_mov);
-    if (fp == NULL)
-        return 1;
-    if (pos >= count || fwrite(&pos, 2, 1, fp) != 1 || fwrite(&count, 2, 1, fp) != 1 ||
-        fwrite(&demo_rec_ptr->ev[0], 3, (size_t)(count - pos), fp) != (size_t)(count - pos)) {
-        rtl_fclose(fp);
-        return 1;
-    }
-    rtl_fclose(fp);
-    return 0;
 }

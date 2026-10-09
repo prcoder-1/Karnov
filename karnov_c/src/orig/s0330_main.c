@@ -1,8 +1,8 @@
 /* Модуль 0x0330 (file 0x4B00) — main, инициализация и завершение,
  * консольный вывод через BIOS. */
+#include <stdlib.h>
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 /* @0330:0009 file:04B09 bios_set_cursor — INT 10h AH=2 */
 void bios_set_cursor(s16 row, s16 col)
@@ -53,34 +53,27 @@ void con_puts(const char *s)
 /* @0330:00D1 file:04BD1 sys_init */
 void sys_init(void)
 {
-    bios_equip_saved = (s8)hw_peekb(0, 0x410);
-    bios_kbflags_saved = (s8)hw_peekb(0, 0x417);
-    cpu_type = detect_cpu();
+    bios_equip_saved = (s8)bios_equip;
+    bios_kbflags_saved = (s8)bios_kbflags;
     machine_kind = detect_machine();
     sound_init();
     if (bk_init())
-        fatal(3, s_bkinit_failed);
-    if (level_init())
-        fatal(3, s_level_init_failed);
+        fatal(3, "bkinit failed!\n");
     objects_init();
-    if (sprite_init())
-        fatal(3, s_sprite_init_failed);
+    sprite_init();
 }
 
 /* @0330:015A file:04C5A sys_shutdown */
 void sys_shutdown(void)
 {
-    hw_pokeb(0, 0x417, (u8)bios_kbflags_saved);
-    level_shutdown();
-    sprite_shutdown();
-    video_shutdown();
+    bios_kbflags = (u8)bios_kbflags_saved;
     sound_shutdown();
     if (level_mode == 2) {
         herc_shutdown();
         bios_set_mode(7);
     }
     bios_set_mode(saved_video_mode);
-    hw_pokeb(0, 0x410, (u8)bios_equip_saved);
+    bios_equip = (u8)bios_equip_saved;
 }
 
 /* @0330:01AD file:04CAD fatal — сообщение не печатается */
@@ -88,7 +81,7 @@ void fatal(s16 code, const char *msg)
 {
     (void)msg;
     sys_shutdown();
-    hw_exit(code);
+    exit(code);
 }
 
 /* @0330:01C2 file:04CC2 game_main — по Shift/Ctrl/Alt при старте
@@ -97,14 +90,14 @@ s16 game_main(void)
 {
     s16 again;
     bios_get_mode(&saved_video_mode, &again, &again, &again);
-    if (hw_peekb(0, 0x417) & 0x0F) {
+    if (bios_kbflags & 0x0F) {
         again = 1;
         while (again) {
-            con_puts(s_press_key_video);
-            con_puts(s_menu_cga);
-            con_puts(s_menu_ega);
-            con_puts(s_menu_tga);
-            con_puts(s_menu_mono);
+            con_puts("\r\n\npress key for desired video mode\r\n\n");
+            con_puts("C     -     CGA\n\r");
+            con_puts("E     -     EGA\n\r");
+            con_puts("T     -     TGA\n\r");
+            con_puts("M     -     Monochrome Graphics\r\n");
             switch (get_key()) {
             case 0x1B:
                 return 0;
@@ -130,7 +123,7 @@ s16 game_main(void)
                     level_mode = 2;
                     again = 0;
                 } else {
-                    con_puts(s_cant_force_herc);
+                    con_puts("\ncan't force Hercules mode");
                 }
                 break;
             }
@@ -139,13 +132,7 @@ s16 game_main(void)
     sys_init();
     game_run();
     sys_shutdown();
-    rtl_exit(0);
+    exit(0);
     return 0;
 }
 
-/* @0330:030B file:04E0B clear_arg — обнуляет свой аргумент (без эффекта) */
-void clear_arg(s16 a)
-{
-    a = 0;
-    (void)a;
-}

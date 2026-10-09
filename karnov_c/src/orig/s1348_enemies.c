@@ -1,7 +1,7 @@
 /* Модуль 0x1348 (file 0x14C80) — AI-типы 20–32: колонна голов, золотой
  * человек с шарами, арена (тип 30) и др. */
+#include <string.h>
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 #define BYTE_AT(arr, i) (((const u8 *)(arr))[i])   /* байтовое чтение таблицы */
 
@@ -115,11 +115,10 @@ void gold_ball(void)
 static void gold_spawn_ball(s16 n, s16 misc)
 {
     ActiveObject *o;
-    alloc_idx = alloc_object(1);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(1);
     if (o == NULL)
         return;
-    queue_state(o, (farfn)gold_ball);
+    queue_state(o, gold_ball);
     o->parent = cur_obj;
     o->misc = misc;
     o->phase = n;
@@ -452,10 +451,9 @@ void ai_t22(void)
     case 5:
         spawn_projectile(cur_obj->box[0].x0 + 2, cur_obj->box[0].y0 + 0x19,
                          player_ptr->x_world, player_ptr->y_world + 0xA, 2, 0x80000L, 1);
-        alloc_idx = alloc_object(1);
-        n = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        n = new_object(1);
         if (n != NULL) {
-            queue_state(n, (farfn)t22_drop);
+            queue_state(n, t22_drop);
             n->x_world = cur_obj->x_world;
             n->y_world = cur_obj->y_world + 5;
             cur_obj->phase_ctr -= 0xA;
@@ -658,8 +656,8 @@ void ai_t30(void)
             for (si = 0; si < 6; si++)
                 map_set_attr(di, row + si, 3);
         }
-        rtl_fmemcpy(cam_saved, cam_rect, 8);
-        rtl_fmemcpy(cam_rect, view_rect, 8);
+        memcpy(cam_saved, cam_rect, 8);
+        memcpy(cam_rect, view_rect, 8);
         stamp_object(cur_obj);
         /* fallthrough */
     case 2:
@@ -682,7 +680,7 @@ void ai_t30(void)
             for (si = 0; si < 6; si++)
                 map_set_attr(di, row + si, TILE_ATTR(map_tile(di, row + si)));
         }
-        rtl_fmemcpy(cam_rect, cam_saved, 8);
+        memcpy(cam_rect, cam_saved, 8);
         for (si = 0; si < 4; si++)
             cam_hist[si * 2] = cur_obj->phase_ctr;
         ai_result |= 1;
@@ -789,7 +787,7 @@ void ai_t27(void)
     s16 si;
     switch (cur_state) {
     case 0:
-        cur_obj->y_world = player_y - 0x46;
+        cur_obj->y_world = plr.player_y - 0x46;
         ai_result |= 0x10;
         break;
     case 1:

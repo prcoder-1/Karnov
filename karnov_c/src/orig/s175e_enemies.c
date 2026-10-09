@@ -2,8 +2,6 @@
  * ворота (тип 51 и их части), вращающийся блок. */
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/port.h"
-#include "orig/todo.h"
 
 /* @175E:000F file:18DEF ai_t50 — стена из 7 частей (клетки — стена 3);
  * игрок правее 720 в падении ранит её насмерть */
@@ -81,16 +79,8 @@ void ai_t52(void)
         o->tick_period = 3;
         o->y_world -= o->y_world % 10;
         cur_obj->state_list = sl_1E70;
-        /* row_fill(1): одно слово вместо (o, attr) — o = BP:0001 (BP
-         * ai_dispatch, указывает в код), attr = SI вызывающего ai_dispatch */
-        if (hw_ai_bp != 0) {
-            ActiveObject g;
-            g.x_world = (s16)hw_peekw(hw_ai_bp, 1 + 8);
-            g.y_world = (s16)hw_peekw(hw_ai_bp, 1 + 0xC);
-            row_fill(&g, hw_ai_si);
-        } else {
-            port_todo_once("175E:025D row_fill вне THINKCYCLE");
-        }
+        /* здесь оригинал вызывает row_fill с одним словом вместо (o, attr):
+         * объект берётся из кода, запись уходит за пределы карты — опущено */
         /* fallthrough */
     case 2:
         o = cur_obj;
@@ -202,12 +192,11 @@ void ai_t51(void)
         gate_fill(4);
         break;
     case 4: case 6:
-        alloc_idx = alloc_object(0);
-        o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        o = new_object(0);
         if (o == NULL)
             break;
         row_fill(cur_obj, 2);
-        queue_state(o, (farfn)t51_open);
+        queue_state(o, t51_open);
         t51_obj = NULL;
         ai_result |= 1;
         break;

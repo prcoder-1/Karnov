@@ -3,9 +3,10 @@
  * level_mode: 0 CGA, 1 EGA, 2 Hercules, 3 Tandy, 4 — ещё не определён.
  * Внеэкранный буфер (vbuf) хранится в формате оригинала: таблицы
  * смещений vb_* строятся здесь, их значения передаются asm-драйверам. */
+#include <string.h>
+#include "fsopen.h"
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 /* @015F:0494 file:03284 detect_video_mode — ждёт диск с sprites.ega,
  * затем (если режим не выбран меню) Tandy → EGA → CGA → Hercules */
@@ -14,42 +15,41 @@ void detect_video_mode(void)
     FILE *fp = NULL;
     s16 equip, i;
     while (fp == NULL) {
-        fp = rtl_fopen(s_sprites_ega_a, s_rb_a);
+        fp = karnov_fopen("sprites.ega", "rb");
         if (fp != NULL)
             break;
         for (i = 0; i < 0xF; i++)
-            con_puts(s_crlf_a);
-        con_puts(s_insert_disk);
-        con_puts(s_crlf_b);
-        con_puts(s_any_key);
+            con_puts("\r\n");
+        con_puts("Please insert data disk");
+        con_puts("\r\n");
+        con_puts("any key when ready");
         for (i = 0; i < 0xC; i++)
-            con_puts(s_crlf_c);
+            con_puts("\r\n");
         while (read_key() == 0)
             ;
-        clear_arg(0);
     }
-    rtl_fclose(fp);
-    equip = (s8)hw_peekb(0, 0x410);
+    fclose(fp);
+    equip = (s8)bios_equip;
     if (level_mode != 4)
         return;
     if (machine_kind >= 5 && machine_kind <= 10) {
-        fp = rtl_fopen(s_sprites_ega_b, s_rb_b);
+        fp = karnov_fopen("sprites.ega", "rb");
         if (fp == NULL)
             goto cga;
-        rtl_fclose(fp);
+        fclose(fp);
         bios_set_mode(9);
         level_mode = 3;
         return;
     }
     if (ega_detect() == 0) {
-        fp = rtl_fopen(s_sprites_ega_c, s_rb_c);
+        fp = karnov_fopen("sprites.ega", "rb");
         if (fp != NULL) {
-            rtl_fclose(fp);
+            fclose(fp);
             bios_set_mode(0x0D);
             level_mode = 1;
             return;
         }
-        hw_pokeb(0, 0x410, (u8)equip);
+        bios_equip = (u8)equip;
         goto cga;
     }
     if (cga_detect() == 0) {
@@ -65,92 +65,30 @@ cga:
     }
 }
 
-/* @015F:0646 file:03436 bk_init — буфер, карта и таблицы смещений */
+/* @015F:0646 file:03436 bk_init — параметры буфера по видеорежиму.
+ * Байт буфера — cw/8 колонки тайла: EGA 2, CGA/Hercules 4, Tandy 8. */
 s16 bk_init(void)
 {
-    s32 bufsize;
-    s16 i;
-    u16 step, acc;
+    s16 cw;
     detect_video_mode();
     if (level_mode == 4) {
-        con_puts(s_video_dev_err);
-        goto fail;
+        con_puts("video device error");
+        delay(0x370);
+        return 1;
     }
-    if (level_mode == 0 || level_mode == 2) {
-        vb_row_bytes = 0x90;
-        bufsize = 0x1000F;
-        tile_shift = 1;
-        vid_AF1E = 1;
-    } else if (level_mode == 3) {
-        vb_row_bytes = 0x120;
-        bufsize = 0x2000F;
-        tile_shift = 0;
-        vid_AF1E = 0;
-    } else {
-        vb_row_bytes = 0x48;
-        bufsize = 0x2000F;
-        tile_shift = 2;
-        vid_AF1E = 3;
-    }
-    vbuf_alloc = rtl_farmalloc((u32)bufsize);
-    if (vbuf_alloc == NULL) {
-        con_puts(s_no_mem_buffer);
-        goto fail;
-    }
-    vbuf = hw_next_paragraph(vbuf_alloc);
-    map_buf = rtl_farmalloc(0x7992);
-    if (map_buf == NULL) {
-        con_puts(s_no_mem_map);
-        goto fail;
-    }
-    regions = NULL;
-    spawns = NULL;
-
-    step = level_mode == 1 ? 2 : level_mode == 3 ? 8 : 4;
-    for (acc = 0, i = 0; i < 0x113; i++, acc += step)
-        vb_col_off[i] = acc;
-    step = level_mode == 1 ? 0x2D0 : level_mode == 3 ? 0xB40 : 0x5A0;
-    for (acc = 0, i = 0; i < 0x73; i++, acc += step)
-        vb_trow_off[i] = acc;
-    step = level_mode == 1 ? 0x48 : level_mode == 3 ? 0x120 : 0x90;
-    for (acc = 0, i = 0; i < 0x47E; i++, acc += step)
-        vb_row_off[i] = acc;
-    step = level_mode == 1 ? 2 : level_mode == 3 ? 8 : 4;
-    for (i = 0; i < 0x898; i++)
-        px_to_col[i] = i / step;
-    for (i = 0; i < 0x47E; i++)
-        px_to_trow[i] = i / 10;
-
-    switch (level_mode) {
-    case 0: case 2:
-        vb_view_bytes = 0x14; vb_stride = 0x24;
-        vid_B82E = 0x1E; vid_B826 = 0x1E; vid_AF20 = 0x88;
-        vid_B832 = 0xB4;
-        break;
-    case 3:
-        vb_view_bytes = 0x28; vb_stride = 0x48;
-        vid_B82E = 0x1E; vid_B826 = 0x1E; vid_AF20 = 0x110;
-        vid_B832 = 0xB4;
-        break;
-    case 1:
-        vb_view_bytes = 0xA; vb_stride = 0x12;
-        vid_B82E = 0x1E; vid_B826 = 0x1E; vid_AF20 = 0x44;
-        vid_B832 = 0xB4;
-        break;
-    }
+    tile_shift = level_mode == 1 ? 2 : level_mode == 3 ? 0 : 1;
+    cw = 8 >> tile_shift;
+    vid_AF1E = (1 << tile_shift) - 1;
+    vb_row_bytes = 36 * cw;
+    vb_view_bytes = 5 * cw;
+    vb_stride = 9 * cw;
+    vid_AF20 = 34 * cw;
+    vid_B82E = 0x1E;
+    vid_B826 = 0x1E;
+    vid_B832 = 0xB4;
     tile_attr[0] = 2;
     loaded_level = 0x3E7;
     return 0;
-fail:
-    delay(0x370);
-    return 1;
-}
-
-/* @015F:0922 file:03712 video_shutdown */
-void video_shutdown(void)
-{
-    rtl_farfree(vbuf_alloc);
-    rtl_farfree(map_buf);
 }
 
 /* Заливка видеопамяти — fmemset (@1C95:0028) по адресу карты. */
@@ -230,12 +168,12 @@ void redraw_rect(const s16 *r)
     r0 = PX_TROW(v[1]);
     c1 = PX_COL(v[2] - 1) + 1;
     r1 = PX_TROW(v[3] - 1) + 1;
-    off = vb_row_off[v[1]] + v[0];
+    off = VB_ROW(v[1]) + v[0];
     for (di = r0; di < r1; di++)
         for (si = c0; si < c1; si++)
             draw_tile(si, di);
     vb_present_rect(off, v[2] - v[0], v[3] - v[1]);
-    rtl_fmemcpy(prev_view, view_rect, 8);
+    memcpy(prev_view, view_rect, 8);
 }
 
 /* @015F:0296 file:03086 SCROLLVIEW — фаза 8: дорисовать тайлы,
@@ -272,7 +210,7 @@ void SCROLLVIEW(void)
                 draw_tile(si, di);
         h++;
         w++;
-        vb_present_rect(vb_row_off[py] + px, w, h);
+        vb_present_rect(VB_ROW(py) + px, w, h);
         oc0 = nc0;
         oc1 = nc1;
     }
@@ -293,11 +231,6 @@ void SCROLLVIEW(void)
                 draw_tile(si, di);
         h++;
         w++;
-        vb_present_rect(vb_row_off[py] + px, w, h);
+        vb_present_rect(VB_ROW(py) + px, w, h);
     }
-}
-
-/* @015F:0641 file:03431 video_nop */
-void video_nop(void)
-{
 }

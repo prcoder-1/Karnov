@@ -1,9 +1,7 @@
 /* Модуль 0x170C (file 0x188C0) — AI-типы 48 (метатель с разрывом на
  * осколки) и 49 (разрушаемая стена). */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
-#define ABS16(v) ((v) > 0 ? (v) : -(v))
 
 /* @170C:000E file:188CE t48_drop — осколок: гаснет в стене и за экраном */
 void t48_drop(void)
@@ -39,11 +37,10 @@ static void t48_burst(void)
     di = cur_obj->x_world;
     t = cur_obj->y_world;
     for (si = 0; si < 6; si++) {
-        alloc_idx = alloc_object(1);
-        o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        o = new_object(1);
         if (o == NULL)
             continue;
-        init_active_object(o, (farfn)t48_drop, 0);
+        init_active_object(o, t48_drop, 0);
         o->x_world = di + 3;
         tx = o->x_world + (si - 3) * 0x19;
         o->y_world = cur_obj->box[0].y1 - 5;
@@ -114,7 +111,7 @@ static void wall_mark(s16 attr)
 {
     s16 si, di, r0, r1;
     di = PX_COL(cur_obj->x_world >> tile_shift);
-    if (current_level == 6)
+    if (plr.current_level == 6)
         di++;
     r0 = PX_TROW(cur_obj->y_world);
     r1 = PX_TROW(sprite_h[cur_obj->box[0].sprite] + cur_obj->y_world) - 1;
@@ -133,11 +130,11 @@ void ai_t49(void)
         o = cur_obj;
         o->misc = 0;
         o->phase_ctr = o->hit_points;
-        o->phase = current_level == 9 && o->x_world > 0x44C ? 1 : 0;
+        o->phase = plr.current_level == 9 && o->x_world > 0x44C ? 1 : 0;
         o = cur_obj;
         o->active = 0;
         o->num_bboxes = 1;
-        o->box[0].sprite = current_level == 6 ? 0x131 : 0x130;
+        o->box[0].sprite = plr.current_level == 6 ? 0x131 : 0x130;
         o = cur_obj;
         o->box[0].dy = o->box[0].dx = 0;
         wall_mark(3);

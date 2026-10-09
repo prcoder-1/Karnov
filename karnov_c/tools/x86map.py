@@ -108,13 +108,50 @@ def load_symbols():
                 t = open(os.path.join(src, fn), encoding="utf-8").read()
                 for m in tag.finditer(t):
                     funcs[(int(m.group(1), 16), int(m.group(2), 16))] = m.group(3)
-    try:
-        import dsdiff
-        vars_, objf = dsdiff.symbols()
-        data["__vars__"] = (vars_, objf)
-    except Exception:
-        pass
+    data["__vars__"] = ds_symbols()
     return funcs, data
+
+
+def ds_symbols():
+    """Переменные DS перевода: адрес — из комментария /* XXXX: */ в
+    include/orig/ds.h или из имени вида *_XXXX → [(адрес, имя, размер, n)]."""
+    sizes = {"u8": 1, "s8": 1, "char": 1, "u32": 4, "s32": 4, "farfn": 4, "StateEntry": 8,
+             "Motion": 16, "CollRes": 0x26, "ActiveObject": 0xF5, "EnemySpawn": 20,
+             "ObjRegion": 12, "Demo": 0x304, "PlayerRec": 0xA5}
+    decl = re.compile(r"^\s*(?:extern |static )?(\w+)\s*(\*?)\s*\(?\*?(\w+)\)?"
+                      r"(?:\[(\w+)\])?[^;]*;\s*(?:/\*\s*([0-9A-F]{4})\b)?")
+    out, prefix = [], ""
+    for f in ("include/orig/ds.h", "src/orig/ds.c"):
+        path = os.path.join(ROOT, "karnov_c", f)
+        if not os.path.exists(path):
+            continue
+        for line in open(path, encoding="utf-8"):
+            if line.startswith("typedef struct {"):
+                prefix = "plr."
+            elif line.startswith("}"):
+                prefix = ""
+            m = decl.match(line)
+            if not m or m.group(1) in ("typedef", "return", "struct"):
+                continue
+            t, ptr, name, n, addr = m.groups()
+            addr = addr or (re.search(r"_([0-9A-F]{4})$", name) or [None, None])[1]
+            if addr is None or (prefix == "" and line.startswith("    ")):
+                continue
+            size = 4 if ptr else sizes.get(t, 2)
+            n = int(n, 0) if n else 1
+            if "far-указатель" in line:     # массив перевода, в DS — указатель
+                size, n = 4, 1
+            out.append((int(addr, 16), prefix + name, size, n))
+    return out
+
+
+def ds_name_of(addr, vars_):
+    for a, n, size, cnt in vars_:
+        if a <= addr < a + size * cnt:
+            i, r = divmod(addr - a, size)
+            s = f"{n}[{i}]" if cnt > 1 else n
+            return s + (f"+{r}" if r else "")
+    return "?"
 
 
 FIELDS = {
@@ -424,8 +461,7 @@ def annotate(i, seg, syms, data):
         if base == 0 and o.mem.index == 0 and seg_r in (0, X.X86_REG_DS):
             nm = data.get(disp)
             if nm is None and "__vars__" in data:
-                import dsdiff
-                v = dsdiff.name_of(disp, *data["__vars__"])
+                v = ds_name_of(disp, data["__vars__"])
                 nm = None if v == "?" else v
             if nm is None:
                 for k in range(1, 4):
@@ -435,8 +471,7 @@ def annotate(i, seg, syms, data):
             notes.append(f"{nm or 'DS'}[{disp:04X}]")
         elif seg_r in (0, X.X86_REG_DS) and disp >= 0x100 and "__vars__" in data \
                 and base not in (X.X86_REG_BP,):
-            import dsdiff
-            v = dsdiff.name_of(disp, *data["__vars__"])
+            v = ds_name_of(disp, data["__vars__"])
             if v != "?":
                 notes.append(f"&{v}[{disp:04X}]+idx")
         elif seg_r == X.X86_REG_ES and base == X.X86_REG_BX and disp:

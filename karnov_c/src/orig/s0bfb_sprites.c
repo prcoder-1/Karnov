@@ -1,8 +1,8 @@
 /* Модуль 0x0BFB (file 0xD7B0) — загрузка спрайтов SPRITES.EGA/CGA в арену.
  *
- * Арена (sprite_arena, куча): таблица из count far-указателей на
- * спрайты (нормализованные seg:off, как у huge-указателя оригинала),
- * затем данные. Слова данных спрайтов — big-endian.
+ * Арена (sprite_arena): таблица из count 4-байтных ссылок на спрайты (в
+ * оригинале far-указатели, здесь — смещения в арене), затем данные.
+ * Слова данных спрайтов — big-endian.
  *
  * EGA-спрайт: 3 слова смещений сдвинутых копий, заголовок (h, w в
  * словах), 5 плоскостей (маска + 4 цвета) по h строк × w слов; за ним
@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 static u16 cga_transform(u8 *buf, u16 size);
 static u16 ega_transform(u8 *buf, u16 size, s16 wide);
@@ -32,35 +31,27 @@ static void wr_le(u8 *b, u16 word, u16 v)
     b[word * 2 + 1] = (u8)(v >> 8);
 }
 
-/* far-указатель (huge, нормализованный) на p в эмулированной памяти */
-static void wr_far(u8 *b, const u8 *p)
+/* ссылка на спрайт p в таблице арены */
+static void wr_ref(u8 *b, const u8 *p)
 {
-    u32 l = (u32)(p - hw_conv);
-    wr_le(b, 0, (u16)(l & 0xF));
-    wr_le(b, 1, (u16)(l >> 4));
+    u32 l = (u32)(p - sprite_arena);
+    wr_le(b, 0, (u16)l);
+    wr_le(b, 1, (u16)(l >> 16));
 }
 
-/* @0BFB:0004 file:0D7B4 sprite_init — арена; ширины спрайтов → пары пикселей */
-s16 sprite_init(void)
+/* Данные спрайта n (по таблице арены). */
+const u8 *sprite_data(s16 n)
+{
+    const u8 *t = &sprite_arena[n * 4];
+    return &sprite_arena[t[0] | t[1] << 8 | (u32)t[2] << 16];
+}
+
+/* @0BFB:0004 file:0D7B4 sprite_init — ширины спрайтов → пары пикселей */
+void sprite_init(void)
 {
     u16 si;
-    switch (level_mode) {
-    case 0: case 2: sprite_arena = rtl_farmalloc(0x11000); break;
-    case 1:         sprite_arena = rtl_farmalloc(0x1B800); break;
-    case 3:         sprite_arena = rtl_farmalloc(0x20000); break;
-    }
-    if (level_mode <= 3 && sprite_arena == NULL)
-        return 1;
     for (si = 0; si < 0x152; si++)
         sprite_w[si] = (u8)(sprite_w[si] / 2);
-    return 0;
-}
-
-/* @0BFB:00B2 file:0D862 sprite_shutdown */
-void sprite_shutdown(void)
-{
-    if (sprite_arena != NULL)
-        rtl_farfree(sprite_arena);
 }
 
 /* @0BFB:00D9 file:0D889 sprite_needed — типы 0/1 (игрок) или есть в триггерах */
@@ -88,23 +79,11 @@ s16 sprite_loader_main(void)
 
     first_time = sprites_fixed == -1 ? 1 : 0;
     switch (level_mode) {
-    case 0: case 2: name = s_sprites_cga; break;
-    case 1: case 3: name = s_sprites_ega_d; break;
+    case 0: case 2: name = "sprites.cga"; break;
+    case 1: case 3: name = "sprites.ega"; break;
     }
-    while (fp == NULL) {
-        fp = bin_fopen(name, s_rb_spr_a);
-        if (fp != NULL)
-            break;
-        clear_screen();
-        draw_text(s_insert_disk, 10);
-        draw_text(s_any_key, 12);
-        while (read_key() == 0)
-            ;
-        clear_screen();
-        clear_arg(0);
-    }
-    bin_fclose(fp);
-    fp = bin_fopen(name, s_rb_spr_b);
+    wait_for_file(name, "Please insert data disk");
+    fp = bin_fopen(name, "rb");
     if (fp == NULL)
         return 1;
     if (bin_fread((u8 *)&count, 2, 1, fp) != 1) {
@@ -131,13 +110,13 @@ s16 sprite_loader_main(void)
             continue;
         }
         if (!sprite_needed(dir[0])) {
-            wr_far(table, empty);
+            wr_ref(table, empty);
             need_seek = 1;
             continue;
         }
         if (need_seek) {
             bin_reset();
-            if (rtl_fseek(fp, (s32)(dir[4] | dir[5] << 8 | (u32)dir[6] << 16 |
+            if (fseek(fp, (s32)(dir[4] | dir[5] << 8 | (u32)dir[6] << 16 |
                                     (u32)dir[7] << 24), 0) != 0)
                 goto err5;
             need_seek = 0;
@@ -171,7 +150,7 @@ s16 sprite_loader_main(void)
             si = tandy_sprite_convert(cursor, vbuf + 0x4000);
             break;
         }
-        wr_far(table, cursor);
+        wr_ref(table, cursor);
         cursor += si;
         total += si;
         if (first_time && (dir[0] == 0 || dir[0] == 1)) {

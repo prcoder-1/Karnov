@@ -23,7 +23,7 @@ void herc_init(void)
 {
     if (herc_detect() != 0)
         return;
-    hw_pokeb(0, 0x410, (u8)((hw_peekb(0, 0x410) & 0xCF) | 0x20));
+    bios_equip = (u8)((bios_equip & 0xCF) | 0x20);
     herc_graphics();
     hw_int10_set_mode(4);
     hw_int10_set_bg(0);
@@ -32,7 +32,7 @@ void herc_init(void)
 /* @02C7:0052 file:044C2 herc_shutdown — монохромный режим 7 */
 void herc_shutdown(void)
 {
-    hw_pokeb(0, 0x410, (u8)((hw_peekb(0, 0x410) & 0xCF) | 0x30));
+    bios_equip = (u8)((bios_equip & 0xCF) | 0x30);
     hw_out(0x3BF, 0);
     hw_int10_set_mode(7);
 }

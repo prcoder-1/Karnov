@@ -49,7 +49,7 @@ s16 get_sfx_enabled(void)
 void sound_init(void)
 {
     old_int8 = get_vector(8);
-    set_vector(8, (farfn)timer_isr);
+    set_vector(8, timer_isr);
     hw_out(0x43, 0x36);
     hw_out(0x40, 0x30);
     hw_out(0x40, 0x15);
@@ -133,23 +133,23 @@ static void mus_next(void)
     }
     if (mus_script[mus_pos] == 0xFF) {
         mus_pos++;
-        /* индекс до 255: за note_len (0x40) — соседние переменные DS */
-        e = (u16)(0x122A + mus_script[mus_pos] * 2);
+        e = (u16)(mus_script[mus_pos] * 2);
         mus_pos++;
-        far_pokeb(DS_SEG, e, mus_script[mus_pos]);
+        note_len[e] = mus_script[mus_pos];
         mus_pos++;
-        far_pokeb(DS_SEG, (u16)(e + 1), mus_script[mus_pos]);
+        note_len[e + 1] = mus_script[mus_pos];
         mus_pos++;
         mus_next();
         return;
     }
     mus_phase = 2;
-    mus_div = (u16)DS_IDX16(pitch_lut, 0x126A, mus_script[mus_pos]);
+    /* нота 110 — за таблицей: в оригинале неслышимо малый делитель */
+    mus_div = mus_script[mus_pos] < 110 ? pitch_lut[mus_script[mus_pos]] : 1;
     mus_pos++;
-    e = (u16)(0x122A + mus_script[mus_pos] * 2);
+    e = (u16)(mus_script[mus_pos] * 2);
     mus_pos++;
-    mus_timer = far_peekb(DS_SEG, e);
-    mus_gap = far_peekb(DS_SEG, (u16)(e + 1));
+    mus_timer = note_len[e];
+    mus_gap = note_len[e + 1];
 }
 
 /* @0CB9:0298 file:0E628 music_tick */

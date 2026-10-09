@@ -1,7 +1,6 @@
 /* Модуль 0x0FFA (file 0x117A0) — выстрелы игрока, предметы на карте,
  * свиток конца уровня, падающий лёд (sky-цепь), PRE-/POST-KARNOV. */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 /* @0FFA:0009 file:117A9 shot_init — vx = ±speed по взгляду; аним-состояние
  * 1 при огневой мощи больше 1 */
@@ -11,11 +10,11 @@ static void shot_init(s32 speed)
     cur_obj->tick_period = 2;
     cur_obj->obj_type = 2;
     cur_obj->hit_points = 0xA;
-    SETLONG(cur_obj->vx_hi, cur_obj->vx_lo, player_dir & 1 ? speed : -speed);
+    SETLONG(cur_obj->vx_hi, cur_obj->vx_lo, plr.player_dir & 1 ? speed : -speed);
     cur_obj->num_bboxes = 1;
     cur_obj->box[0].hitflag = 1;
     cur_obj->state_list = sl_16B2;
-    pending_state = firepower > 1 ? 1 : 0;
+    pending_state = plr.firepower > 1 ? 1 : 0;
     ai_result |= 6;
 }
 
@@ -25,7 +24,7 @@ static void shot_tick(void)
     s16 si = (s16)(cur_obj->x_world >> tile_shift);
     if (si > clip_rect[2] || si < clip_rect[0])
         cur_obj->state_byte = 4;
-    if (firepower > 1 && weapon == 0)
+    if (plr.firepower > 1 && plr.weapon == 0)
         ai_result |= 4;
 }
 
@@ -119,7 +118,7 @@ void boomerang(void)
         v = (s32)((u32)motion_table[inp_dir & 3].vx << 1);
         SETLONG(o->x_world, o->x_lo, v + LONG(player_ptr->x_world, player_ptr->x_lo));
         o->y_world = player_ptr->y_world + 7;
-        SETLONG(o->vx_hi, o->vx_lo, player_dir & 1 ? (s32)3 << 16 : -((s32)3 << 16));
+        SETLONG(o->vx_hi, o->vx_lo, plr.player_dir & 1 ? (s32)3 << 16 : -((s32)3 << 16));
         o->phase_ctr = o->vx_hi > 0;
         o->misc = 0;
         o->phase = 0;
@@ -182,8 +181,8 @@ void boomerang(void)
     case 6:
         if (cur_obj->misc == 0)
             break;
-        weapon = cur_obj->phase != 0 ? 2 : 0;
-        fire_cooldown = 0;
+        plr.weapon = cur_obj->phase != 0 ? 2 : 0;
+        plr.fire_cooldown = 0;
         ai_result |= 1;
         break;
     }
@@ -198,11 +197,11 @@ void fireball(void)
         shots_alive++;
         cur_obj->obj_type = 2;
         cur_obj->hit_points = 0x19;
-        set_motion(player_dir);
+        set_motion(plr.player_dir);
         o = cur_obj;
         o->x_world = (s16)(o->vx_hi << 1) + player_ptr->x_world + 3;
         o->y_world = player_ptr->box[0].y0 + 6;
-        SETLONG(o->vx_hi, o->vx_lo, player_dir & 1 ? (s32)4 << 16 : -((s32)4 << 16));
+        SETLONG(o->vx_hi, o->vx_lo, plr.player_dir & 1 ? (s32)4 << 16 : -((s32)4 << 16));
         o->misc = o->vx_hi > 0 ? 2 : 0;
         o->num_bboxes = 1;
         o->box[0].dx = 0;
@@ -226,8 +225,8 @@ void fireball(void)
 /* @0FFA:067D file:11E1D item_chain_add */
 static void item_chain_add(ActiveObject *o)
 {
-    o->parent = item_chain;
-    item_chain = o;
+    o->parent = plr.item_chain;
+    plr.item_chain = o;
 }
 
 /* @0FFA:069E file:11E3E chain_remove — объекты сравниваются по active_pos */
@@ -244,7 +243,7 @@ static ActiveObject *chain_remove(ActiveObject *list, ActiveObject *o)
 /* @0FFA:0704 file:11EA4 item_chain_remove */
 static void item_chain_remove(ActiveObject *o)
 {
-    item_chain = chain_remove(item_chain, o);
+    plr.item_chain = chain_remove(plr.item_chain, o);
 }
 
 /* @0FFA:0724 file:11EC4 ladders_mark — атрибут лестницы (7) под всеми
@@ -254,13 +253,13 @@ void ladders_mark(void)
     ActiveObject *o;
     s16 n, r0, si, di;
     SpriteBox *b;
-    for (o = item_chain; o != NULL; o = o->parent) {
+    for (o = plr.item_chain; o != NULL; o = o->parent) {
         for (n = 0, b = &o->box[0]; o->num_bboxes > n; n++, b++) {
             b->was_vis = 0;
             r0 = PX_TROW(o->box[n].y0);
             di = r0 + 2;
             for (si = r0; si < di; si++)
-                MAP_WR(si, (u16)(o->phase_ctr * 2) + 1, 7);
+                map_wr(si, (u16)(o->phase_ctr * 2) + 1, 7);
         }
     }
 }
@@ -276,7 +275,7 @@ void ladder_item(void)
     switch (cur_state) {
     case 1:
         cur_obj->num_bboxes = 0;
-        if (player_state != 0 && player_state != 8) {
+        if (plr.player_state != 0 && plr.player_state != 8) {
             item_chain_remove(cur_obj);
             ai_result |= 1;
             break;
@@ -286,7 +285,7 @@ void ladder_item(void)
         o = cur_obj;
         o->tick_period = 2;
         o->misc = 0;
-        o->phase_ctr = cell_col;
+        o->phase_ctr = plr.cell_col;
         center_on_column(o, o->phase_ctr, sprite_w[0x18]);
         cur_obj->y_world = player_sprite_h() + player_ptr->y_world - sprite_h[0x18];
         stamp_object(cur_obj);
@@ -320,7 +319,7 @@ void ladder_item(void)
             if (blocked == 0) {
                 di = cur_obj->phase_ctr * 2 + 1;
                 for (si = r0; si < r1; si++)
-                    MAP_WR(si, (u16)di, 7);
+                    map_wr(si, (u16)di, 7);
                 break;
             }
             if (--cur_obj->num_bboxes == 0) {
@@ -409,8 +408,8 @@ void bomb(void)
         o->box[0].dx = 0;
         o->box[0].dy = 0;
         o->box[0].hitflag = 0;
-        o->x_world = (player_dir & 1 ? sprite_w[0x62] : 0) + player_x;
-        o->y_world = player_y + 5;
+        o->x_world = (plr.player_dir & 1 ? sprite_w[0x62] : 0) + plr.player_x;
+        o->y_world = plr.player_y + 5;
         o->misc = 0x32;
         o->hit_points = 0x64;
         /* fallthrough */
@@ -418,7 +417,7 @@ void bomb(void)
         o = cur_obj;
         o->misc -= o->misc != 0;
         if (o->misc == 0) {
-            queue_state(cur_obj, (farfn)bomb_blast);
+            queue_state(cur_obj, bomb_blast);
             break;
         }
         if (ATTR_PROP(attr_at(o->x_world, o->box[0].y0 + 0xA)) & 0x41)
@@ -456,7 +455,7 @@ void hidden_item(void)
         cur_obj->box[0].dy = 0;
         /* fallthrough */
     case 2:
-        vis = plr_D8B8 != 0 && (frame_no & 8);
+        vis = plr.plr_D8B8 != 0 && (frame_no & 8);
         cur_obj->box[0].sprite = vis ? cur_obj->misc + 0x27 : 0;
         cur_obj->box[0].hitflag = vis;
         break;
@@ -607,18 +606,18 @@ void level_scroll(void)
             o->misc = 1;
             o->num_bboxes = 1;
             o->vy_hi = 2;
-            queue_state(player_ptr, (farfn)k_walk);
+            queue_state(player_ptr, k_walk);
             if (!(game_D564 & 4)) {
-                demo_ptr = &demo_buf[0];
+                demo_ptr = &demo_buf;
                 demo_reset(demo_ptr);
                 game_D564 = 4;
             }
             demo_record_event(demo_ptr, 0, frame_no + 1);
             demo_record_event(demo_ptr, 0, frame_no + 2);
-            plr_D8B4 = 0;
-            plr_D8B6 = 0;
-            plr_D8BA = 0;
-            queue_state(player_ptr, (farfn)k_walk);
+            plr.plr_D8B4 = 0;
+            plr.plr_D8B6 = 0;
+            plr.plr_D8BA = 0;
+            queue_state(player_ptr, k_walk);
             break;
         case 1:
             o = cur_obj;
@@ -705,9 +704,9 @@ void sky_ice(void)
             o = cur_obj;
             if (ATTR_PROP(attr_at(o->x_world, o->y_world + 5)) & 1)
                 cur_obj->misc = 2;
-            if (cur_obj->y_world > player_y + 0x82) {
+            if (cur_obj->y_world > plr.player_y + 0x82) {
                 cur_obj->x_world += rtl_rand() & 0x1F;
-                cur_obj->y_world = player_y - 0x8C;
+                cur_obj->y_world = plr.player_y - 0x8C;
             }
             break;
         case 2:
@@ -754,13 +753,12 @@ static void sky_spawn(s16 n)
     s16 si;
     ActiveObject *o, *prev = NULL;
     for (si = 0; si < n; si++) {
-        alloc_idx = alloc_object(1);
-        o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        o = new_object(1);
         if (o == NULL)
             continue;
         o->parent = prev;
         prev = o;
-        init_active_object(o, (farfn)sky_ice, 0);
+        init_active_object(o, sky_ice, 0);
     }
     sky_chain = prev;
 }
@@ -776,7 +774,7 @@ static void sky_driver(void)
         kill_sky_chain();
         return;
     }
-    if (player_state != 3)
+    if (plr.player_state != 3)
         sky_timer++;
     if (sky_timer > 0x186 && sky_chain == NULL) {
         sky_spawn((rtl_rand() & 1) + 1);
@@ -790,32 +788,29 @@ static void sky_driver(void)
 static void fire_fireball(void)
 {
     ActiveObject *o;
-    alloc_idx = alloc_object(0);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(0);
     if (o == NULL)
         return;
-    queue_state(o, (farfn)fireball);
-    ammo_dirty = 1;
-    if (bcd_sub(ammo_digits, 2, 1))
-        weapon = 0;
+    queue_state(o, fireball);
+    plr.ammo_dirty = 1;
+    if (bcd_sub(plr.ammo_digits, 2, 1))
+        plr.weapon = 0;
 }
 
 /* @0FFA:16F9 file:12E99 fire_boomerang */
 static void fire_boomerang(void)
 {
     ActiveObject *o;
-    alloc_idx = alloc_object(0);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(0);
     if (o != NULL)
-        queue_state(o, (farfn)boomerang);
+        queue_state(o, boomerang);
 }
 
 /* @0FFA:174D file:12EED spawn_shot */
 static void spawn_shot(s16 x, s16 y, farfn h)
 {
     ActiveObject *o;
-    alloc_idx = alloc_object(0);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(0);
     if (o == NULL)
         return;
     o->x_world = x;
@@ -826,24 +821,24 @@ static void spawn_shot(s16 x, s16 y, farfn h)
 /* @0FFA:17AF file:12F4F fire_normal — 1–3 снаряда по огневой мощи */
 static void fire_normal(void)
 {
-    s32 x = (s32)((u32)motion_table[player_dir].vx << 1) +
+    s32 x = (s32)((u32)motion_table[plr.player_dir].vx << 1) +
             LONG(player_ptr->x_world, player_ptr->x_lo) + ((s32)4 << 16);
     s16 xh = (s16)(x >> 16), y = player_ptr->box[0].y0 + 7;
-    if (player_state == 3 && (inp_dir & 4))
+    if (plr.player_state == 3 && (inp_dir & 4))
         y += 0x10;
-    switch (firepower) {
+    switch (plr.firepower) {
     case 3:
-        spawn_shot(xh, y - 2, (farfn)shot_upper);
+        spawn_shot(xh, y - 2, shot_upper);
         /* fallthrough */
     case 2:
-        spawn_shot(xh, y + 2, (farfn)shot_lower);
+        spawn_shot(xh, y + 2, shot_lower);
         /* fallthrough */
     case 1:
-        spawn_shot(xh, y, (farfn)shot_straight);
+        spawn_shot(xh, y, shot_straight);
         break;
     }
-    if (player_state == 0) {
-        player_ptr->box[0].sprite = player_dir & 2 ? 0x69 : 0x71;
+    if (plr.player_state == 0) {
+        player_ptr->box[0].sprite = plr.player_dir & 2 ? 0x69 : 0x71;
         player_ptr->box[0].dy = 1;
     }
 }
@@ -856,18 +851,18 @@ static void fire(void)
     s16 cd = god_mode != 0 ? 1 : 3;
     if (shots_alive < 0xF) {
         play_sound(0);
-        switch (weapon) {
+        switch (plr.weapon) {
         case 0:
             fire_normal();
-            fire_cooldown = cd;
+            plr.fire_cooldown = cd;
             break;
         case 1:
             fire_fireball();
-            fire_cooldown = cd;
+            plr.fire_cooldown = cd;
             break;
         case 2:
             fire_boomerang();
-            fire_cooldown = 1000;
+            plr.fire_cooldown = 1000;
             break;
         }
     }
@@ -879,24 +874,24 @@ static void fire(void)
 static void try_jump(void)
 {
     s16 di = inp_prev_mask & 0xF, si = inp_mask & 0xF;
-    if (!(si & 8) || (di & 8) || player_state == 1)
+    if (!(si & 8) || (di & 8) || plr.player_state == 1)
         return;
     if (attr_head() == 7) {
         item_set_active(0xF, 0);
-        plr_D8BA = 0;
-        ladder_col = cell_col;
+        plr.plr_D8BA = 0;
+        ladder_col = plr.cell_col;
         ladder_grab();
         return;
     }
-    if (player_state == 3)
+    if (plr.player_state == 3)
         return;
-    player_ptr->vy_hi = -4 - (plr_D8B4 != 0 ? 2 : 0);
+    player_ptr->vy_hi = -4 - (plr.plr_D8B4 != 0 ? 2 : 0);
     player_ptr->vy_lo = 0;
     player_ptr->ay_hi = 0;
     player_ptr->ay_lo = 0x5000;
     set_player_state(1);
-    karnov_mode = 0;
-    queue_state(player_ptr, (farfn)k_jump);
+    plr.karnov_mode = 0;
+    queue_state(player_ptr, k_jump);
 }
 
 /* @0FFA:19AB file:1314B try_crouch — по нажатию «вниз»: на лестнице —
@@ -904,14 +899,14 @@ static void try_jump(void)
 static void try_crouch(void)
 {
     s16 di = inp_prev_mask & 0xF, si = inp_mask & 0xF;
-    if (!(si & 4) || (di & 4) || player_state == 1)
+    if (!(si & 4) || (di & 4) || plr.player_state == 1)
         return;
-    if (!(current_level == 9 && goal_idx >= 0) && attr_feet() == 7) {
-        ladder_col = cell_col;
+    if (!(plr.current_level == 9 && goal_idx >= 0) && attr_feet() == 7) {
+        ladder_col = plr.cell_col;
         ladder_grab_down();
         return;
     }
-    queue_state(player_ptr, (farfn)k_crouch);
+    queue_state(player_ptr, k_crouch);
 }
 
 /* @0FFA:1A1A file:131BA PRE_KARNOV — фаза 5: предметы, левая граница
@@ -921,34 +916,34 @@ void PRE_KARNOV(void)
 {
     s16 si, di, upd;
     items_tick();
-    si = (s16)((player_x - 0xB9) >> tile_shift);
-    if (current_level != 7 && current_level != 9 && si > cam_rect[0] &&
+    si = (s16)((plr.player_x - 0xB9) >> tile_shift);
+    if (plr.current_level != 7 && plr.current_level != 9 && si > cam_rect[0] &&
         cam_rect[2] - si > view_rect[2] - view_rect[0])
         cam_rect[0] = si;
     di = (s16)((cam_rect[0] + vb_view_bytes) << tile_shift);
     if (player_ptr->x_world < di) {
         player_ptr->x_world = di;
-        plr_D8AE |= 2;
+        plr.plr_D8AE |= 2;
     } else if (player_ptr->x_world + sprite_w[0x62] > (s16)(world_rect[2] << tile_shift)) {
         player_ptr->x_world = (s16)(world_rect[2] << tile_shift) - 0xC;
-        plr_D8AE |= 1;
+        plr.plr_D8AE |= 1;
     }
     if (player_ptr->y_world < 0)
         player_ptr->y_world = 0;
-    move_with_collision(&coll[0], &player_ptr->box[0], motion_table[inp_dir & 3].vx,
+    move_with_collision(&plr.coll, &player_ptr->box[0], motion_table[inp_dir & 3].vx,
                         LONG(player_ptr->vy_hi, player_ptr->vy_lo));
-    if (coll[0].any != 0) {
+    if (plr.coll.any != 0) {
         cur_obj = player_ptr;
         cur_state = 3;
         ai_dispatch();
-        coll[0].any = 0;
+        plr.coll.any = 0;
     } else {
-        plr_D8AE = 0;
+        plr.plr_D8AE = 0;
     }
     upd = 1;
-    switch (player_state) {
+    switch (plr.player_state) {
     case 1:
-        if (karnov_mode == 0 || karnov_mode == 1)
+        if (plr.karnov_mode == 0 || plr.karnov_mode == 1)
             upd = 0;
         break;
     case 6: case 7: case 9:
@@ -956,9 +951,9 @@ void PRE_KARNOV(void)
         break;
     }
     if (upd && player_ptr->y_world + 0x14 <= world_rect[3])
-        player_y = player_ptr->box[0].y0;
-    player_x = player_ptr->x_world;
-    switch (player_state) {
+        plr.player_y = player_ptr->box[0].y0;
+    plr.player_x = player_ptr->x_world;
+    switch (plr.player_state) {
     case 0: case 9:
         try_crouch();
         /* fallthrough */
@@ -966,7 +961,7 @@ void PRE_KARNOV(void)
         try_jump();
         break;
     }
-    if (current_level != 9)
+    if (plr.current_level != 9)
         sky_driver();
 }
 
@@ -982,34 +977,34 @@ static void timer_dec(s16 *t, s16 *warn)
 void POST_KARNOV(void)
 {
     s16 warn, old5;
-    if (player_state != 6) {
-        if (fire_cooldown != 0)
-            fire_cooldown--;
+    if (plr.player_state != 6) {
+        if (plr.fire_cooldown != 0)
+            plr.fire_cooldown--;
         warn = 0;
-        old5 = plr_D8B8;
-        timer_dec(&plr_D8B4, &warn);
-        timer_dec(&plr_D8B8, &warn);
-        timer_dec(&plr_D8B6, &warn);
-        if (old5 != 0 && plr_D8B8 == 0)
+        old5 = plr.plr_D8B8;
+        timer_dec(&plr.plr_D8B4, &warn);
+        timer_dec(&plr.plr_D8B8, &warn);
+        timer_dec(&plr.plr_D8B6, &warn);
+        if (old5 != 0 && plr.plr_D8B8 == 0)
             item_set_active(0xC, 0);
         if (warn != 0 && (frame_no & 0xF) == 0)
             play_sound(9);
-        if (inp_prev_fire == 0 && weapon != 2)
-            fire_cooldown = 0;
-        if (inp_fire != 0 && fire_cooldown == 0 && player_state != 0xA)
+        if (inp_prev_fire == 0 && plr.weapon != 2)
+            plr.fire_cooldown = 0;
+        if (inp_fire != 0 && plr.fire_cooldown == 0 && plr.player_state != 0xA)
             fire();
     }
-    if (coll[0].any == 0)
-        plr_D8AE = 0;
-    cell_col = PX_COL((s16)((sprite_w[player_ptr->box[0].sprite] >> 1) +
+    if (plr.coll.any == 0)
+        plr.plr_D8AE = 0;
+    plr.cell_col = PX_COL((s16)((sprite_w[player_ptr->box[0].sprite] >> 1) +
                                player_ptr->x_world) >> tile_shift);
-    cell_row_head = PX_TROW(player_ptr->y_world);
-    cell_row_feet = PX_TROW(player_sprite_h() + player_ptr->y_world);
-    if (attr_feet() == 5 && player_state != 6)
+    plr.cell_row_head = PX_TROW(player_ptr->y_world);
+    plr.cell_row_feet = PX_TROW(player_sprite_h() + player_ptr->y_world);
+    if (attr_feet() == 5 && plr.player_state != 6)
         SETLONG(player_ptr->vx_hi, player_ptr->vx_lo,
                 LONG(player_ptr->vx_hi, player_ptr->vx_lo) - 0x8000);
-    if (!(current_level == 9 && goal_idx >= 0)) {
-        switch (player_state) {
+    if (!(plr.current_level == 9 && goal_idx >= 0)) {
+        switch (plr.player_state) {
         case 1: case 5: case 6: case 7:
             break;
         case 3:
@@ -1021,7 +1016,7 @@ void POST_KARNOV(void)
         }
     }
     camera_update();
-    hud_score(score_bcd);
-    if (player_ptr->x_world > respawn_D8CC)
-        respawn_D8CC = player_ptr->x_world;
+    hud_score(plr.score_bcd);
+    if (player_ptr->x_world > plr.respawn_D8CC)
+        plr.respawn_D8CC = player_ptr->x_world;
 }

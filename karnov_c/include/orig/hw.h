@@ -1,30 +1,12 @@
-/* orig/hw.h — замены железа и BIOS/DOS для перевода (не из оригинала).
- * Значения, которые оригинал узнаёт у машины, взяты из эталонного
- * DOSBox (machine=ega, cputype=386), на котором снимается DSDUMP. */
+/* orig/hw.h — замены железа и BIOS для перевода (не из оригинала).
+ * Значения, которые оригинал узнаёт у машины, — как в DOSBox
+ * (machine=ega, cputype=386). */
 #ifndef ORIG_HW_H
 #define ORIG_HW_H
 #include "orig/ds.h"
 
-/* Память ниже DS как у эталона (для чтений по мусорным far-указателям):
- * 0..1A2F — снимок DOSBox, далее образ KARNOV.EXE (если найден) с
- * рабочими данными сегментов кода. См. tools/gen_lowmem.py. */
-#define HW_LOAD_LIN 0x1A30u
-#define HW_DS_LIN   0x1F3C0u
-#define HW_HEAP_LIN 0x2DE30u
-typedef struct { u32 off; u8 n; u8 b[8]; } HwPatch;
-extern const u8 hw_lowmem_init[HW_LOAD_LIN];
-extern const HwPatch hw_code_patch[];
-void hw_lowmem_reset(void);
-/* BP и SI вызывающего обработчик ai_dispatch в оригинале (смещения стека
- * SS=2B3F); их читает ai_t52 как аргументы. 0 — неизвестны. */
-extern u16 hw_ai_bp;
-extern s16 hw_ai_si;
-u8   hw_peekb(u16 seg, u16 off);
-u16  hw_peekw(u16 seg, u16 off);
-/* p[i] для far-указателя на s16; NULL — чтение с 0000:0000 (таблица
- * векторов), как в оригинале */
-#define FAR_W(p, i) ((p) != NULL ? (p)[i] : (s16)hw_peekw(0, (u16)((i) * 2)))
-void hw_pokeb(u16 seg, u16 off, u8 v);
+/* Данные BIOS: оборудование (0040:0010) и флаги клавиатуры (0040:0017). */
+extern u8 bios_equip, bios_kbflags;
 
 /* INT 10h */
 void hw_int10_set_mode(u8 mode);
@@ -39,25 +21,20 @@ u16  hw_int16_read(void);
 u16  hw_int16_peek(void);
 /* Положить код в буфер клавиатуры BIOS (порт: из событий SDL). */
 void hw_kbd_push(u16 code);
-/* Джойстик за портом 0x201: отсчёты осей за n опросов и кнопки. */
-void hw_joystick(s16 n, s16 *x, s16 *y, u8 *btn);
-
-void hw_exit(int code);
+/* Джойстик за портом 0x201: отсчёты осей за 255 опросов и кнопки. */
+void hw_joystick(s16 *x, s16 *y, u8 *btn);
 
 /* Видеопамять: A000 — плоскости EGA через логику карты, B800 — CGA. */
 void hw_vmem_write(u16 seg, u16 off, u8 v);
 u8   hw_vmem_read(u16 seg, u16 off);
 void hw_vmem_fill(u16 seg, u16 off, u8 v, u16 n);
 void hw_vmem_copy(u16 dseg, u16 doff, u16 sseg, u16 soff, u16 n);
-void hw_video_reset(void);
 void hw_video_present(void);
-int  hw_video_save_ppm(const char *path);
 int  hw_video_port_out(u16 port, u8 v);
 int  hw_video_port_in(u16 port, u8 *v);
 int  hw_sound_port_out(u16 port, u8 v);
 int  hw_sound_port_in(u16 port, u8 *v);
 
-#endif
 
 /* Порты: PIT (0x40..0x43), динамик (0x61), PIC (0x20). */
 void hw_out(u16 port, u8 v);
@@ -72,12 +49,4 @@ void  hw_setvect(u8 n, farfn f);
  * в реальном времени сначала выдерживает период PIT. */
 void hw_wait_tick(void);
 
-/* Обычная память 640 КБ (линейные адреса реального режима): far-куча
- * Turbo-C. Область DS (DS_LIN..+64К) сюда не входит — она в реестре. */
-#define HW_CONV_SIZE 0xA0000
-#define DS_LIN       ((u32)DS_SEG * 16)
-extern u8 hw_conv[HW_CONV_SIZE];
-/* Блок far-кучи: seg:off указателя от farmalloc (смещение 4..19). */
-u16  hw_heap_seg(const u8 *p);
-/* (seg + 1):0000 — начало следующего параграфа после seg:off. */
-u8  *hw_next_paragraph(u8 *p);
+#endif

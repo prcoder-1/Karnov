@@ -4,23 +4,14 @@
 #include "orig/ds.h"
 
 typedef struct {
-    int verbose;
-    int headless;
+    int headless;           /* без окна и звука */
     int fast;               /* без выдержки реального времени */
     int no_audio;
     int frames;             /* >0: выйти после N кадров главного цикла */
-    int shot[16], nshot;
-    int demo_level;         /* --demo-level k (тест): уровень старта, как патч EXE; -1 нет */    /* --shot N: снимок shot_N.ppm в кадре N */
-    const char *dsdump;     /* файл покадрового дампа DS */
 } PortOpt;
 extern PortOpt port_opt;
 
-int ds_check(void);
-/* Непереведённая функция оригинала: печать и аварийный выход. */
-void port_todo(const char *what);
-/* То же без остановки: печать при первом вызове. */
-void port_todo_once(const char *what);
-/* Начало кадра главного цикла (место хука DSDUMP.EXE): дамп DS. */
+/* Начало кадра главного цикла. */
 void port_frame_hook(void);
 /* События SDL (клавиатура, закрытие окна). */
 void port_pump_events(void);

@@ -1,9 +1,7 @@
 /* Модуль 0x161F (file 0x179F0) — AI-типы 39–42: лента, капли фонтана,
  * фонтан, прыгун со стрельбой. */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
-#define ABS16(v) ((v) > 0 ? (v) : -(v))
 
 /* @161F:0002 file:179F2 ai_t39 — лента из 6 спрайтов 0x103..0x106,
  * анимируется сдвигом кадра (misc 1 или 3 — направление) */
@@ -44,11 +42,10 @@ static void t42_spray(void)
     di = cur_obj->x_world;
     t = cur_obj->y_world;
     for (si = 0; si < 5; si++) {
-        alloc_idx = alloc_object(1);
-        o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+        o = new_object(1);
         if (o == NULL)
             continue;
-        init_active_object(o, (farfn)ai_t41, 0);
+        init_active_object(o, ai_t41, 0);
         o->x_world = di + 0xC;
         tx = o->x_world + (si - 2) * 0x12;
         o->y_world = (cur_obj->phase != 0 ? 5 : 0xF) + t;

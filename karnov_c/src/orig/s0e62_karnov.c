@@ -3,20 +3,20 @@
  *
  * Состояние игрока — обработчик объекта игрока (ставится queue_state).
  * В каждом: cur_state 1 — вход, 2 — ход (ввод → скорость), 3 — разбор
- * упоров coll после move_with_collision, 4 — ранен (гибель).
+ * упоров plr.coll после move_with_collision, 4 — ранен (гибель).
  * Атрибуты клеток в упорах: 1, 2 — пусто, 3, 4 — стена, 5 — ступень,
  * 6 — склон, 7 — лестница, 8 — вода, 9 — батут. */
+#include <string.h>
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 /* @0E62:0007 file:0FE27 cam_hist_fill */
 static void cam_hist_fill(void)
 {
     s16 si;
     for (si = 0; si < 4; si++) {
-        cam_hist[si * 2] = player_x;
-        cam_hist[si * 2 + 1] = player_y;
+        cam_hist[si * 2] = plr.player_x;
+        cam_hist[si * 2 + 1] = plr.player_y;
     }
 }
 
@@ -41,7 +41,7 @@ void camera_update(void)
         sx += cam_hist[si * 2];
         sy += cam_hist[si * 2 + 1] << di;
     }
-    if (player_state == 3 || level_mode == 1)
+    if (plr.player_state == 3 || level_mode == 1)
         cx = player_ptr->x_world & 0xFFFC;
     else
         cx = sx >> 2;
@@ -50,9 +50,9 @@ void camera_update(void)
         cam_hist[si * 2] = cam_hist[(si + 1) * 2];
         cam_hist[si * 2 + 1] = cam_hist[(si + 1) * 2 + 1];
     }
-    cam_hist[6] = player_x;
-    cam_hist[7] = player_y;
-    rtl_fmemcpy(prev_view, view_rect, 8);
+    cam_hist[6] = plr.player_x;
+    cam_hist[7] = plr.player_y;
+    memcpy(prev_view, view_rect, 8);
     if (level_mode == 2)
         cy &= 0xFFFE;
     view_rect[0] = (s16)((cx - cam_dx) >> tile_shift) - vb_view_bytes;
@@ -64,14 +64,14 @@ void camera_update(void)
     clip_rect[1] = view_rect[1] + vid_B82E;
     clip_rect[2] = view_rect[2] - vb_stride;
     clip_rect[3] = view_rect[3] - vid_B826;
-    video_offset = vb_row_off[clip_rect[1]] + clip_rect[0];
+    video_offset = VB_ROW(clip_rect[1]) + clip_rect[0];
 }
 
 /* @0E62:01E7 file:10007 set_player_state — кроме состояния 9 */
 void set_player_state(s16 s)
 {
-    if (player_state != 9)
-        player_state = s;
+    if (plr.player_state != 9)
+        plr.player_state = s;
 }
 
 /* @0E62:01F9 file:10019 level_enter — точка возрождения по региону,
@@ -82,53 +82,53 @@ void level_enter(void)
     ObjRegion *r;
     EnemySpawn *e;
     sprite_phase_on = 1;
-    respawn_x += 0xBB;
+    plr.respawn_x += 0xBB;
     for (si = 0, r = regions; si < region_count; si++, r++) {
-        if (r->x0 > respawn_D8CC || r->x1 <= respawn_x || r->x0 > respawn_x ||
-            r->y1 <= respawn_y || r->y0 > respawn_y)
+        if (r->x0 > plr.respawn_D8CC || r->x1 <= plr.respawn_x || r->x0 > plr.respawn_x ||
+            r->y1 <= plr.respawn_y || r->y0 > plr.respawn_y)
             continue;
-        player_spawn[0].wx = regions[si].spawn_x;
-        player_spawn[0].wy = regions[si].spawn_y;
-        if (current_level == 5 && si == 1)
+        player_spawn.wx = regions[si].spawn_x;
+        player_spawn.wy = regions[si].spawn_y;
+        if (plr.current_level == 5 && si == 1)
             on_ground = 0;
         si = 0x3E7;
     }
-    player_ptr = spawn_active_object(&player_spawn[0]);
+    player_ptr = spawn_active_object(&player_spawn);
     if (on_ground == 0)
         player_ptr->vy_hi = 1;
-    coll[0].masks = NULL;
+    plr.coll.masks = NULL;
     if (on_ground)
         place_on_ground(player_ptr, 0x62, 0);
     else
         k_start_state3();
     update_bboxes(player_ptr);
-    player_x = player_ptr->x_world;
-    player_y = player_ptr->y_world;
+    plr.player_x = player_ptr->x_world;
+    plr.player_y = player_ptr->y_world;
     cam_dx = 0x1E;
     cam_dy = 0x46;
-    sky_x0 = player_x;
+    sky_x0 = plr.player_x;
     sky_timer = 0;
     cam_hist_fill();
     for (si = 0, e = spawns; si < spawn_count; si++, e++)
         e->spawned = e->x + e->rx < player_ptr->x_world;
-    player_state = 0xA;
-    plr_D8AE = 0;
-    player_dir = 1;
-    weapon = 0;
-    fire_cooldown = 0;
-    plr_D8B4 = 0;
-    plr_D8B6 = 0;
-    plr_D8B8 = 0;
-    plr_D8BA = 0;
+    plr.player_state = 0xA;
+    plr.plr_D8AE = 0;
+    plr.player_dir = 1;
+    plr.weapon = 0;
+    plr.fire_cooldown = 0;
+    plr.plr_D8B4 = 0;
+    plr.plr_D8B6 = 0;
+    plr.plr_D8B8 = 0;
+    plr.plr_D8BA = 0;
     player_ptr->hit_points = 5;
     shots_alive = 0;
-    item_chain = NULL;
+    plr.item_chain = NULL;
     for (si = 0; si < 4; si++)
-        item_active[si] = 0;
-    bcd_set(ammo_digits, 2, 0);
-    ammo_dirty = 1;
-    bcd_set(time_digits, 3, level_time[current_level]);
-    hurry = 0;
+        plr.item_active[si] = 0;
+    bcd_set(plr.ammo_digits, 2, 0);
+    plr.ammo_dirty = 1;
+    bcd_set(plr.time_digits, 3, level_time[plr.current_level]);
+    plr.hurry = 0;
     hud_options();
     hud_redraw();
     camera_update();
@@ -144,16 +144,24 @@ void level_enter(void)
     }
 }
 
+/* следующее состояние игрока — сразу, в этом же такте */
+static void k_switch(farfn h)
+{
+    queue_state(cur_obj, h);
+    handoff_obj = cur_obj;
+    ai_result |= 8;
+}
+
 /* @0E62:0486 file:102A6 k_wall — упор k в стену: встать вплотную,
- * запретить направление в plr_D8AE */
+ * запретить направление в plr.plr_D8AE */
 static void k_wall(s16 k)
 {
-    s16 d = coll[0].dir[k], si = coll[0].x[k], di = 2;
+    s16 d = plr.coll.dir[k], si = plr.coll.x[k], di = 2;
     if (d == 1 || d == 2) {
         si -= sprite_w[cur_obj->box[0].sprite];
         di = 1;
     }
-    plr_D8AE |= di;
+    plr.plr_D8AE |= di;
     cur_obj->frame_idx = 0;
     cur_obj->x_world = si;
     cur_obj->vx_hi = 0; cur_obj->vx_lo = 0;
@@ -164,46 +172,35 @@ static void k_wall(s16 k)
 /* @0E62:0502 file:10322 k_land — на землю: присед (вниз) или ходьба */
 static void k_land(s16 k)
 {
-    coll[0].n = 0;
-    if (inp_dir & 4)
-        queue_state(cur_obj, (farfn)k_crouch);
-    else
-        queue_state(cur_obj, (farfn)k_walk);
+    plr.coll.n = 0;
+    k_switch(inp_dir & 4 ? k_crouch : k_walk);
     cur_obj->frame_idx = 2;
-    cur_obj->y_world = coll[0].y[k] - 0x1A;
+    cur_obj->y_world = plr.coll.y[k] - 0x1A;
     update_bboxes(cur_obj);
-    handoff_obj = cur_obj;
-    ai_result |= 8;
 }
 
 /* @0E62:0585 file:103A5 k_bounce_start — батут */
 static void k_bounce_start(s16 k)
 {
-    queue_state(cur_obj, (farfn)k_bounce);
-    cur_obj->y_world = coll[0].y[k];
-    handoff_obj = cur_obj;
-    ai_result |= 8;
+    k_switch(k_bounce);
+    cur_obj->y_world = plr.coll.y[k];
 }
 
 /* @0E62:05C0 file:103E0 k_start_state3 */
 void k_start_state3(void)
 {
-    queue_state(cur_obj, (farfn)k_state3);
-    handoff_obj = cur_obj;
-    ai_result |= 8;
+    k_switch(k_state3);
 }
 
 /* @0E62:05EF file:1040F k_fall — сорваться: прыжок в фазе 3 с ay 0.3125 */
 static void k_fall(s16 k)
 {
-    queue_state(cur_obj, (farfn)k_jump);
-    handoff_obj = cur_obj;
-    ai_result |= 8;
-    karnov_mode = 3;
+    k_switch(k_jump);
+    plr.karnov_mode = 3;
     cur_obj->y_world += 4;
     cur_obj->vy_hi = 0; cur_obj->vy_lo = 0;
     cur_obj->ay_hi = 0; cur_obj->ay_lo = 0x5000;
-    cur_obj->x_world += player_dir & 1 ? 1 : -2;
+    cur_obj->x_world += plr.player_dir & 1 ? 1 : -2;
     SETLONG(cur_obj->vx_hi, cur_obj->vx_lo, LONG(cur_obj->vx_hi, cur_obj->vx_lo) >> 3);
     cur_obj->ax_hi = 0; cur_obj->ax_lo = 0;
     (void)k;
@@ -213,12 +210,12 @@ static void k_fall(s16 k)
  * место гибели — точка возрождения */
 void karnov_die(s16 s, s16 mode)
 {
-    queue_state(player_ptr, (farfn)karnov_death);
+    queue_state(player_ptr, karnov_death);
     set_player_state(s);
-    karnov_mode = mode;
-    respawn_x = player_ptr->x_world;
-    respawn_y = player_ptr->y_world;
-    firepower = 1;
+    plr.karnov_mode = mode;
+    plr.respawn_x = player_ptr->x_world;
+    plr.respawn_y = player_ptr->y_world;
+    plr.firepower = 1;
 }
 
 /* @0E62:06C6 file:104E6 die_water */
@@ -241,13 +238,13 @@ void die_hit(void)
 /* @0E62:0712 file:10532 attr_head */
 s16 attr_head(void)
 {
-    return map_attr(cell_col, cell_row_head);
+    return map_attr(plr.cell_col, plr.cell_row_head);
 }
 
 /* @0E62:0727 file:10547 attr_feet */
 s16 attr_feet(void)
 {
-    return map_attr(cell_col, cell_row_feet);
+    return map_attr(plr.cell_col, plr.cell_row_feet);
 }
 
 /* @0E62:073C file:1055C ladder_kind — что под ногами (вниз) или над головой
@@ -273,7 +270,7 @@ void ladder_grab(void)
 {
     center_on_column(player_ptr, ladder_col, sprite_w[0x78]);
     player_ptr->x_world--;
-    queue_state(player_ptr, (farfn)k_climb);
+    queue_state(player_ptr, k_climb);
 }
 
 /* @0E62:07FF file:1061F ladder_grab_down */
@@ -289,9 +286,9 @@ void ladder_grab_down(void)
 /* @0E62:082B file:1064B ladder_exit_top */
 static void ladder_exit_top(void)
 {
-    queue_state(player_ptr, (farfn)k_walk);
+    queue_state(player_ptr, k_walk);
     player_ptr->throttle = 8;
-    snap_to_ground(player_ptr, 0x62, 0x80, cell_col, cell_row_head - 2);
+    snap_to_ground(player_ptr, 0x62, 0x80, plr.cell_col, plr.cell_row_head - 2);
     player_ptr->vy_hi = 0; player_ptr->vy_lo = 0;
     player_ptr->y_world += 2;
     player_ptr->box[0].dy = 0x1A;
@@ -303,7 +300,7 @@ static void ladder_exit_top(void)
 static void boost_x(void)
 {
     s32 v;
-    if (plr_D8B4 == 0)
+    if (plr.plr_D8B4 == 0)
         return;
     v = LONG(cur_obj->vx_hi, cur_obj->vx_lo);
     SETLONG(cur_obj->vx_hi, cur_obj->vx_lo, (v >> 1) + v);
@@ -313,7 +310,7 @@ static void boost_x(void)
 static void boost_y(void)
 {
     s32 v;
-    if (plr_D8B4 == 0)
+    if (plr.plr_D8B4 == 0)
         return;
     v = LONG(cur_obj->vy_hi, cur_obj->vy_lo);
     SETLONG(cur_obj->vy_hi, cur_obj->vy_lo, (v >> 1) + v);
@@ -349,16 +346,14 @@ static void slope_y(void)
 static void slope_land(void)
 {
     s16 si;
-    coll[0].n = 0;
-    coll[0].any = 0;
-    queue_state(cur_obj, (farfn)k_slope);
-    handoff_obj = cur_obj;
-    ai_result |= 8;
+    plr.coll.n = 0;
+    plr.coll.any = 0;
+    k_switch(k_slope);
     if (player_ptr->vx_hi == 0)
         si = 0;
     else
         si = player_ptr->vx_hi > 0 ? 1 : -1;
-    snap_to_ground(player_ptr, 0x62, 0x41, cell_col + si, cell_row_head);
+    snap_to_ground(player_ptr, 0x62, 0x41, plr.cell_col + si, plr.cell_row_head);
     player_ptr->vy_hi = 0; player_ptr->vy_lo = 0;
     player_ptr->ay_hi = 0; player_ptr->ay_lo = 0;
     slope_y();
@@ -374,18 +369,18 @@ static void ladder_bottom(void)
     player_ptr->y_world += 0xA;
     switch (attr_feet()) {
     case 0: case 4:
-        queue_state(player_ptr, (farfn)k_walk);
-        snap_to_ground(player_ptr, 0x62, 1, cell_col, cell_row_head);
+        queue_state(player_ptr, k_walk);
+        snap_to_ground(player_ptr, 0x62, 1, plr.cell_col, plr.cell_row_head);
         break;
     case 5:
-        queue_state(player_ptr, (farfn)k_walk);
-        snap_to_ground(player_ptr, 0x62, 0x20, cell_col, cell_row_head);
+        queue_state(player_ptr, k_walk);
+        snap_to_ground(player_ptr, 0x62, 0x20, plr.cell_col, plr.cell_row_head);
         break;
     case 6:
         slope_land();
         break;
     }
-    for (o = item_chain; o != NULL; o = o->parent) {
+    for (o = plr.item_chain; o != NULL; o = o->parent) {
         si = player_ptr->x_world - o->x_world;
         if (si <= 0)
             si = -si;
@@ -397,11 +392,6 @@ static void ladder_bottom(void)
             item_pickup(0);
         }
     }
-}
-
-/* @0E62:0C44 file:10A64 k_nop */
-void k_nop(void)
-{
 }
 
 /* @0E62:0C49 file:10A69 k_appear — AI-тип 1: появление игрока */
@@ -425,8 +415,8 @@ void k_appear(void)
         }
         if (cur_obj->active == 0)
             break;
-        if (cur_obj->frame_idx == FAR_W(cur_obj->state_anim, 0) - 1)
-            queue_state(cur_obj, (farfn)k_walk);
+        if (cur_obj->frame_idx == anim_frames(cur_obj) - 1)
+            queue_state(cur_obj, k_walk);
         ai_result |= 4;
         break;
     }
@@ -439,32 +429,32 @@ void k_walk(void)
     case 1:
         cur_obj->state_list = sl_1500;
         set_player_state(0);
-        coll[0].masks = an_1510;
+        plr.coll.masks = an_1510;
         cur_obj->box[0].hitflag = 1;
         /* fallthrough */
     case 2:
-        k_i = ~plr_D8AE & inp_dir & 3;
+        k_i = ~plr.plr_D8AE & inp_dir & 3;
         if (k_i == 0)
             cur_obj->frame_idx = 0;
         set_motion(k_i);
         boost_x();
         dir_latch_release();
-        pending_state = player_dir & 1;
+        pending_state = plr.player_dir & 1;
         ai_result |= 6;
         break;
     case 3:
-        for (k_i = 0; k_i < coll[0].n; k_i++) {
-            switch (coll[0].attr[k_i]) {
+        for (k_i = 0; k_i < plr.coll.n; k_i++) {
+            switch (plr.coll.attr[k_i]) {
             case 1: case 2:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     k_fall(k_i);
                 break;
             case 3: case 4:
-                if (coll[0].dir[k_i] != 4)
+                if (plr.coll.dir[k_i] != 4)
                     k_wall(k_i);
                 break;
             case 6:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     slope_land();
                 break;
             case 8:
@@ -486,12 +476,12 @@ void k_slope(void)
     switch (cur_state) {
     case 1:
         set_player_state(0);
-        coll[0].masks = an_151A;
+        plr.coll.masks = an_151A;
         cur_obj->box[0].hitflag = 1;
         cur_obj->state_list = sl_1500;
         /* fallthrough */
     case 2:
-        k_i = ~plr_D8AE & inp_dir & 3;
+        k_i = ~plr.plr_D8AE & inp_dir & 3;
         o = cur_obj;
         SETLONG(o->vx_hi, o->vx_lo, motion_table[k_i].vx);
         o->ax_hi = 0; o->ax_lo = 0;
@@ -504,22 +494,22 @@ void k_slope(void)
         SETLONG(cur_obj->vy_hi, cur_obj->vy_lo,
                 LONG(cur_obj->vx_hi, cur_obj->vx_lo) * 10 / 16);
         dir_latch_release();
-        pending_state = player_dir & 1;
+        pending_state = plr.player_dir & 1;
         ai_result |= 6;
         break;
     case 3:
-        for (k_i = 0; k_i < coll[0].n; k_i++) {
-            switch (coll[0].attr[k_i]) {
+        for (k_i = 0; k_i < plr.coll.n; k_i++) {
+            switch (plr.coll.attr[k_i]) {
             case 0:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     k_land(k_i);
                 break;
             case 2:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     k_fall(k_i);
                 break;
             case 3: case 4:
-                if (coll[0].dir[k_i] != 4)
+                if (plr.coll.dir[k_i] != 4)
                     k_wall(k_i);
                 break;
             case 8:
@@ -547,11 +537,9 @@ void k_crouch(void)
         /* fallthrough */
     case 2:
         if (inp_dir & 4) {
-            cur_obj->box[0].sprite = player_dir & 1 ? 0x6F : 0x67;
+            cur_obj->box[0].sprite = plr.player_dir & 1 ? 0x6F : 0x67;
         } else {
-            queue_state(cur_obj, (farfn)k_walk);
-            handoff_obj = cur_obj;
-            ai_result |= 8;
+            k_switch(k_walk);
         }
         if (attr_feet() == 5)
             SETLONG(cur_obj->x_world, cur_obj->x_lo,
@@ -570,7 +558,7 @@ void k_climb(void)
     case 1:
         cur_obj->tick_period = 2;
         set_player_state(5);
-        coll[0].masks = an_1546;
+        plr.coll.masks = an_1546;
         cur_obj->box[0].hitflag = 1;
         cur_obj->state_list = sl_153E;
         pending_state = 0;
@@ -580,7 +568,7 @@ void k_climb(void)
         k_kind = ladder_kind();
         switch (k_kind) {
         case 0: case 1:
-            k_i = (k_kind == 1 ? (s16)0xFFF7 : (s16)0xFFFF) & ~plr_D8AE & inp_dir & 0xC;
+            k_i = (k_kind == 1 ? (s16)0xFFF7 : (s16)0xFFFF) & ~plr.plr_D8AE & inp_dir & 0xC;
             if (k_i == 0)
                 cur_obj->frame_idx = 0;
             set_motion(k_i);
@@ -617,47 +605,47 @@ void k_jump(void)
     switch (cur_state) {
     case 1:
         set_player_state(1);
-        jump_y0 = player_y;
-        coll[0].masks = an_1580;
+        plr.jump_y0 = plr.player_y;
+        plr.coll.masks = an_1580;
         inp_dir_changed = 1;
         cur_obj->state_list = sl_1560;
-        pending_state = player_dir & 1;
+        pending_state = plr.player_dir & 1;
         ai_result |= 6;
         /* fallthrough */
     case 2:
-        if (karnov_mode == 3) {
-            pending_state = (player_dir & 1) + 2;
+        if (plr.karnov_mode == 3) {
+            pending_state = (plr.player_dir & 1) + 2;
             ai_result |= 6;
         } else if (inp_dir_changed != 0) {
-            k_i = ~plr_D8AE & inp_dir & 3;
+            k_i = ~plr.plr_D8AE & inp_dir & 3;
             m = &motion_table[k_i];
             o = cur_obj;
             SETLONG(o->vx_hi, o->vx_lo, m->vx);
             SETLONG(o->ax_hi, o->ax_lo, m->ax);
             boost_x();
-            pending_state = player_dir & 1;
+            pending_state = plr.player_dir & 1;
             ai_result |= 6;
         }
-        if (karnov_mode != 2 && karnov_mode != 3 &&
-            cur_obj->y_world + cur_obj->vy_hi > jump_y0 + 7) {
-            karnov_mode = 2;
+        if (plr.karnov_mode != 2 && plr.karnov_mode != 3 &&
+            cur_obj->y_world + cur_obj->vy_hi > plr.jump_y0 + 7) {
+            plr.karnov_mode = 2;
             break;
         }
-        if (karnov_mode != 0)
+        if (plr.karnov_mode != 0)
             break;
         if (LONG(cur_obj->vy_hi, cur_obj->vy_lo) > 0)
-            karnov_mode = 1;
+            plr.karnov_mode = 1;
         break;
     case 3:
-        for (k_i = 0; k_i < coll[0].n; k_i++) {
-            switch (coll[0].attr[k_i]) {
+        for (k_i = 0; k_i < plr.coll.n; k_i++) {
+            switch (plr.coll.attr[k_i]) {
             case 0: case 5:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     k_land(k_i);
                 break;
             case 1:
                 if (player_ptr->vy_hi < 0 &&
-                    (coll[0].dir[k_i] == 0 || coll[0].dir[k_i] == 1)) {
+                    (plr.coll.dir[k_i] == 0 || plr.coll.dir[k_i] == 1)) {
                     cur_obj->vy_hi = 0;
                     cur_obj->vy_lo = 0;
                 }
@@ -666,18 +654,18 @@ void k_jump(void)
                 k_wall(k_i);
                 break;
             case 4:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     k_land(k_i);
                 else
                     k_wall(k_i);
                 break;
             case 6:
-                if (coll[0].dir[k_i] == 4)
+                if (plr.coll.dir[k_i] == 4)
                     slope_land();
                 break;
             case 7:
-                if (coll[0].dir[k_i] == 4 &&
-                    attr_at(coll[0].x[k_i], coll[0].y[k_i] - 10) == 2)
+                if (plr.coll.dir[k_i] == 4 &&
+                    attr_at(plr.coll.x[k_i], plr.coll.y[k_i] - 10) == 2)
                     k_land(k_i);
                 break;
             case 8:
@@ -696,7 +684,7 @@ void k_jump(void)
 }
 
 /* @0E62:13C6 file:111E6 k_fly — AI-тип 2 и предмет 6: свободный полёт,
- * пока plr_D8B6 > 0 */
+ * пока plr.plr_D8B6 > 0 */
 void k_fly(void)
 {
     s32 v;
@@ -704,32 +692,32 @@ void k_fly(void)
     case 1:
         cur_obj->state_list = sl_15A6;
         set_player_state(4);
-        coll[0].masks = an_15B6;
+        plr.coll.masks = an_15B6;
         cur_obj->box[0].hitflag = 1;
         pending_state = 0;
         ai_result |= 2;
         cur_obj->tick_period = 4;
         /* fallthrough */
     case 2:
-        if (plr_D8B6 <= 0) {
+        if (plr.plr_D8B6 <= 0) {
             k_fall(0);
             break;
         }
-        k_i = ~plr_D8AE & inp_dir;
+        k_i = ~plr.plr_D8AE & inp_dir;
         set_motion(k_i);
-        if (plr_D8B4 != 0) {
+        if (plr.plr_D8B4 != 0) {
             v = LONG(cur_obj->vx_hi, cur_obj->vx_lo);
             SETLONG(cur_obj->vx_hi, cur_obj->vx_lo, (s32)((u32)v << 1));
             v = LONG(cur_obj->vy_hi, cur_obj->vy_lo);
             SETLONG(cur_obj->vy_hi, cur_obj->vy_lo, (s32)((u32)v << 1));
         }
         dir_latch_release();
-        pending_state = player_dir & 1;
+        pending_state = plr.player_dir & 1;
         ai_result |= 6;
         break;
     case 3:
-        for (k_i = 0; k_i < coll[0].n; k_i++)
-            plr_D8AE |= an_15B6[coll[0].dir[k_i] + 5];
+        for (k_i = 0; k_i < plr.coll.n; k_i++)
+            plr.plr_D8AE |= an_15B6[plr.coll.dir[k_i] + 5];
         break;
     case 4:
         die_hit();
@@ -738,7 +726,7 @@ void k_fly(void)
 }
 
 /* @0E62:14D7 file:112F7 k_state3 — AI-тип 3: player_state 3, движение во
- * все стороны вдвое медленнее без предмета 8 (plr_D8BA); лестница —
+ * все стороны вдвое медленнее без предмета 8 (plr.plr_D8BA); лестница —
  * выход на неё */
 void k_state3(void)
 {
@@ -748,7 +736,7 @@ void k_state3(void)
         cur_obj->misc = 0;
         item_set_active(0xF, 1);
         set_player_state(3);
-        coll[0].masks = an_164A;
+        plr.coll.masks = an_164A;
         cur_obj->box[0].hitflag = 1;
         cur_obj->state_list = sl_160A;
         pending_state = 0;
@@ -761,37 +749,37 @@ void k_state3(void)
             o->misc = 6;
             o->active = 1;
         }
-        k_i = ~plr_D8AE & inp_dir;
+        k_i = ~plr.plr_D8AE & inp_dir;
         set_motion(k_i);
-        if (plr_D8BA == 0) {
+        if (plr.plr_D8BA == 0) {
             SETLONG(cur_obj->vx_hi, cur_obj->vx_lo, LONG(cur_obj->vx_hi, cur_obj->vx_lo) >> 1);
             SETLONG(cur_obj->vy_hi, cur_obj->vy_lo, LONG(cur_obj->vy_hi, cur_obj->vy_lo) >> 1);
         }
         cur_obj->vx_lo &= 0x8000;
         dir_latch_release();
-        pending_state = (inp_dir & 4 ? 2 : 0) + (player_dir & 1) + (plr_D8BA != 0 ? 4 : 0);
+        pending_state = (inp_dir & 4 ? 2 : 0) + (plr.player_dir & 1) + (plr.plr_D8BA != 0 ? 4 : 0);
         ai_result |= 6;
         break;
     case 3:
-        for (k_i = 0; k_i < coll[0].n; k_i++) {
-            switch (coll[0].attr[k_i]) {
+        for (k_i = 0; k_i < plr.coll.n; k_i++) {
+            switch (plr.coll.attr[k_i]) {
             case 1: case 2:
                 o = cur_obj;
                 if (o->vy_hi < 0) {
                     o->vy_hi = 0; o->vy_lo = 0;
                     o->ay_hi = 0; o->ay_lo = 0;
                 }
-                cur_obj->y_world = coll[0].y[k_i];
-                plr_D8AE |= an_164A[coll[0].dir[k_i] + 5] & 0xC;
+                cur_obj->y_world = plr.coll.y[k_i];
+                plr.plr_D8AE |= an_164A[plr.coll.dir[k_i] + 5] & 0xC;
                 break;
             case 7:
                 item_set_active(0xF, 0);
-                plr_D8BA = 0;
-                ladder_col = coll[0].col[k_i];
+                plr.plr_D8BA = 0;
+                ladder_col = plr.coll.col[k_i];
                 ladder_grab();
                 break;
             default:
-                plr_D8AE |= an_164A[coll[0].dir[k_i] + 5];
+                plr.plr_D8AE |= an_164A[plr.coll.dir[k_i] + 5];
                 break;
             }
         }
@@ -840,7 +828,7 @@ void karnov_death(void)
         o = cur_obj;
         o->tick_period = 8;
         o->state_list = sl_1682;
-        coll[0].masks = an_169A;
+        plr.coll.masks = an_169A;
         o->num_bboxes = 1;
         o->box[0].hitflag = 0;
         o->vx_hi = 0; o->vx_lo = 0;
@@ -870,13 +858,13 @@ void karnov_death(void)
             end_life();
         break;
     case 3:
-        if (karnov_mode == 7 || cur_obj->misc == 0)
+        if (plr.karnov_mode == 7 || cur_obj->misc == 0)
             break;
-        for (k_i = 0; k_i < coll[0].n; k_i++) {
-            if (coll[0].dir[k_i] != 4)
+        for (k_i = 0; k_i < plr.coll.n; k_i++) {
+            if (plr.coll.dir[k_i] != 4)
                 continue;
             o = cur_obj;
-            o->y_world = coll[0].y[k_i] - sprite_h[o->box[0].sprite];
+            o->y_world = plr.coll.y[k_i] - sprite_h[o->box[0].sprite];
             o->vy_hi = 0; o->vy_lo = 0;
             o->ay_hi = 0; o->ay_lo = 0;
             o->misc = 0;

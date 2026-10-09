@@ -5,20 +5,6 @@
  * снаряды), с нечётным — 1 (враги). active_index[k*2 + p] — k-й активный
  * объект цепочки p; active_count[p] — их число. */
 #include "orig/fn.h"
-#include "orig/todo.h"
-
-#define OBJ_ADDR(i) (0x2824u + (u16)(i) * ActiveObject_SIZE)
-
-static ActiveObject *free_link(ActiveObject *o)
-{
-    return ds_resolve((u32)LONG(o->y_screen, o->x_screen));
-}
-
-static void set_free_link(ActiveObject *o, u32 segoff)
-{
-    o->x_screen = (s16)segoff;
-    o->y_screen = (s16)(segoff >> 16);
-}
 
 /* @006E:0002 file:01EE2 init_object_pool */
 void init_object_pool(void)
@@ -38,21 +24,16 @@ void init_object_pool(void)
         o = &all_objects[si];
         free_head[si] = o;
         for (di = si; di < 0x80; di += 2, o += 2) {
-            set_free_link(o, (u32)DS_SEG << 16 | (u16)(OBJ_ADDR(di) + 0x1EA));
+            o->next_free = o + 2;
             o->self_idx = di;
         }
-        set_free_link(&all_objects[si + 0x7E], 0);
+        all_objects[si + 0x7E].next_free = NULL;
     }
 }
 
 /* @006E:00D1 file:01FB1 objects_init */
 void objects_init(void)
 {
-    switch (level_mode) {
-    case 0: case 2: obj_2592 = 0x24; obj_271A = 0x1E; break;
-    case 1:         obj_2592 = 0x12; obj_271A = 0x1E; break;
-    case 3:         obj_2592 = 0x48; obj_271A = 0x1E; break;
-    }
     init_object_pool();
     pair_dx = 0xF;
     pair_dy = 0x32;
@@ -66,7 +47,7 @@ s16 alloc_object(s16 parity)
     if (free_head[parity] == NULL)
         return -1;
     o = free_head[parity];
-    free_head[parity] = free_link(o);
+    free_head[parity] = o->next_free;
     di = active_count[parity] * 2 + parity;
     active_index[di] = o->self_idx;
     o->stamped = 0;
@@ -86,21 +67,32 @@ s16 alloc_object(s16 parity)
     return o->self_idx;
 }
 
+/* Объект цепочки parity или NULL (порт: обёртка шаблона оригинала). */
+ActiveObject *new_object(s16 parity)
+{
+    s16 i = alloc_object(parity);
+    return i < 0 ? NULL : &all_objects[i];
+}
+
 /* @006E:0226 file:02106 free_object — последний в цепочке занимает место
- * освобождённого */
+ * освобождённого. Пустая цепочка: после end_life внутри THINKCYCLE список
+ * удаления устарел — оригинал читал бы active_index[-1/-2], а пул всё
+ * равно сбрасывается в start_level. */
 void free_object(s16 idx)
 {
     ActiveObject *o;
     s16 p, di, last;
     unstamp_object(&all_objects[idx]);
     p = idx & 1;
+    if (active_count[p] == 0)
+        return;
     active_count[p]--;
     o = &all_objects[idx];
     di = o->active_pos;
     last = active_index[active_count[p] * 2 + p];
     active_index[di] = last;
     all_objects[last].active_pos = di;
-    set_free_link(o, ds_unresolve(free_head[p]));
+    o->next_free = free_head[p];
     free_head[p] = o;
 }
 
@@ -134,7 +126,7 @@ static void unstamp_restore(ActiveObject *o)
         for (di = r0; di < r1; di++) {
             si = c0;
             for (co = (u16)(si * 2); si < c1; si++, co += 2)
-                MAP_WR(di, co + 1, TILE_ATTR(MAP_RD(di, co)));
+                map_wr(di, co + 1, TILE_ATTR(map_rd(di, co)));
         }
         rect_intersect(r, view_rect, v);
         c0 = PX_COL(v[0]);
@@ -144,7 +136,7 @@ static void unstamp_restore(ActiveObject *o)
         for (di = r0; di < r1; di++)
             for (si = c0; si < c1; si++)
                 draw_tile(si, di);
-        off = vb_row_off[v[1]] + v[0];
+        off = VB_ROW(v[1]) + v[0];
         h = v[3] - v[1] + 3;
         w = v[2] - v[0] + 1;
         if (h > 0 && w > 0)
@@ -202,25 +194,10 @@ void update_bboxes(ActiveObject *o)
 /* @006E:060A file:024EA update_all_bboxes */
 static void update_all_bboxes(void)
 {
-    s16 p, k, end, n, di, si, v;
-    ActiveObject *o;
-    SpriteBox *b;
-    for (p = 0; p < 2; p++) {
-        end = active_count[p] * 2 + p;
-        for (k = p; k < end; k += 2) {
-            o = &all_objects[active_index[k]];
-            n = o->num_bboxes;
-            for (di = 0, b = &o->box[0]; di < n; di++, b++) {
-                si = b->sprite;
-                v = o->x_world + b->dx;
-                b->x0 = v;
-                b->x1 = v + sprite_w[si];
-                v = o->y_world + b->dy;
-                b->y0 = v;
-                b->y1 = v + sprite_h[si];
-            }
-        }
-    }
+    s16 p, k;
+    for (p = 0; p < 2; p++)
+        for (k = p; k < active_count[p] * 2 + p; k += 2)
+            update_bboxes(&all_objects[active_index[k]]);
 }
 
 /* @006E:06D3 file:025B3 UPDATELOCS — фаза 1: x += vx, y += vy, vx += ax,
@@ -259,12 +236,17 @@ s16 any_box_visible(ActiveObject *o)
     return vis;
 }
 
+/* Колонка бокса в буфере; у игрока в EGA выровнена на 4. */
+static u16 box_col(const SpriteBox *b, int ega_player)
+{
+    return ega_player ? (u16)(b->x0 & 0xFFFC) >> tile_shift : (u16)(s16)(b->x0 >> tile_shift);
+}
+
 /* @006E:0846 file:02726 ERASECYCLE — фаза 11: стереть спрайты
- * невпечатанных объектов. В EGA игрок (obj_type 0) выровнен на 4. */
+ * невпечатанных объектов */
 void ERASECYCLE(void)
 {
-    s16 p, k, end, si, ega_player, row;
-    u16 col;
+    s16 p, k, end, si, ega_player;
     ActiveObject *o;
     SpriteBox *b;
     for (p = 0; p < 2; p++) {
@@ -274,50 +256,26 @@ void ERASECYCLE(void)
             ega_player = level_mode == 1 && o->obj_type == 0;
             if (o->stamped != 0)
                 continue;
-            for (si = 0, b = &o->box[0]; o->num_bboxes > si; si++, b++) {
-                if (!box_visible(b))
-                    continue;
-                if (ega_player)
-                    col = (u16)(b->x0 & 0xFFFC) >> tile_shift;
-                else
-                    col = (u16)(b->x0 >> tile_shift);
-                row = b->y0 > 0 ? b->y0 : 0;
-                sprite_erase(vb_row_off[row] + col, b->sprite,
-                             ega_player ? 0 : b->x0 & 1);
-            }
+            for (si = 0, b = &o->box[0]; o->num_bboxes > si; si++, b++)
+                if (box_visible(b))
+                    sprite_erase(VB_ROW(b->y0 > 0 ? b->y0 : 0) + box_col(b, ega_player),
+                                 b->sprite, ega_player ? 0 : b->x0 & 1);
         }
     }
 }
 
-/* @006E:0976 file:02856 draw_object_sprites */
-static void draw_object_sprites(s16 idx)
+/* @006E:0976 file:02856 draw_object_sprites; для игрока в EGA —
+ * @006E:0A2A draw_player_ega (колонка выровнена на 4, без фазы) */
+static void draw_object_sprites(s16 idx, int ega_player)
 {
     ActiveObject *o = &all_objects[idx];
-    s16 n = o->num_bboxes, si, row, col, phase;
+    s16 n = o->num_bboxes, si, phase;
     SpriteBox *b;
     for (si = 0, b = &o->box[0]; si < n; si++, b++) {
         if (!box_visible(b))
             continue;
-        col = (s16)(b->x0 >> tile_shift);
-        row = b->y0 > 0 ? b->y0 : 0;
-        phase = sprite_phase_on ? b->x0 & vid_AF1E : 0;
-        sprite_blit(vb_row_off[row] + col, b->sprite, phase, 0);
-    }
-}
-
-/* @006E:0A2A file:0290A draw_player_ega — колонка выровнена на 4, без фазы */
-static void draw_player_ega(s16 idx)
-{
-    ActiveObject *o = &all_objects[idx];
-    s16 n = o->num_bboxes, si, row;
-    u16 col;
-    SpriteBox *b;
-    for (si = 0, b = &o->box[0]; si < n; si++, b++) {
-        if (!box_visible(b))
-            continue;
-        col = (u16)(b->x0 & 0xFFFC) >> tile_shift;
-        row = b->y0 > 0 ? b->y0 : 0;
-        sprite_blit(vb_row_off[row] + col, b->sprite, 0, 0);
+        phase = sprite_phase_on && !ega_player ? b->x0 & vid_AF1E : 0;
+        sprite_blit(VB_ROW(b->y0 > 0 ? b->y0 : 0) + box_col(b, ega_player), b->sprite, phase, 0);
     }
 }
 
@@ -342,8 +300,8 @@ static void draw_stamped(s16 idx)
                      view_rect[1] < di && di + h + 1 < view_rect[3];
         if (was == 0 && b->was_vis != 0) {
             phase = sprite_phase_on ? b->x0 & vid_AF1E : 0;
-            sprite_blit(vb_row_off[di] + si, b->sprite, phase, 1);
-            sprite_erase(vb_row_off[di] + si, b->sprite, phase);
+            sprite_blit(VB_ROW(di) + si, b->sprite, phase, 1);
+            sprite_erase(VB_ROW(di) + si, b->sprite, phase);
         }
     }
 }
@@ -356,21 +314,17 @@ void DRAWCYCLE(void)
     update_all_bboxes();
     for (si = 0; si < stamp_count; si++)
         draw_stamped(stamp_list[si]);
-    if (active_count[0] != 0) {
-        if (level_mode == 1)
-            draw_player_ega(active_index[0]);
-        else
-            draw_object_sprites(active_index[0]);
-    }
+    if (active_count[0] != 0)
+        draw_object_sprites(active_index[0], level_mode == 1);
     for (si = 0; si < active_count[1]; si++) {
         di = active_index[si * 2 + 1];
         if (all_objects[di].stamped == 0)
-            draw_object_sprites(di);
+            draw_object_sprites(di, 0);
     }
     for (si = 1; si < active_count[0]; si++) {
         di = active_index[si * 2];
         if (all_objects[di].stamped == 0)
-            draw_object_sprites(di);
+            draw_object_sprites(di, 0);
     }
 }
 

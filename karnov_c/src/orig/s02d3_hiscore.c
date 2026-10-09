@@ -3,7 +3,6 @@
 #include <string.h>
 #include "orig/fn.h"
 #include "orig/hw.h"
-#include "orig/todo.h"
 
 #define HS_SIZE 0x1F
 
@@ -30,8 +29,7 @@ static void hiscore_draw(void)
     video_reset();
     dm = demo_mode;
     demo_mode = 0;
-    bios_set_cursor(1, 0x14 - (s16)strlen(s_high_scores) / 2);
-    con_puts(s_high_scores);
+    draw_text("High Scores", 1);
     for (si = 0; si < 0xA; si++) {
         bcd_set(digits, 8, (s32)hs_score(si));
         hud_digits(digits, 8, 2, (si * 2 + 4) * 8);
@@ -50,7 +48,7 @@ static void hiscore_name(s16 n)
     dm = demo_mode;
     demo_mode = 0;
     set_sfx_enabled(1);
-    hw_pokeb(0, 0x417, 0);
+    bios_kbflags = 0;
     play_music(SND_STOP, 0x1000, 0);
     delay(0x64);
     play_music(MUSIC(0x08CC), 0x1000, 0);
@@ -109,7 +107,7 @@ void hiscore_enter(u8 *score)
         if (hs_score(si) >= v)
             continue;
         for (di = 8; di >= si; di--)
-            rtl_fmemcpy(&hiscores[(di + 1) * HS_SIZE], &hiscores[di * HS_SIZE], HS_SIZE);
+            memcpy(&hiscores[(di + 1) * HS_SIZE], &hiscores[di * HS_SIZE], HS_SIZE);
         hs_set_score(si, v);
         hiscores[si * HS_SIZE] = 0;
         hiscore_draw();

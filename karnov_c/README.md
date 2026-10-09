@@ -1,4 +1,48 @@
-# karnov_c — чистый C99 порт Karnov (Data East, 1987)
+# karnov_c — Karnov (Data East, 1987) на C99 + SDL2
+
+Две сборки (`make`):
+
+- **`karnov`** — перевод KARNOV.EXE на Си функция в функцию (`src/orig`);
+- **`karnov_old`** — прежний порт-реконструкция (`src/old`), см. ниже.
+
+## karnov — перевод KARNOV.EXE
+
+```bash
+make karnov
+cd ..               # каталог с LEVEL?.BIN, LEVEL?.MOV, SPRITES.EGA/CGA
+./karnov_c/karnov             # EGA, как в оригинале без Shift
+./karnov_c/karnov --menu      # меню видеорежима: CGA, EGA, Tandy, Hercules
+./karnov_c/karnov --no-audio
+```
+
+Опции для автоматических прогонов: `--headless` (без окна и звука),
+`--fast` (без выдержки реального времени), `--frames N` (выход после N
+кадров главного цикла).
+
+Управление — как в оригинале: направление «залипает» (цифровой блок,
+5 — стоп; стрелки работают как цифры, отпускание всех стрелок — 5),
+пробел или X — огонь, Z — предмет, Enter — начать игру, Esc — пауза,
+Q — выход, 1–4 — два игрока, джойстик, музыка, эффекты.
+
+Устройство:
+
+- `src/orig/sSSSS_*.c` — модули оригинала по сегментам; перед каждой
+  функцией тег `@SEG:OFF file:FFFFF` — её адрес в KARNOV.EXE
+  (`include/orig/fn.h` — прототипы);
+- `include/orig/ds.h`, `src/orig/ds.c` — глобалы сегмента данных с
+  начальными значениями (в комментариях — адреса DS);
+- `src/orig/hw*.c` — то, что оригинал делает портами и BIOS: EGA,
+  CGA, Tandy, Hercules и текст BIOS (`hw_video.c`), PIT и динамик
+  (`hw_sound.c`), клавиатура и джойстик (`hw.c`), детект машины;
+- `src/orig/main.c` — опции и события SDL.
+
+Где оригинал читает память за пределами массивов (мусор, зависящий от
+DOS и порядка загрузки), перевод использует определённые правила:
+клетки вне карты — пустой тайл (ниже предела камеры — пол), пиксель →
+клетка считается формулой, у объекта без анимации 0 кадров, нота за
+таблицей частот — неслышимый делитель.
+
+## karnov_old — прежний порт-реконструкция
 
 C99 порт DOS-игры Karnov на базе реверс-инжиниринга оригинального
 KARNOV.EXE. Использует:
@@ -13,24 +57,24 @@ KARNOV.EXE. Использует:
 AI-обработчиков) — в `../docs/reference/`; сводная документация по
 KARNOV.EXE и форматам файлов — `../KARNOV.md`.
 
-## Сборка и запуск
+### Сборка и запуск
 
 ```bash
-make                              # → ./karnov
-./karnov                          # splash LEVEL0 в SDL2-окне (с аудио)
-./karnov --no-audio               # без звука
-./karnov --cga                    # CGA-палитра вместо EGA
-./karnov --level 1                # загрузить LEVEL1.BIN
-./karnov --scale 4                # окно 320*4 × 168*4
-./karnov --ppm out.ppm --frame 50 # headless рендер 50-го кадра в PPM
-./karnov --music-test             # ждать один цикл loader-music и выйти
+make karnov_old                       # → ./karnov_old
+./karnov_old                          # splash LEVEL0 в SDL2-окне (с аудио)
+./karnov_old --no-audio               # без звука
+./karnov_old --cga                    # CGA-палитра вместо EGA
+./karnov_old --level 1                # загрузить LEVEL1.BIN
+./karnov_old --scale 4                # окно 320*4 × 168*4
+./karnov_old --ppm out.ppm --frame 50 # headless рендер 50-го кадра в PPM
+./karnov_old --music-test             # ждать один цикл loader-music и выйти
 ```
 
 Клавиатура в SDL2-окне: стрелки = R/L/D/U, **X или Space = FIRE, Z = OPTION**
 (как в оригинале: биты 0x10 и 0x20), ESC = выход. Движение влево/вправо
 также листает выбранный предмет OPTIONS (каждые 16 px пути).
 
-## Что работает
+### Что работает
 
 | Функция | Статус |
 |---------|--------|
@@ -58,7 +102,7 @@ make                              # → ./karnov
 | Жизни, level-end секвенция (босс → свиток) | ✅ |
 | Гэймплей: очки, THINKCYCLE pair-loop 1:1 | ⚠️ частично (урон по subtype) |
 
-## Структура
+### Структура
 
 ```
 karnov_c/

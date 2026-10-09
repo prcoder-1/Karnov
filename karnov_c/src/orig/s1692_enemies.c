@@ -1,9 +1,7 @@
 /* Модуль 0x1692 (file 0x18120) — AI-типы 43–47: летуны в зоне
  * (an_1D32[phase_ctr] — прямоугольник x0, y0, x1, y1) и стрелки. */
 #include "orig/fn.h"
-#include "orig/todo.h"
 
-#define ABS16(v) ((v) > 0 ? (v) : -(v))
 
 /* @1692:000D file:1812D zone_bounce — отражение от границ зоны; бит 0 —
  * по x, бит 1 — по y */

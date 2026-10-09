@@ -1,26 +1,12 @@
 /* Модуль 0x04E4 (file 0x6640) — партия: игроки, главный цикл, конец игры.
- *
- * Состояние текущего игрока — блок DS:D8AA..D94E (0xA5 байт); при смене
- * игрока он копируется (fmemcpy) в player_rec[cur_player] и обратно. */
+ * Состояние текущего игрока (plr) при смене игрока копируется в
+ * player_rec[cur_player] и обратно. */
 #include <stdio.h>
 #include <string.h>
+#include "fsopen.h"
 #include "orig/fn.h"
 #include "orig/port.h"
-#include "orig/todo.h"
 #include "orig/hw.h"
-
-#define PLAYER_BLOCK 0xD8AA
-#define PLAYER_SIZE  0xA5
-
-static void player_save(void)
-{
-    ds_copy_out(PLAYER_BLOCK, PLAYER_SIZE, &player_rec[cur_player * PLAYER_SIZE]);
-}
-
-static void player_load(void)
-{
-    ds_copy_in(PLAYER_BLOCK, PLAYER_SIZE, &player_rec[cur_player * PLAYER_SIZE]);
-}
 
 /* @04E4:000B file:0664B draw_text — по центру 40-символьной строки */
 void draw_text(const char *s, s16 row)
@@ -29,49 +15,43 @@ void draw_text(const char *s, s16 row)
     con_puts(s);
 }
 
+/* Пока файла нет — просить диск и ждать клавишу (порт: общий шаблон
+ * загрузчиков оригинала). */
+void wait_for_file(const char *name, const char *msg)
+{
+    FILE *fp;
+    while ((fp = karnov_fopen(name, "rb")) == NULL) {
+        clear_screen();
+        draw_text(msg, 10);
+        draw_text("any key when ready", 12);
+        while (read_key() == 0)
+            ;
+        clear_screen();
+    }
+    fclose(fp);
+}
+
 /* @04E4:003F file:0667F start_level — блок игрока, загрузка уровня,
- * границы мира и камеры по видеорежиму */
+ * границы мира и камеры (в колонках буфера, cw на тайл) */
 static void start_level(void)
 {
-    player_load();
+    s16 cw;
+    plr = player_rec[cur_player];
     if (demo_mode == 0) {
         clear_screen();
-        sprintf(msg_buf, s_ready_player, cur_player + 1);
+        sprintf(msg_buf, "Ready Player %1d", cur_player + 1);
         draw_text(msg_buf, 10);
     }
     enter_level();
-    switch (level_mode) {
-    case 0: case 2:
-        world_rect[0] = 0;
-        world_rect[1] = 0;
-        world_rect[2] = map_cols * 4;
-        world_rect[3] = map_rows * 10;
-        cam_rect[0] = -20;
-        cam_rect[1] = -30;
-        cam_rect[2] = (map_cols + 9) * 4;
-        cam_rect[3] = (map_rows + 3) * 10;
-        break;
-    case 3:
-        world_rect[0] = 0;
-        world_rect[1] = 0;
-        world_rect[2] = map_cols * 8;
-        world_rect[3] = map_rows * 10;
-        cam_rect[0] = -40;
-        cam_rect[1] = -30;
-        cam_rect[2] = (map_cols + 9) * 8;
-        cam_rect[3] = (map_rows + 3) * 10;
-        break;
-    case 1:
-        world_rect[0] = 0;
-        world_rect[1] = 0;
-        world_rect[2] = map_cols * 2;
-        world_rect[3] = map_rows * 10;
-        cam_rect[0] = -10;
-        cam_rect[1] = -30;
-        cam_rect[2] = (map_cols + 9) * 2;
-        cam_rect[3] = (map_rows + 3) * 10;
-        break;
-    }
+    cw = 8 >> tile_shift;
+    world_rect[0] = 0;
+    world_rect[1] = 0;
+    world_rect[2] = map_cols * cw;
+    world_rect[3] = map_rows * 10;
+    cam_rect[0] = -5 * cw;
+    cam_rect[1] = -30;
+    cam_rect[2] = (map_cols + 9) * cw;
+    cam_rect[3] = (map_rows + 3) * 10;
     frame_no = 0;
     init_object_pool();
     level_clear_state();
@@ -79,48 +59,48 @@ static void start_level(void)
 }
 
 /* @04E4:018D file:067CD end_life — после выхода из main_loop: смерть
- * (player_state 6/7) или демо — жизнь долой; иначе — следующий уровень.
+ * (plr.player_state 6/7) или демо — жизнь долой; иначе — следующий уровень.
  * Кончились жизни или пройден уровень 9 — экран конца игры. */
 void end_life(void)
 {
     s16 swap = 0, prev_level;
     play_music(SND_STOP, 0x64, 0);
-    prev_level = current_level;
-    if (player_state == 6 || player_state == 7 || demo_mode != 0) {
+    prev_level = plr.current_level;
+    if (plr.player_state == 6 || plr.player_state == 7 || demo_mode != 0) {
         if (demo_mode == 0)
-            lives--;
-        if (lives == 0) {
+            plr.lives--;
+        if (plr.lives == 0) {
             game_over_screen();
             if (--players_left != 0)
                 swap++;
         }
         if (demo_mode != 0) {
-            respawn_D8CC = 10;
-            respawn_y = 10;
-            respawn_x = 10;
+            plr.respawn_D8CC = 10;
+            plr.respawn_y = 10;
+            plr.respawn_x = 10;
         }
-        player_save();
+        player_rec[cur_player] = plr;
         if (players_left == 2 && demo_mode == 0)
             swap++;
         if (swap)
             cur_player = 1 - cur_player;
-        player_load();
+        plr = player_rec[cur_player];
         if (demo_mode != 0)
             demo_ptr->pos = 0;
     } else {
-        current_level++;
-        respawn_D8CC = 10;
-        respawn_y = 10;
-        respawn_x = 10;
-        if (current_level > 9) {
+        plr.current_level++;
+        plr.respawn_D8CC = 10;
+        plr.respawn_y = 10;
+        plr.respawn_x = 10;
+        if (plr.current_level > 9) {
             game_over_screen();
             if (--players_left != 0)
                 swap++;
         }
-        player_save();
+        player_rec[cur_player] = plr;
         if (swap)
             cur_player = 1 - cur_player;
-        player_load();
+        plr = player_rec[cur_player];
     }
     free_all_objects();
     game_D564 = 1;
@@ -140,7 +120,6 @@ void main_loop(void)
     timer_ticks = t;
     do {
         frame_no++;
-        frame_total++;
         port_frame_hook();
         t = timer_ticks;
         UPDATELOCS();
@@ -158,7 +137,6 @@ void main_loop(void)
         }
         while ((s32)(timer_ticks - t) < 8)
             hw_wait_tick();
-        play_ticks += (s32)(timer_ticks - t);
     } while (in_game != 0);
 }
 
@@ -167,35 +145,32 @@ void main_loop(void)
 static void new_game(void)
 {
     s16 si;
-    u8 *r;
+    PlayerRec *r;
     video_reset();
     num_players = 1;
     if (demo_mode != 0) {
-        draw_text(s_copyright, 0x12);
-        draw_text(s_adaptation, 0x13);
+        draw_text("Karnov (C) 1987 Data East USA Inc.", 0x12);
+        draw_text("Adaptation by Quicksilver Software Inc", 0x13);
     } else {
         num_players += two_players;
     }
-    for (si = 0, r = player_rec; si < num_players; si++, r += PLAYER_SIZE) {
-        r[2] = 5; r[3] = 0;
-        r[0] = demo_mode != 0 ? 0 : 1; r[1] = 0;
-        if (port_opt.demo_level >= 0)       /* тест: как патч mkdump_exe.py */
-            r[0] = (u8)port_opt.demo_level;
-        r[0x9F] = 1; r[0xA0] = 0;
-        r[0x22] = 10; r[0x23] = 0;
-        r[0x20] = 10; r[0x21] = 0;
-        r[0x1E] = 10; r[0x1F] = 0;
+    for (si = 0, r = player_rec; si < num_players; si++, r++) {
+        r->lives = 5;
+        r->current_level = demo_mode != 0 ? 0 : 1;
+        r->firepower = 1;
+        r->respawn_D8CC = 10;
+        r->respawn_y = 10;
+        r->respawn_x = 10;
         items_reset(r);
-        bcd_set(r + 0x86, 8, 0);
-        r[0x8E] = 1; r[0x8F] = 0;
-        bcd_set(r + 0x95, 2, 0);
-        r[0x97] = 1; r[0x98] = 0;
+        bcd_set(r->score_bcd, 8, 0);
+        r->score_dirty = 1;
+        bcd_set(r->k_digits, 2, 0);
+        r->k_dirty = 1;
     }
     cur_player = 0;
     players_left = num_players;
     game_D564 = 1;
     timer_ticks = 0;
-    frame_total = 0;
 }
 
 /* @04E4:04FA file:06B3A game_over_screen — «THE END» с музыкой после
@@ -203,8 +178,8 @@ static void new_game(void)
 void game_over_screen(void)
 {
     clear_screen();
-    if (current_level > 9) {
-        sprintf(msg_buf, s_the_end, cur_player + 1);
+    if (plr.current_level > 9) {
+        sprintf(msg_buf, "THE END  Player %1d", cur_player + 1);
         draw_text(msg_buf, 10);
         if (opt_sfx != 0) {
             play_music(SND_STOP, 0x1000, 0);
@@ -216,12 +191,12 @@ void game_over_screen(void)
             goto scores;
         }
     } else {
-        sprintf(msg_buf, s_game_over, cur_player + 1);
+        sprintf(msg_buf, "Game Over Player %1d", cur_player + 1);
         draw_text(msg_buf, 10);
     }
     delay(200);
 scores:
-    hiscore_enter(score_bcd);
+    hiscore_enter(plr.score_bcd);
 }
 
 /* @04E4:05D4 file:06C14 play_game */
@@ -247,11 +222,10 @@ static void attract(void)
 /* @04E4:0621 file:06C61 game_run */
 void game_run(void)
 {
-    game_0CDD6 = 0;
     set_music_enabled(opt_music);
     set_sfx_enabled(opt_sfx);
     two_players = 0;
-    demo_buf[0].count = 0;
+    demo_buf.count = 0;
     cheat_pos = 0;
     god_mode = 0;
     while (quit_game == 0) {

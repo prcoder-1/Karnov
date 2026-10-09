@@ -1,14 +1,14 @@
 /* Модуль 0x11D6 (file 0x13560) — снаряды врагов и AI-типы 9–19.
  * Обработчики названы по AI-типу (индекс ai_handlers). */
+#include <math.h>
 #include "orig/fn.h"
-#include "orig/todo.h"
 
 /* @11D6:0006 file:13566 aim_speed — скорость к цели с модулем speed:
  * k = speed / max(2, |d|), v = d * k (целочисленно) */
 void aim_speed(s16 x0, s16 y0, s16 x1, s16 y1, s32 *vx, s32 *vy, s32 speed)
 {
     s32 dx = x1 - x0, dy = y1 - y0, d, k;
-    d = (s32)rtl_sqrt((double)(s32)((u32)dx * (u32)dx + (u32)dy * (u32)dy));
+    d = (s32)sqrt((double)(s32)((u32)dx * (u32)dx + (u32)dy * (u32)dy));
     if (d < 2)
         d = 2;
     k = speed / d;
@@ -29,11 +29,10 @@ void spawn_projectile(s16 x0, s16 y0, s16 tx, s16 ty, s16 kind, s32 speed, s16 f
 {
     ActiveObject *o;
     s32 vx, vy;
-    alloc_idx = alloc_object(1);
-    o = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+    o = new_object(1);
     if (o == NULL)
         return;
-    queue_state(o, (farfn)projectile);
+    queue_state(o, projectile);
     o->x_world = x0;
     o->y_world = y0;
     ty = flat != 0 ? y0 : ty;
@@ -262,10 +261,9 @@ void ai_t13(void)
             }
             ai_result |= 2;
         } else if (o->frame_idx == 1) {
-            alloc_idx = alloc_object(1);
-            n = alloc_idx < 0 ? NULL : &all_objects[alloc_idx];
+            n = new_object(1);
             if (n != NULL) {
-                queue_state(n, (farfn)ai_t12);
+                queue_state(n, ai_t12);
                 n->anim_len = 0;
                 handoff_obj = n;
                 ai_result |= 8;
@@ -342,7 +340,7 @@ void ai_t12(void)
         o = cur_obj;
         si = PX_COL(o->x_world >> tile_shift);
         di = PX_TROW(o->y_world + sprite_h[0x15]);
-        a = MAP_RD(di, (u16)(si * 2) + 1);
+        a = map_rd(di, (u16)(si * 2) + 1);
         if ((ATTR_PROP(a) & 9) && LONG(o->vy_hi, o->vy_lo) > 0) {
             if (o->misc++ < 3)
                 play_sound(8);
@@ -375,7 +373,7 @@ void ai_t15(void)
 {
     ActiveObject *o;
     s16 di = player_ptr->x_world - cur_obj->x_world;
-    s16 t = sprite_h[0x62] + player_y - (cur_obj->y_world + sprite_h[0x99]);
+    s16 t = sprite_h[0x62] + plr.player_y - (cur_obj->y_world + sprite_h[0x99]);
     s16 si = di > 0 ? 1 : 0, m, d;
     pending_state = si;
     switch (cur_state) {
@@ -472,7 +470,7 @@ void ai_t14(void)
 {
     ActiveObject *o;
     s16 di = player_ptr->x_world - cur_obj->x_world;
-    s16 t = sprite_h[0x62] + player_y - (cur_obj->y_world + sprite_h[0x96]);
+    s16 t = sprite_h[0x62] + plr.player_y - (cur_obj->y_world + sprite_h[0x96]);
     s16 si;
     if ((di > 0 ? di : -di) > 0x1E)
         si = di > 0 ? 1 : 0;
@@ -490,7 +488,7 @@ void ai_t14(void)
         o->phase_ctr = si;
         o->vx_hi = si != 0 ? 1 : -1;
         o->vy_hi = 2;
-        o->y_world = sprite_h[0x62] + player_y - sprite_h[0x96] - 0x14;
+        o->y_world = sprite_h[0x62] + plr.player_y - sprite_h[0x96] - 0x14;
         pending_state = si;
         ai_result |= 6;
         break;
@@ -560,7 +558,7 @@ void ai_t16(void)
         ai_result |= 6;
         break;
     case 2:
-        di = player_y - cur_obj->y_world;
+        di = plr.player_y - cur_obj->y_world;
         switch (cur_obj->phase_ctr) {
         case 0: case 1:
             o = cur_obj;
@@ -637,7 +635,7 @@ void ai_t18(void)
         SETLONG(o->vx_hi, o->vx_lo, si != 0 ? 0x18000L : (s32)0xFFFE8000L);
         o->vy_hi = 1;
         o->vy_lo = 0x8000;
-        o->y_world = sprite_h[0x62] + player_y - sprite_h[0xA4] - 0x14;
+        o->y_world = sprite_h[0x62] + plr.player_y - sprite_h[0xA4] - 0x14;
         o->state_list = sl_19B4;
         pending_state = si;
         ai_result |= 6;
@@ -645,7 +643,7 @@ void ai_t18(void)
     case 2:
         o = cur_obj;
         a = o->phase != 0 ? player_ptr->y_world - o->phase_ctr + 0x28 : 0;
-        t = player_y - a + sprite_h[0x62] - (cur_obj->y_world + sprite_h[0xA4]);
+        t = plr.player_y - a + sprite_h[0x62] - (cur_obj->y_world + sprite_h[0xA4]);
         switch (cur_obj->misc) {
         case 4:
             if (shots_alive == 0 || (di > 0 ? di : -di) <= 0xA) {
