@@ -3,7 +3,9 @@
  * Тики PIT детерминированы: их выполняет главный поток в hw_wait_tick,
  * когда оригинал ждёт ISR. После каждого тика состояние динамика (делитель
  * ch2 или 0 = молчит) кладётся в кольцо; SDL-колбэк синтезирует меандр,
- * расходуя кольцо с частотой тиков (синтез — как spk_sample в src/old/audio.c). */
+ * расходуя кольцо с частотой тиков (синтез — как spk_sample в src/old/audio.c).
+ * Очередь держится короткой, иначе звук отстаёт от кадра: рывки главного
+ * потока и расхождение часов звуковой карты её копят. */
 #include <SDL2/SDL.h>
 #include "orig/hw.h"
 #include "orig/port.h"
@@ -11,6 +13,8 @@
 #define PIT_HZ      1193182.0
 #define SAMPLE_RATE 44100
 #define RING        4096
+#define LAG_OK      4           /* тиков в очереди: больше — догонять на 6 % */
+#define LAG_MAX     32          /* больше — сбросить до LAG_OK */
 
 static u16 pit0_div;            /* 0 = 65536 */
 static u16 pit2_div;
@@ -89,7 +93,10 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
     double spt = SAMPLE_RATE / tick_hz();
     (void)ud;
     for (i = 0; i < n; i++) {
-        tick_acc += 1.0;
+        unsigned lag = ring_w - ring_r;
+        if (lag > LAG_MAX)
+            ring_r = ring_w - LAG_OK;
+        tick_acc += lag > LAG_OK ? 1.0625 : 1.0;
         if (tick_acc >= spt) {
             tick_acc -= spt;
             if (ring_r != ring_w)
