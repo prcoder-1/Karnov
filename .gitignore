@@ -5,3 +5,18 @@ karnov_c/karnov
 out/
 karnov_c/out/
 karnov_c/karnov_old
+
+# файлы оригинальной игры и локальные артефакты
+/KARNOV.EXE
+/KARNOV.TXT
+/KDUMP.EXE
+/LEVEL*.BIN
+/LEVEL*.MOV*
+/SPRITES.*
+/README.BAT
+/SPRDUMP_*.bin
+/Karnov.nes
+/karnov_arcade/
+/dosbox.conf
+/karnov
+/.claude/settings*.json
